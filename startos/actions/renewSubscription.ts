@@ -6,21 +6,7 @@ import { parseWireguardTunnelInfo } from '../utils'
 import { derivePublicKey } from '../keygen'
 import { requestRenewal } from '../apiClient'
 import { payTaskReplayId, recordPaymentThenRaiseTask } from '../settlement'
-import { payInvoice as lndPayInvoice } from 'lnd-startos/startos/actions/payInvoice'
-import { payInvoice as clnPayInvoice } from 'cln-startos/startos/actions/payInvoice'
-import { payInvoice as eclairPayInvoice } from 'eclair-startos/startos/actions/payInvoice'
-
-function resolvePayInvoice(targetNode: string) {
-  switch (targetNode) {
-    case 'cln':
-      return { packageId: 'c-lightning', payInvoiceAction: clnPayInvoice }
-    case 'eclair':
-      return { packageId: 'eclair', payInvoiceAction: eclairPayInvoice }
-    case 'lnd':
-    default:
-      return { packageId: 'lnd', payInvoiceAction: lndPayInvoice }
-  }
-}
+import { resolvePayInvoice } from './resolvePayInvoice'
 
 const { InputSpec, Value } = sdk
 

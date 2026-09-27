@@ -49,14 +49,40 @@ export interface RenewalOrder {
   renewalId: string
 }
 
+export interface BandwidthResetOrder {
+  invoice: string
+  paymentHash: string
+  resetId: string
+  amountSats: number
+  /** When the invoice expires; until then it also holds a monthly reset. */
+  expiresAt: string
+  /** Display only. */
+  currentUsagePercent?: number
+  resetsThisMonth?: number
+  maxResetsPerMonth?: number
+}
+
 /**
- * Helper to make JSON HTTP requests with timeout.
+ * A non-2xx answer from the TunnelSats API. The message keeps the historic
+ * `HTTP <status> from <url>: <message>` form; `status` and `apiMessage` let
+ * callers explain specific answers.
  */
-async function fetchJson<T>(
+export class ApiHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly url: string,
+    readonly apiMessage: string,
+  ) {
+    super(`HTTP ${status} from ${url}: ${apiMessage}`)
+    this.name = 'ApiHttpError'
+  }
+}
+
+async function fetchJsonWithStatus<T>(
   url: string,
   options: RequestInit = {},
   timeoutMs = 15000,
-): Promise<T> {
+): Promise<{ status: number; data: T }> {
   const controller = new AbortController()
   const id = setTimeout(() => controller.abort(), timeoutMs)
 
@@ -80,15 +106,28 @@ async function fetchJson<T>(
       } catch {
         errorBody = await response.text().catch(() => '')
       }
-      throw new Error(
-        `HTTP ${response.status} from ${url}: ${errorBody || response.statusText}`,
+      throw new ApiHttpError(
+        response.status,
+        url,
+        String(errorBody || response.statusText),
       )
     }
 
-    return (await response.json()) as T
+    return { status: response.status, data: (await response.json()) as T }
   } finally {
     clearTimeout(id)
   }
+}
+
+/**
+ * Helper to make JSON HTTP requests with timeout.
+ */
+async function fetchJson<T>(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = 15000,
+): Promise<T> {
+  return (await fetchJsonWithStatus<T>(url, options, timeoutMs)).data
 }
 
 /**
@@ -331,6 +370,224 @@ export async function requestRenewal(
     method: 'POST',
     body: JSON.stringify(params),
   })
+}
+
+const BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
+const BECH32_GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]
+const BOLT11_HRP = /^ln(?:bcrt|bc|tbs|tb|sb)([1-9]\d*)([munp])?$/
+const PAYMENT_HASH = /^[0-9a-f]{64}$/
+/** ISO 8601 with an explicit zone, as JSON dates are serialized. */
+const ISO_TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
+
+function bech32Polymod(hrp: string, words: readonly number[]): number {
+  let chk = 1
+  const step = (v: number) => {
+    const top = chk >>> 25
+    chk = ((chk & 0x1ffffff) << 5) ^ v
+    for (let i = 0; i < 5; i++) {
+      if ((top >>> i) & 1) chk ^= BECH32_GEN[i]
+    }
+  }
+  for (let i = 0; i < hrp.length; i++) step(hrp.charCodeAt(i) >>> 5)
+  step(0)
+  for (let i = 0; i < hrp.length; i++) step(hrp.charCodeAt(i) & 31)
+  for (const w of words) step(w)
+  return chk
+}
+
+function hrpAmountMsat(
+  digits: string,
+  unit: string | undefined,
+): bigint | null {
+  const n = BigInt(digits)
+  switch (unit) {
+    case undefined:
+      return n * 100_000_000_000n
+    case 'm':
+      return n * 100_000_000n
+    case 'u':
+      return n * 100_000n
+    case 'n':
+      return n * 100n
+    case 'p':
+      return n % 10n === 0n ? n / 10n : null
+    default:
+      return null
+  }
+}
+
+function words5ToHex32(words: readonly number[]): string | null {
+  if (words.length !== 52 || (words[51] & 0x0f) !== 0) return null
+  let value = 0
+  let bits = 0
+  let hex = ''
+  for (const w of words) {
+    value = (value << 5) | w
+    bits += 5
+    while (bits >= 8) {
+      bits -= 8
+      hex += ((value >>> bits) & 0xff).toString(16).padStart(2, '0')
+    }
+  }
+  return hex.length === 64 ? hex : null
+}
+
+/**
+ * Validates that `invoice` is a lowercase BOLT11 Bech32 invoice with a valid
+ * checksum, signature trailer, HRP amount matching `expected.amountSats`, and
+ * tagged payment hash (`p`) matching `expected.paymentHash`.
+ */
+function isValidBolt11Invoice(
+  invoice: string,
+  expected: { paymentHash: string; amountSats: number },
+): boolean {
+  if (invoice.length > 4000 || invoice !== invoice.toLowerCase()) return false
+  const sep = invoice.lastIndexOf('1')
+  if (sep < 4) return false
+
+  const hrp = invoice.slice(0, sep)
+  const hrpMatch = hrp.match(BOLT11_HRP)
+  if (!hrpMatch) return false
+  const msat = hrpAmountMsat(hrpMatch[1], hrpMatch[2])
+  if (msat === null || msat !== BigInt(expected.amountSats) * 1000n) {
+    return false
+  }
+
+  const data = invoice.slice(sep + 1)
+  // 7 (timestamp) + 55 (p tag) + 104 (signature + recovery ID) + 6 (checksum).
+  if (data.length < 172) return false
+  const words: number[] = []
+  for (let i = 0; i < data.length; i++) {
+    const w = BECH32_CHARSET.indexOf(data[i])
+    if (w < 0) return false
+    words.push(w)
+  }
+  if (bech32Polymod(hrp, words) !== 1) return false
+  if (words[words.length - 7] > 3) return false
+
+  const tagEnd = words.length - 110
+  let pos = 7
+  let paymentHash: string | null = null
+  while (pos < tagEnd) {
+    if (pos + 3 > tagEnd) return false
+    const tag = words[pos]
+    const len = (words[pos + 1] << 5) | words[pos + 2]
+    pos += 3
+    if (pos + len > tagEnd) return false
+    if (tag === 1) {
+      if (paymentHash !== null) return false
+      const decoded = words5ToHex32(words.slice(pos, pos + len))
+      if (!decoded) return false
+      paymentHash = decoded
+    }
+    pos += len
+  }
+  return paymentHash === expected.paymentHash
+}
+
+/**
+ * Requests a bandwidth reset invoice for an existing WireGuard public key.
+ * Each successful request reserves one of the monthly resets until its
+ * invoice expires, so callers should show a still-valid invoice again
+ * instead of requesting another.
+ *
+ * The answer is validated: the invoice is handed to the Lightning node and
+ * the hash names the pending payment on the device. `expiresAt` is required:
+ * without it a pending invoice cannot be safely shown again, and only a
+ * backend that reports typed reset status (needed to settle it) returns it.
+ */
+export async function requestBandwidthReset(
+  params: { wgPublicKey: string; serverId: string },
+  baseUrl = DEFAULT_API_BASE,
+): Promise<BandwidthResetOrder> {
+  const url = `${baseUrl.replace(/\/$/, '')}/api/public/v1/subscription/bandwidth-reset`
+  const raw = await fetchJson<Record<string, unknown>>(url, {
+    method: 'POST',
+    body: JSON.stringify(params),
+  })
+  const bad = (field: string) =>
+    new Error(`TunnelSats API returned an invalid bandwidth reset ${field}`)
+
+  const { invoice, paymentHash, resetId, amountSats, expiresAt } = raw ?? {}
+  if (typeof invoice !== 'string') throw bad('invoice')
+  if (typeof paymentHash !== 'string' || !PAYMENT_HASH.test(paymentHash))
+    throw bad('payment hash')
+  if (typeof resetId !== 'string' || !resetId) throw bad('ID')
+  if (
+    typeof amountSats !== 'number' ||
+    !Number.isSafeInteger(amountSats) ||
+    amountSats <= 0
+  )
+    throw bad('amount')
+  if (
+    typeof expiresAt !== 'string' ||
+    !ISO_TIMESTAMP.test(expiresAt) ||
+    Number.isNaN(Date.parse(expiresAt))
+  )
+    throw bad('expiry')
+  if (!isValidBolt11Invoice(invoice, { paymentHash, amountSats }))
+    throw bad('invoice')
+
+  const usage = Number(raw.currentUsagePercent)
+  const count = (v: unknown) =>
+    typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : undefined
+  return {
+    invoice,
+    paymentHash,
+    resetId,
+    amountSats,
+    // Normalized, so bridge.py and the action read the same instant.
+    expiresAt: new Date(expiresAt).toISOString(),
+    currentUsagePercent:
+      raw.currentUsagePercent != null && Number.isFinite(usage)
+        ? usage
+        : undefined,
+    resetsThisMonth: count(raw.resetsThisMonth),
+    maxResetsPerMonth: count(raw.maxResetsPerMonth),
+  }
+}
+
+export const RESET_STATES = [
+  'unpaid',
+  'processing',
+  'paid',
+  'failed',
+  'expired',
+] as const
+export type ResetState = (typeof RESET_STATES)[number] | 'unknown'
+
+/**
+ * The state of a bandwidth-reset payment, as bridge.py's _reset_state reads
+ * it: only an answer typed `bandwidth_reset` counts (an untyped `paid` is the
+ * order fallback of a backend that does not know resets); 404 is 'unknown'.
+ */
+export async function fetchBandwidthResetStatus(
+  paymentHash: string,
+  baseUrl = DEFAULT_API_BASE,
+): Promise<ResetState> {
+  const url = `${baseUrl.replace(/\/$/, '')}/api/public/v1/subscription/${encodeURIComponent(paymentHash)}`
+  let status: number
+  let data: Record<string, unknown>
+  try {
+    ;({ status, data } = await fetchJsonWithStatus<Record<string, unknown>>(
+      url,
+      { method: 'GET' },
+    ))
+  } catch (e) {
+    if (e instanceof ApiHttpError && e.status === 404) return 'unknown'
+    throw e
+  }
+  if (data?.type !== 'bandwidth_reset') {
+    throw new Error('The TunnelSats API does not confirm bandwidth resets yet')
+  }
+  const state = status === 202 ? 'processing' : data.status
+  if (!(RESET_STATES as readonly unknown[]).includes(state)) {
+    throw new Error(
+      `TunnelSats API returned an unknown bandwidth reset status: ${JSON.stringify(state)?.slice(0, 40)}`,
+    )
+  }
+  return state as ResetState
 }
 
 /**

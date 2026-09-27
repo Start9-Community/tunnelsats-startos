@@ -80,6 +80,20 @@ const dict = {
   'Checking pending payments': 76,
   'Payment settlement failed: ${error}': 77,
   'The payment was settled, but clearing its payment task on the Lightning node failed: ${error}. Retrying automatically.': 78,
+  'Reset Bandwidth': 79,
+  "Reset this month's bandwidth usage once it reaches 70% of the monthly limit. Resets per month are limited; the invoice is paid from your Lightning node.": 80,
+  'Bandwidth Reset Invoice Created': 81,
+  "A payment task has been raised on your Lightning node. Once it is paid, this month's bandwidth usage is reset.": 82,
+  'Pending Bandwidth Reset Invoice': 83,
+  'This reset was already requested and its invoice can still be paid until ${expiresAt}. Its payment task has been raised on your Lightning node again.': 84,
+  'Bandwidth Reset Paid': 85,
+  'The payment for this bandwidth reset was received; the reset is being applied.': 86,
+  'The monthly bandwidth reset limit is reached (${message}). An unpaid reset invoice keeps its reset reserved until it expires.': 87,
+  'The payment was received, but the bandwidth reset failed. Contact TunnelSats support with payment hash ${paymentHash}.': 88,
+  'Pay TunnelSats bandwidth reset invoice': 89,
+  'Invoice Expires': 90,
+  'Current Usage': 91,
+  'Resets Confirmed This Month': 92,
 } as const
 
 /**

@@ -9,6 +9,7 @@ import fcntl
 import time
 import socket
 import ipaddress
+import math
 import urllib.request
 import urllib.error
 from contextlib import contextmanager
@@ -318,7 +319,7 @@ def _confirmed_since(meta, wg_pubkey, since):
         last = last.replace(tzinfo=timezone.utc)
     return last >= since
 
-def lazy_sync(wg_pubkey):
+def lazy_sync(wg_pubkey, require_usage=False):
     """Refreshes the confirmed subscription state for wg_pubkey.
 
     Returns an explicit outcome: "confirmed" (API answered with a valid
@@ -379,11 +380,16 @@ def lazy_sync(wg_pubkey):
         if vpn_port:
             fields["vpnPort"] = vpn_port
 
-        if "bandwidth_used_gb" in response_data:
+        raw_usage = response_data.get("bandwidth_used_gb")
+        if raw_usage is not None and not isinstance(raw_usage, bool):
             try:
-                fields["bandwidth_used_gb"] = float(response_data["bandwidth_used_gb"])
+                usage = float(raw_usage)
+                if math.isfinite(usage) and usage >= 0:
+                    fields["bandwidth_used_gb"] = usage
             except (ValueError, TypeError):
                 pass
+        if require_usage and "bandwidth_used_gb" not in fields:
+            raise ValueError("TunnelSats API returned no valid bandwidth usage for this key")
 
         with meta_lock():
             if _superseded(wg_pubkey):
@@ -472,7 +478,8 @@ def subscription_sync_loop():
 
 # ─── Settlement watcher ──────────────────────────────────────────────────────
 # A Buy action leaves `pendingOrder` (with the private key generated on this
-# server) in the metadata, a Renew action `pendingRenewal`. settle_pending()
+# server) in the metadata, a Renew action `pendingRenewal`, a Reset Bandwidth
+# action `pendingReset`. settle_pending()
 # finishes them once paid, so no step outside StartOS is needed. It runs as a
 # StartOS health check (see startos/settlement.ts) every 20 s.
 #
@@ -483,10 +490,12 @@ def subscription_sync_loop():
 # would run a `PostUp`). Anything incomplete or unexpected fails closed: the
 # pending order and its key stay, and the tick retries after a delay.
 
-PENDING_KINDS = (("order", "pendingOrder"), ("renewal", "pendingRenewal"))
-# Replay IDs of the Pay Invoice tasks the Buy/Renew actions raise on the node.
-# Must match payTaskReplayId() in startos/settlement.ts (see pay_task_replay_id).
-PAY_TASK_REPLAY_PREFIX = {"order": "tunnelsats-order", "renewal": "tunnelsats-renewal"}
+PENDING_KINDS = (("order", "pendingOrder"), ("renewal", "pendingRenewal"), ("reset", "pendingReset"))
+KIND_BY_KEY = {key: kind for kind, key in PENDING_KINDS}
+# Replay IDs of the Pay Invoice tasks the Buy/Renew/Reset actions raise on the
+# node. Must match payTaskReplayId() in startos/settlement.ts (see pay_task_replay_id).
+PAY_TASK_REPLAY_PREFIX = {"order": "tunnelsats-order", "renewal": "tunnelsats-renewal",
+                          "reset": "tunnelsats-reset"}
 # Lightning invoices from TunnelSats expire after an hour; a day without
 # payment means the pending state can go.
 PENDING_TTL = timedelta(hours=24)
@@ -707,7 +716,7 @@ def _clear_pending(meta, key, payment_hash):
     pending = meta.get(key)
     if not isinstance(pending, dict) or pending.get("paymentHash") != payment_hash:
         return False
-    kind = "order" if key == "pendingOrder" else "renewal"
+    kind = KIND_BY_KEY[key]
     node = pending.get("targetNode")
     meta.pop(key, None)
     if node in TARGET_NODES:
@@ -815,13 +824,82 @@ def _settle_renewal(pending, now):
     raise SettlementError("The renewal is paid, but its new expiry could not be confirmed yet")
 
 
+RESET_STATES = ("unpaid", "processing", "paid", "failed", "expired")
+
+
+def _reset_state(payment_hash):
+    """The typed state of a bandwidth-reset payment, or 'unknown' (404).
+    Only an answer typed `bandwidth_reset` counts: an untyped `paid` is the
+    order fallback of a backend that does not know resets, and it says
+    nothing about whether the reset was applied."""
+    try:
+        status, data = _api_call("GET", f"/subscription/{payment_hash}")
+    except _ApiHttpError as e:
+        if e.code == 404:
+            return "unknown"
+        raise
+    if data.get("type") != "bandwidth_reset":
+        raise SettlementError("The TunnelSats API does not confirm bandwidth resets yet; retrying")
+    state = "processing" if status == 202 else data.get("status")
+    if state not in RESET_STATES:
+        raise SettlementError(f"TunnelSats API returned an unknown reset status: {str(state)[:40]!r}")
+    return state
+
+
+def _settle_reset(pending, now):
+    payment_hash = pending["paymentHash"]
+    state = _reset_state(payment_hash)
+    created = _parse_iso(pending.get("createdAt"))
+    stale = created is not None and now - created >= PENDING_TTL
+
+    if state == "processing":
+        return _outcome("reset", "waiting", "Payment received; the bandwidth reset is being applied.", payment_hash)
+    if state in ("unpaid", "unknown"):
+        # The invoice cannot be paid after it expires; without a recorded
+        # expiry, the same day-long limit as Buy/Renew applies.
+        expires = _parse_iso(pending.get("expiresAt"))
+        if (expires is not None and now >= expires) or stale:
+            _finish_pending("pendingReset", payment_hash)
+            return _outcome("reset", "expired", "The bandwidth reset invoice expired unpaid; it was cleared.",
+                            payment_hash)
+        if state == "unknown":
+            raise SettlementError("The TunnelSats API has no record of this bandwidth reset")
+        return _outcome("reset", "waiting", "Waiting for the bandwidth reset invoice to be paid.", payment_hash)
+    if state == "expired":
+        _finish_pending("pendingReset", payment_hash)
+        return _outcome("reset", "expired", "The bandwidth reset invoice expired unpaid; it was cleared.",
+                        payment_hash)
+    if state == "failed":
+        raise SettlementError(
+            f"The payment was received, but the bandwidth reset failed. Contact TunnelSats support "
+            f"with payment hash {payment_hash}."
+        )
+
+    # paid: applied server-side to the key it was bought for.
+    key = pending.get("publicKey")
+    if not key or key != get_wg_pubkey():
+        _finish_pending("pendingReset", payment_hash)
+        return _outcome("reset", "superseded",
+                        "The bandwidth reset was applied to a key that is no longer configured.", payment_hash)
+    result = lazy_sync(key, require_usage=True)
+    if result == "confirmed":
+        _finish_pending("pendingReset", payment_hash)
+        return _outcome("reset", "reset", "The bandwidth reset was applied.", payment_hash)
+    if result == "superseded":
+        return _outcome("reset", "waiting", "The configured key changed; checking again.", payment_hash)
+    raise SettlementError("The bandwidth reset was applied, but the refreshed usage could not be confirmed yet")
+
+
+_SETTLERS = {"order": _settle_order, "renewal": _settle_renewal, "reset": _settle_reset}
+
+
 def _settle_one(kind, key, pending, now):
     payment_hash = pending["paymentHash"]
     retry_at = _parse_iso(pending.get("nextAttemptAt"))
     if retry_at is not None and retry_at > now:
         return _outcome(kind, "failed", str(pending.get("lastError") or "Retrying shortly."), payment_hash)
     try:
-        outcome = (_settle_order if kind == "order" else _settle_renewal)(pending, now)
+        outcome = _SETTLERS[kind](pending, now)
     except Exception as e:
         # SettlementError is an expected, explained failure; anything else is
         # a bug or an I/O error. Both keep the pending entry and retry later.
@@ -842,7 +920,7 @@ def _pay_tasks_to_clear(meta):
 def settle_pending(now=None):
     """One settlement tick. Returns {"outcomes": [...], "clearPayTasks": [...],
     "busy": bool}. Each outcome's result is one of "waiting", "provisioned",
-    "renewed", "superseded", "expired" or "failed". clearPayTasks lists the
+    "renewed", "reset", "superseded", "expired" or "failed". clearPayTasks lists the
     replay IDs of pay tasks whose payment is settled or expired; they stay
     listed until acknowledged with ack_pay_tasks, so a restart between
     settling and clearing the task cannot leave the task behind. The IDs are

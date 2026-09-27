@@ -47,6 +47,30 @@ export const metaShape = z.object({
     .optional()
     .nullable(),
   /**
+   * A bandwidth reset bought with the Reset Bandwidth action, settled by the
+   * settlement tick. The invoice is kept so the action can show it again
+   * instead of requesting another reset: each request reserves one of the
+   * monthly resets until its invoice expires.
+   */
+  pendingReset: z
+    .object({
+      paymentHash: z.string(),
+      resetId: z.string(),
+      invoice: z.string(),
+      /** When the invoice expires (from the API); absent on older backends. */
+      expiresAt: z.string().optional().catch(undefined),
+      createdAt: z.string(),
+      /** The key the reset was bought for. */
+      publicKey: z.string(),
+      serverId: z.string(),
+      targetNode: z.enum(['lnd', 'cln', 'eclair']),
+      amountSats: z.number().optional().catch(undefined),
+      lastError: z.string().optional().catch(undefined),
+      nextAttemptAt: z.string().optional().catch(undefined),
+    })
+    .optional()
+    .nullable(),
+  /**
    * Replay IDs of pay tasks whose payment is settled, expired or replaced by
    * a newer Buy/Renew, queued (by bridge.py or the purchase actions) until
    * the settlement health check has cleared them.

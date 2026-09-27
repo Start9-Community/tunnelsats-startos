@@ -9,7 +9,8 @@
  */
 
 export type TargetNode = 'lnd' | 'cln' | 'eclair'
-export type PaymentKind = 'order' | 'renewal'
+export type PaymentKind = 'order' | 'renewal' | 'reset'
+const PAYMENT_KINDS: readonly string[] = ['order', 'renewal', 'reset']
 
 const TARGET_NODES: readonly string[] = ['lnd', 'cln', 'eclair']
 
@@ -91,8 +92,41 @@ export interface PaymentRecordOps {
   raiseTask(): Promise<unknown>
 }
 
-// Buy and Renew share one queue: both rewrite payTasksToClear.
+// Buy, Renew and Reset share one queue: all rewrite payTasksToClear.
 let paymentRecordTail: Promise<unknown> = Promise.resolve()
+
+/**
+ * Runs `job` after every earlier payment job has finished, one at a time.
+ * All package procedures share one JS runtime, like the handoff queue
+ * (createHandoffQueue). A job must not enqueue another one and wait for it:
+ * that would wait on itself.
+ */
+export function runPaymentExclusive<T>(job: () => Promise<T>): Promise<T> {
+  const run = paymentRecordTail.then(job, job)
+  paymentRecordTail = run.catch(() => undefined)
+  return run
+}
+
+/**
+ * The body of recordPaymentThenRaiseTask, for callers that already run
+ * inside runPaymentExclusive (and must read their own state there too).
+ */
+export async function recordThenRaise(
+  kind: PaymentKind,
+  newHash: string,
+  ops: PaymentRecordOps,
+): Promise<void> {
+  const current = await ops.readCurrent()
+  await ops.record(
+    replacedPayTaskPatch(
+      kind,
+      current?.pending,
+      current?.payTasksToClear,
+      newHash,
+    ),
+  )
+  await ops.raiseTask()
+}
 
 /**
  * Records a new pending payment (queueing the task of the one it replaces)
@@ -101,34 +135,20 @@ let paymentRecordTail: Promise<unknown> = Promise.resolve()
  * task: the tick would clear and acknowledge the first task's ID before
  * the task existed, and the task raised afterwards would never be cleared.
  * The read happens inside the queue, so each purchase sees the previous
- * one's record. All package procedures share one JS runtime, like the
- * handoff queue (createHandoffQueue).
+ * one's record.
  */
 export function recordPaymentThenRaiseTask(
   kind: PaymentKind,
   newHash: string,
   ops: PaymentRecordOps,
 ): Promise<void> {
-  const job = async () => {
-    const current = await ops.readCurrent()
-    await ops.record(
-      replacedPayTaskPatch(
-        kind,
-        current?.pending,
-        current?.payTasksToClear,
-        newHash,
-      ),
-    )
-    await ops.raiseTask()
-  }
-  const run = paymentRecordTail.then(job, job)
-  paymentRecordTail = run.catch(() => undefined)
-  return run
+  return runPaymentExclusive(() => recordThenRaise(kind, newHash, ops))
 }
 
 const TERMINAL_RESULTS = [
   'provisioned',
   'renewed',
+  'reset',
   'superseded',
   'expired',
 ] as const
@@ -189,7 +209,7 @@ function isOutcome(value: unknown): value is SettlementOutcome {
   if (typeof value !== 'object' || value === null) return false
   const o = value as Record<string, unknown>
   return (
-    (o.kind === 'order' || o.kind === 'renewal') &&
+    PAYMENT_KINDS.includes(o.kind as string) &&
     RESULTS.includes(o.result as SettlementOutcome['result']) &&
     typeof o.message === 'string' &&
     typeof o.paymentHash === 'string'

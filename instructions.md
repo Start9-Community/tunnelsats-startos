@@ -40,6 +40,7 @@ TunnelSats provides dedicated, privacy-focused WireGuard VPN infrastructure spec
 - **Monthly Allowance**: Subscriptions include 100 GB of transfer bandwidth per calendar month. Bandwidth counters reset automatically on the 1st of every month.
 - **On-Demand Telemetry**: Current bandwidth usage and subscription validity are fetched on-demand when opening the Web Dashboard.
 - **Proactive Renewal Alerts**: StartOS generates proactive notification tasks 7 days, 3 days, and 1 day before expiration. You can renew at any time via the Web Dashboard.
+- **Bandwidth Reset**: Once this month's usage reaches 70% of the allowance, the **Reset Bandwidth** action (Subscription group) buys a reset of the monthly counter for a small fee, paid through a Pay Invoice task on your Lightning node. Resets per month are limited, and every requested invoice holds one of them until it is paid or expires, so running the action again while an invoice is still payable shows the same invoice instead of requesting a new one. The reset is confirmed automatically once the payment settles.
 
 ---
 

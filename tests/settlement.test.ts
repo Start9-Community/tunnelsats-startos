@@ -126,6 +126,43 @@ test('a settled payment clears its pay task, then acknowledges it', async () => 
   assert.deepEqual(calls.acked, [['tunnelsats-order:lnd']])
 })
 
+test('a bandwidth reset uses its own per-payment replay ID (matches bridge.py)', () => {
+  assert.equal(
+    payTaskReplayId('reset', 'lnd', H1),
+    `tunnelsats-reset:lnd:${H1.slice(0, 16)}`,
+  )
+})
+
+test('an applied bandwidth reset is reported settled and clears its task', async () => {
+  const id = payTaskReplayId('reset', 'lnd', H1)
+  const { ops, calls } = fakeOps(
+    ok({
+      outcomes: [outcome('reset', 'The bandwidth reset was applied.', 'reset')],
+      clearPayTasks: [id],
+      busy: false,
+    }),
+  )
+  assert.deepEqual(await runSettlementTick(ops), {
+    state: 'settled',
+    message: 'The bandwidth reset was applied.',
+  })
+  assert.deepEqual(calls.cleared, [id])
+})
+
+test('a failed bandwidth reset surfaces as failed', async () => {
+  const { ops } = fakeOps(
+    ok({
+      outcomes: [outcome('failed', 'Contact TunnelSats support', 'reset')],
+      clearPayTasks: [],
+      busy: false,
+    }),
+  )
+  assert.deepEqual(await runSettlementTick(ops), {
+    state: 'failed',
+    error: 'Contact TunnelSats support',
+  })
+})
+
 test('queued pay tasks from an earlier tick are cleared while idle', async () => {
   // The previous tick settled, then main restarted (config.json changed)
   // before clearTask ran.

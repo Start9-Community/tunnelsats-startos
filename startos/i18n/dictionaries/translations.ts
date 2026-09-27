@@ -80,6 +80,20 @@ export const es_ES: LangDict = {
   76: 'Comprobando los pagos pendientes',
   77: 'La liquidación del pago falló: ${error}',
   78: 'El pago se liquidó, pero no se pudo eliminar su tarea de pago en el nodo Lightning: ${error}. Se reintenta automáticamente.',
+  79: 'Restablecer ancho de banda',
+  80: 'Restablece el consumo de ancho de banda de este mes cuando alcanza el 70 % del límite mensual. Los restablecimientos por mes son limitados; la factura se paga desde tu nodo Lightning.',
+  81: 'Factura de restablecimiento de ancho de banda creada',
+  82: 'Se ha creado una tarea de pago en tu nodo Lightning. Una vez pagada, se restablece el consumo de ancho de banda de este mes.',
+  83: 'Factura de restablecimiento pendiente',
+  84: 'Este restablecimiento ya se solicitó y su factura se puede pagar hasta ${expiresAt}. Su tarea de pago se ha vuelto a crear en tu nodo Lightning.',
+  85: 'Restablecimiento de ancho de banda pagado',
+  86: 'Se recibió el pago de este restablecimiento de ancho de banda; se está aplicando.',
+  87: 'Se alcanzó el límite mensual de restablecimientos de ancho de banda (${message}). Una factura de restablecimiento sin pagar mantiene su restablecimiento reservado hasta que caduca.',
+  88: 'Se recibió el pago, pero el restablecimiento de ancho de banda falló. Contacta con el soporte de TunnelSats indicando el hash de pago ${paymentHash}.',
+  89: 'Pagar la factura de restablecimiento de ancho de banda de TunnelSats',
+  90: 'La factura caduca',
+  91: 'Consumo actual',
+  92: 'Restablecimientos confirmados este mes',
 }
 
 export const de_DE: LangDict = {
@@ -162,6 +176,20 @@ export const de_DE: LangDict = {
   76: 'Ausstehende Zahlungen werden geprüft',
   77: 'Zahlungsabwicklung fehlgeschlagen: ${error}',
   78: 'Die Zahlung wurde abgewickelt, aber ihre Zahlungsaufgabe auf dem Lightning-Node konnte nicht entfernt werden: ${error}. Wird automatisch erneut versucht.',
+  79: 'Bandbreite zurücksetzen',
+  80: 'Setzt den Bandbreitenverbrauch dieses Monats zurück, sobald er 70 % des Monatslimits erreicht. Die Zurücksetzungen pro Monat sind begrenzt; die Rechnung wird von Ihrem Lightning-Node bezahlt.',
+  81: 'Rechnung für Bandbreiten-Zurücksetzung erstellt',
+  82: 'Auf Ihrem Lightning-Node wurde eine Zahlungsaufgabe erstellt. Sobald sie bezahlt ist, wird der Bandbreitenverbrauch dieses Monats zurückgesetzt.',
+  83: 'Ausstehende Rechnung für Bandbreiten-Zurücksetzung',
+  84: 'Diese Zurücksetzung wurde bereits angefordert und ihre Rechnung kann noch bis ${expiresAt} bezahlt werden. Ihre Zahlungsaufgabe wurde auf Ihrem Lightning-Node erneut erstellt.',
+  85: 'Bandbreiten-Zurücksetzung bezahlt',
+  86: 'Die Zahlung für diese Bandbreiten-Zurücksetzung ist eingegangen; die Zurücksetzung wird angewendet.',
+  87: 'Das monatliche Limit für Bandbreiten-Zurücksetzungen ist erreicht (${message}). Eine unbezahlte Rechnung hält ihre Zurücksetzung reserviert, bis sie abläuft.',
+  88: 'Die Zahlung ist eingegangen, aber die Bandbreiten-Zurücksetzung ist fehlgeschlagen. Wenden Sie sich mit dem Zahlungs-Hash ${paymentHash} an den TunnelSats-Support.',
+  89: 'TunnelSats-Rechnung für Bandbreiten-Zurücksetzung bezahlen',
+  90: 'Rechnung läuft ab',
+  91: 'Aktueller Verbrauch',
+  92: 'Bestätigte Zurücksetzungen in diesem Monat',
 }
 
 export const pl_PL: LangDict = {
@@ -244,6 +272,20 @@ export const pl_PL: LangDict = {
   76: 'Sprawdzanie oczekujących płatności',
   77: 'Rozliczenie płatności nie powiodło się: ${error}',
   78: 'Płatność została rozliczona, ale nie udało się usunąć jej zadania płatności na węźle Lightning: ${error}. Ponawianie automatyczne.',
+  79: 'Zresetuj transfer',
+  80: 'Resetuje zużycie transferu w tym miesiącu, gdy osiągnie 70% miesięcznego limitu. Liczba resetów w miesiącu jest ograniczona; faktura jest opłacana z Twojego węzła Lightning.',
+  81: 'Utworzono fakturę za reset transferu',
+  82: 'Na Twoim węźle Lightning utworzono zadanie płatności. Po jego opłaceniu zużycie transferu w tym miesiącu zostanie zresetowane.',
+  83: 'Oczekująca faktura za reset transferu',
+  84: 'Ten reset został już zamówiony, a jego fakturę można opłacić do ${expiresAt}. Jego zadanie płatności zostało ponownie utworzone na Twoim węźle Lightning.',
+  85: 'Reset transferu opłacony',
+  86: 'Płatność za ten reset transferu została otrzymana; reset jest stosowany.',
+  87: 'Osiągnięto miesięczny limit resetów transferu (${message}). Nieopłacona faktura rezerwuje swój reset do czasu jej wygaśnięcia.',
+  88: 'Płatność została otrzymana, ale reset transferu nie powiódł się. Skontaktuj się z pomocą TunnelSats, podając hash płatności ${paymentHash}.',
+  89: 'Opłać fakturę TunnelSats za reset transferu',
+  90: 'Faktura wygasa',
+  91: 'Bieżące zużycie',
+  92: 'Potwierdzone resety w tym miesiącu',
 }
 
 export const fr_FR: LangDict = {
@@ -326,6 +368,20 @@ export const fr_FR: LangDict = {
   76: 'Vérification des paiements en attente',
   77: 'Le règlement du paiement a échoué : ${error}',
   78: 'Le paiement a été réglé, mais la suppression de sa tâche de paiement sur le nœud Lightning a échoué : ${error}. Nouvelle tentative automatique.',
+  79: 'Réinitialiser la bande passante',
+  80: "Réinitialise la consommation de bande passante de ce mois une fois qu'elle atteint 70 % de la limite mensuelle. Le nombre de réinitialisations par mois est limité ; la facture est payée depuis votre nœud Lightning.",
+  81: 'Facture de réinitialisation de bande passante créée',
+  82: 'Une tâche de paiement a été créée sur votre nœud Lightning. Une fois payée, la consommation de bande passante de ce mois est réinitialisée.',
+  83: 'Facture de réinitialisation en attente',
+  84: "Cette réinitialisation a déjà été demandée et sa facture peut encore être payée jusqu'au ${expiresAt}. Sa tâche de paiement a été recréée sur votre nœud Lightning.",
+  85: 'Réinitialisation de bande passante payée',
+  86: 'Le paiement de cette réinitialisation de bande passante a été reçu ; la réinitialisation est en cours.',
+  87: "La limite mensuelle de réinitialisations de bande passante est atteinte (${message}). Une facture de réinitialisation impayée garde sa réinitialisation réservée jusqu'à son expiration.",
+  88: 'Le paiement a été reçu, mais la réinitialisation de bande passante a échoué. Contactez le support TunnelSats avec le hash de paiement ${paymentHash}.',
+  89: 'Payer la facture de réinitialisation de bande passante TunnelSats',
+  90: 'Expiration de la facture',
+  91: 'Consommation actuelle',
+  92: 'Réinitialisations confirmées ce mois-ci',
 }
 
 export default {

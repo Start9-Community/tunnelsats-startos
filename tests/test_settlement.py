@@ -511,5 +511,209 @@ class TestSaveConfigurationSettlement(SettlementTestBase):
         self.assertEqual(self.read_meta()["pendingOrder"], order)
 
 
+RESET_HASH = "d" * 64
+RESET_TASK = "tunnelsats-reset:lnd:" + RESET_HASH[:16]
+
+
+class TestResetSettlement(SettlementTestBase):
+    """A Reset Bandwidth action leaves `pendingReset`. The tick polls the
+    typed reset status (backend heals a missed webhook on that poll) and
+    only reports success on an explicit, typed `paid`."""
+
+    def setUp(self):
+        super().setUp()
+        with open(bridge.CONFIG_PATH, "w") as f:
+            f.write(f"[Interface]\nPrivateKey = {self.priv}\nAddress = 10.9.0.7\n"
+                    f"\n[Peer]\nPublicKey = {SERVER_PUB}\nEndpoint = de2.tunnelsats.com:51820\n")
+
+    def pending_reset(self, **overrides):
+        reset = {
+            "paymentHash": RESET_HASH,
+            "resetId": "reset-1",
+            "invoice": "lnbc10u1pexample",
+            "expiresAt": iso(NOW + timedelta(minutes=55)),
+            "createdAt": iso(NOW - timedelta(minutes=5)),
+            "publicKey": self.pub,
+            "serverId": "de2.tunnelsats.com",
+            "targetNode": "lnd",
+        }
+        reset.update(overrides)
+        return {k: v for k, v in reset.items() if v is not None}
+
+    def reset_status(self, status, http=200, **extra):
+        payload = {"paymentHash": RESET_HASH, "type": "bandwidth_reset", "status": status,
+                   "resetId": "reset-1", "expiresAt": None, "message": "m"}
+        payload.update(extra)
+        self.api.on("GET", f"/subscription/{RESET_HASH}", response(payload, status=http))
+
+    def requested(self, method, path):
+        return (method, path) in [(m, p) for m, p, _ in self.api.requests]
+
+    def test_paid_reset_is_reported_cleared_and_its_task_queued(self):
+        self.write_meta({"pendingReset": self.pending_reset()})
+        self.reset_status("paid")
+        self.api.on("POST", "/subscription/status",
+                    response({"expiry": "2026-11-01T00:00:00.000Z", "bandwidth_used_gb": 0.4}))
+
+        result = self.settle()
+
+        outcome = self.only(result)
+        self.assertEqual((outcome["kind"], outcome["result"]), ("reset", "reset"))
+        meta = self.read_meta()
+        self.assertNotIn("pendingReset", meta)
+        self.assertEqual(result["clearPayTasks"], [RESET_TASK])
+        # The usage shown in StartOS is refreshed right away.
+        self.assertTrue(self.requested("POST", "/subscription/status"))
+        self.assertEqual(meta["bandwidth_used_gb"], 0.4)
+
+    def test_paid_reset_retries_usage_refresh_until_confirmed(self):
+        self.write_meta({"pendingReset": self.pending_reset(), "bandwidth_used_gb": 85.0})
+        self.reset_status("paid")
+        self.api.on("POST", "/subscription/status",
+                    http_error("u", 503, {"message": "status unavailable"}))
+
+        first = self.only(self.settle())
+        self.assertEqual(first["result"], "failed")
+        self.assertIn("pendingReset", self.read_meta())
+
+        self.api.on("POST", "/subscription/status",
+                    response({"expiry": "2026-11-01T00:00:00.000Z", "bandwidth_used_gb": 0.0}))
+        second = self.only(self.settle(now=NOW + bridge.SETTLE_RETRY_DELAY))
+        self.assertEqual(second["result"], "reset")
+        self.assertNotIn("pendingReset", self.read_meta())
+        self.assertEqual(self.read_meta()["bandwidth_used_gb"], 0.0)
+
+    def test_paid_reset_requires_bandwidth_used_gb_in_status_refresh(self):
+        self.write_meta({"publicKey": self.pub, "pendingReset": self.pending_reset(), "bandwidth_used_gb": 85.0})
+        self.reset_status("paid")
+        self.api.on("POST", "/subscription/status",
+                    response({"expiry": "2026-11-01T00:00:00.000Z"}))
+
+        first = self.only(self.settle())
+        self.assertEqual(first["result"], "failed")
+        self.assertIn("pendingReset", self.read_meta())
+        self.assertEqual(self.read_meta()["bandwidth_used_gb"], 85.0)
+
+        self.api.on("POST", "/subscription/status",
+                    response({"expiry": "2026-11-01T00:00:00.000Z", "bandwidth_used_gb": 0.2}))
+        second = self.only(self.settle(now=NOW + bridge.SETTLE_RETRY_DELAY))
+        self.assertEqual(second["result"], "reset")
+        self.assertNotIn("pendingReset", self.read_meta())
+        self.assertEqual(self.read_meta()["bandwidth_used_gb"], 0.2)
+
+    def test_paid_reset_older_than_24_hours_still_requires_confirmed_refresh(self):
+        self.write_meta({"publicKey": self.pub,
+                         "pendingReset": self.pending_reset(createdAt=iso(NOW - timedelta(hours=25))),
+                         "bandwidth_used_gb": 85.0})
+        self.reset_status("paid")
+        self.api.on("POST", "/subscription/status",
+                    http_error("u", 503, {"message": "status unavailable"}))
+
+        first = self.only(self.settle())
+        self.assertEqual(first["result"], "failed")
+        self.assertIn("pendingReset", self.read_meta())
+        self.assertEqual(self.read_meta()["bandwidth_used_gb"], 85.0)
+
+    def test_untyped_paid_from_the_old_fallback_never_counts_as_applied(self):
+        # Before the backend knew reset hashes, a paid one fell through to
+        # the order fallback ("paid, use /claim") without being applied.
+        self.write_meta({"pendingReset": self.pending_reset()})
+        self.api.on("GET", f"/subscription/{RESET_HASH}",
+                    response({"status": "paid", "message": "Payment confirmed. Use /claim to provision your VPN."}))
+
+        outcome = self.only(self.settle())
+
+        self.assertEqual(outcome["result"], "failed")
+        pending = self.read_meta()["pendingReset"]
+        self.assertIn("lastError", pending)
+        self.assertNotIn("payTasksToClear", self.read_meta())
+
+    def test_unpaid_reset_waits_then_expires_with_its_invoice(self):
+        self.write_meta({"pendingReset": self.pending_reset()})
+        self.reset_status("unpaid")
+        self.assertEqual(self.only(self.settle())["result"], "waiting")
+
+        result = self.settle(now=NOW + timedelta(hours=1))
+        self.assertEqual(self.only(result)["result"], "expired")
+        self.assertNotIn("pendingReset", self.read_meta())
+        self.assertEqual(result["clearPayTasks"], [RESET_TASK])
+
+    def test_unpaid_reset_without_expiry_falls_back_to_24_hours(self):
+        self.write_meta({"pendingReset": self.pending_reset(expiresAt=None)})
+        self.reset_status("unpaid")
+        self.assertEqual(self.only(self.settle(now=NOW + timedelta(hours=2)))["result"], "waiting")
+        self.assertEqual(self.only(self.settle(now=NOW + timedelta(hours=25)))["result"], "expired")
+
+    def test_processing_reset_waits(self):
+        self.write_meta({"pendingReset": self.pending_reset()})
+        self.reset_status("processing", http=202)
+        self.assertEqual(self.only(self.settle())["result"], "waiting")
+        self.assertIn("pendingReset", self.read_meta())
+
+    def test_expired_on_the_server_is_cleared(self):
+        self.write_meta({"pendingReset": self.pending_reset()})
+        self.reset_status("expired")
+        result = self.settle()
+        self.assertEqual(self.only(result)["result"], "expired")
+        self.assertNotIn("pendingReset", self.read_meta())
+        self.assertEqual(result["clearPayTasks"], [RESET_TASK])
+
+    def test_paid_but_failed_reset_keeps_support_record_past_24_hours(self):
+        self.write_meta({"pendingReset": self.pending_reset()})
+        self.reset_status("failed")
+
+        outcome = self.only(self.settle())
+        self.assertEqual(outcome["result"], "failed")
+        self.assertIn("support", outcome["message"])
+        self.assertIn(RESET_HASH, outcome["message"])
+        self.assertIn("pendingReset", self.read_meta())
+
+        # Even past 24 hours, a paid reset that failed server-side keeps its
+        # pending record so the health check and action still show the payment
+        # hash needed for support.
+        later = self.only(self.settle(now=NOW + timedelta(hours=25)))
+        self.assertEqual(later["result"], "failed")
+        self.assertIn("support", later["message"])
+        self.assertIn(RESET_HASH, later["message"])
+        self.assertIn("pendingReset", self.read_meta())
+
+    def test_paid_reset_for_a_replaced_key_is_superseded(self):
+        self.write_meta({"pendingReset": self.pending_reset(publicKey=OTHER_PUB)})
+        self.reset_status("paid")
+        result = self.settle()
+        self.assertEqual(self.only(result)["result"], "superseded")
+        self.assertNotIn("pendingReset", self.read_meta())
+        self.assertEqual(result["clearPayTasks"], [RESET_TASK])
+        self.assertFalse(self.requested("POST", "/subscription/status"))
+
+    def test_unverifiable_state_fails_closed_and_retries_later(self):
+        self.write_meta({"pendingReset": self.pending_reset()})
+        self.api.on("GET", f"/subscription/{RESET_HASH}",
+                    http_error("u", 503, {"message": "Unable to verify invoice payment; retry later"}))
+        outcome = self.only(self.settle())
+        self.assertEqual(outcome["result"], "failed")
+        pending = self.read_meta()["pendingReset"]
+        self.assertIn("nextAttemptAt", pending)
+        # Past the invoice expiry it still is not cleared: it might be paid.
+        self.assertIn("pendingReset", self.read_meta())
+
+    def test_order_renewal_and_reset_settle_in_the_same_tick(self):
+        priv, pub = bridge.generate_wg_keypair()
+        self.write_meta({"pendingOrder": self.pending_order(privateKey=priv, publicKey=pub),
+                         "pendingRenewal": {"paymentHash": RENEW_HASH, "renewalId": "r", "oldExpiry": "x",
+                                            "newExpiry": "y", "createdAt": iso(NOW), "publicKey": self.pub,
+                                            "targetNode": "cln"},
+                         "pendingReset": self.pending_reset()})
+        self.api.on("GET", f"/subscription/{HASH}", response({"status": "unpaid"}))
+        self.api.on("GET", f"/subscription/{RENEW_HASH}", response({"status": "pending"}))
+        self.reset_status("unpaid")
+        result = self.settle()
+        self.assertEqual([(o["kind"], o["result"]) for o in result["outcomes"]],
+                         [("order", "waiting"), ("renewal", "waiting"), ("reset", "waiting")])
+
+    def test_reset_replay_id_matches_the_ts_side(self):
+        self.assertEqual(bridge.pay_task_replay_id("reset", "lnd", RESET_HASH), RESET_TASK)
+
+
 if __name__ == "__main__":
     unittest.main()

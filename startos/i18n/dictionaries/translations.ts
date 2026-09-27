@@ -75,6 +75,11 @@ export const es_ES: LangDict = {
   71: 'No se pudo comprobar el traspaso de VPN: ${error}',
   72: 'No se pudo ofrecer la tarea de TunnelSats a ${nodes}; se reintenta automáticamente.',
   73: 'No se pudo actualizar el recordatorio de renovación de TunnelSats; se reintenta automáticamente.',
+  74: 'Liquidación de pagos',
+  75: 'No hay ningún pago pendiente',
+  76: 'Comprobando los pagos pendientes',
+  77: 'La liquidación del pago falló: ${error}',
+  78: 'El pago se liquidó, pero no se pudo eliminar su tarea de pago en el nodo Lightning: ${error}. Se reintenta automáticamente.',
 }
 
 export const de_DE: LangDict = {
@@ -152,6 +157,11 @@ export const de_DE: LangDict = {
   71: 'Die VPN-Übergabe konnte nicht geprüft werden: ${error}',
   72: 'Die TunnelSats-Aufgabe konnte ${nodes} nicht angeboten werden; wird automatisch erneut versucht.',
   73: 'Die TunnelSats-Verlängerungserinnerung konnte nicht aktualisiert werden; wird automatisch erneut versucht.',
+  74: 'Zahlungsabwicklung',
+  75: 'Keine Zahlung ausstehend',
+  76: 'Ausstehende Zahlungen werden geprüft',
+  77: 'Zahlungsabwicklung fehlgeschlagen: ${error}',
+  78: 'Die Zahlung wurde abgewickelt, aber ihre Zahlungsaufgabe auf dem Lightning-Node konnte nicht entfernt werden: ${error}. Wird automatisch erneut versucht.',
 }
 
 export const pl_PL: LangDict = {
@@ -229,6 +239,11 @@ export const pl_PL: LangDict = {
   71: 'Nie udało się sprawdzić przekazania VPN: ${error}',
   72: 'Nie udało się zaoferować zadania TunnelSats dla ${nodes}; ponawianie automatyczne.',
   73: 'Nie udało się zaktualizować przypomnienia o odnowieniu TunnelSats; ponawianie automatyczne.',
+  74: 'Rozliczanie płatności',
+  75: 'Brak oczekujących płatności',
+  76: 'Sprawdzanie oczekujących płatności',
+  77: 'Rozliczenie płatności nie powiodło się: ${error}',
+  78: 'Płatność została rozliczona, ale nie udało się usunąć jej zadania płatności na węźle Lightning: ${error}. Ponawianie automatyczne.',
 }
 
 export const fr_FR: LangDict = {
@@ -306,6 +321,11 @@ export const fr_FR: LangDict = {
   71: 'Impossible de vérifier le transfert VPN : ${error}',
   72: 'Impossible de proposer la tâche TunnelSats à ${nodes} ; nouvelle tentative automatique.',
   73: 'Impossible de mettre à jour le rappel de renouvellement TunnelSats ; nouvelle tentative automatique.',
+  74: 'Règlement des paiements',
+  75: 'Aucun paiement en attente',
+  76: 'Vérification des paiements en attente',
+  77: 'Le règlement du paiement a échoué : ${error}',
+  78: 'Le paiement a été réglé, mais la suppression de sa tâche de paiement sur le nœud Lightning a échoué : ${error}. Nouvelle tentative automatique.',
 }
 
 export default {

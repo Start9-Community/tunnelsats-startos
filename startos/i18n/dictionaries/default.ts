@@ -75,6 +75,11 @@ const dict = {
   'Could not check the VPN handoff: ${error}': 71,
   'Offering the TunnelSats task to ${nodes} failed; retrying automatically.': 72,
   'Updating the TunnelSats renewal reminder failed; retrying automatically.': 73,
+  'Payment Settlement': 74,
+  'No payment pending': 75,
+  'Checking pending payments': 76,
+  'Payment settlement failed: ${error}': 77,
+  'The payment was settled, but clearing its payment task on the Lightning node failed: ${error}. Retrying automatically.': 78,
 } as const
 
 /**

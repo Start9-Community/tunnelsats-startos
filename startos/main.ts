@@ -3,6 +3,7 @@ import { sdk } from './sdk'
 import { configJson } from './fileModels/config.json'
 import { checkHandoffProgress } from './handoffIO'
 import { NODE_TITLES } from './vpnHandoff'
+import { runSettlementTick } from './settlement'
 
 export const main = sdk.setupMain(async ({ effects }) => {
   console.info(i18n('Starting TunnelSats!'))
@@ -173,5 +174,59 @@ export const main = sdk.setupMain(async ({ effects }) => {
         },
       },
       requires: [],
+    })
+    .addHealthCheck('settlement', {
+      ready: {
+        display: i18n('Payment Settlement'),
+        // Finishes paid Buy/Renew payments. Runs while disabled too: a first
+        // Buy completes on a package that has no configuration yet.
+        trigger: sdk.trigger.cooldownTrigger(20_000),
+        fn: async () => {
+          const status = await runSettlementTick({
+            settle: () =>
+              subcontainer.exec(['python3', '/app/bridge.py', 'settle']),
+            ack: (ids) =>
+              subcontainer.exec([
+                'python3',
+                '/app/bridge.py',
+                'settle-ack',
+                ...ids,
+              ]),
+            clearTask: (id) => sdk.action.clearTask(effects, id),
+          })
+          switch (status.state) {
+            case 'idle':
+              return {
+                result: 'success',
+                message: i18n('No payment pending'),
+              }
+            case 'busy':
+              return {
+                result: 'waiting',
+                message: i18n('Checking pending payments'),
+              }
+            case 'waiting':
+              return { result: 'waiting', message: status.message }
+            case 'settled':
+              return { result: 'success', message: status.message }
+            case 'failed':
+              return {
+                result: 'failure',
+                message: i18n('Payment settlement failed: ${error}', {
+                  error: status.error,
+                }),
+              }
+            case 'clearing-failed':
+              return {
+                result: 'failure',
+                message: i18n(
+                  'The payment was settled, but clearing its payment task on the Lightning node failed: ${error}. Retrying automatically.',
+                  { error: status.error },
+                ),
+              }
+          }
+        },
+      },
+      requires: ['main'],
     })
 })

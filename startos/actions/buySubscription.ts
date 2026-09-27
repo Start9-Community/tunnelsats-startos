@@ -3,6 +3,7 @@ import { tunnelsatsMeta } from '../fileModels/tunnelsatsMeta'
 import { i18n } from '../i18n'
 import { generateWireguardKeypair } from '../keygen'
 import { createSubscriptionOrder } from '../apiClient'
+import { payTaskReplayId, recordPaymentThenRaiseTask } from '../settlement'
 import { payInvoice as lndPayInvoice } from 'lnd-startos/startos/actions/payInvoice'
 import { payInvoice as clnPayInvoice } from 'cln-startos/startos/actions/payInvoice'
 import { payInvoice as eclairPayInvoice } from 'eclair-startos/startos/actions/payInvoice'
@@ -63,28 +64,18 @@ export const buySubscription = sdk.Action.withInput(
   async ({ effects }) => ({}),
   async ({ effects, input }) => {
     const keypair = generateWireguardKeypair()
+    const targetNode = input['target-node']
 
     const order = await createSubscriptionOrder({
       serverId: input['server-region'],
       duration: parseInt(input.duration, 10),
-    })
-
-    await tunnelsatsMeta.merge(effects, {
-      pendingOrder: {
-        paymentHash: order.paymentHash,
-        orderId: order.orderId,
-        privateKey: keypair.privateKey,
-        publicKey: keypair.publicKey,
-        targetNode: input['target-node'] as 'lnd' | 'cln' | 'eclair',
-        serverId: input['server-region'],
-        createdAt: new Date().toISOString(),
-      },
+      wgPublicKey: keypair.publicKey,
     })
 
     let packageId: string
     let payInvoiceAction: any
 
-    switch (input['target-node']) {
+    switch (targetNode) {
       case 'lnd':
         packageId = 'lnd'
         payInvoiceAction = lndPayInvoice
@@ -99,35 +90,75 @@ export const buySubscription = sdk.Action.withInput(
         break
       default: {
         // Compile-time exhaustiveness: a new target node must be handled above.
-        const unsupported: never = input['target-node']
+        const unsupported: never = targetNode
         throw new Error(`Unsupported target node: ${String(unsupported)}`)
       }
     }
 
-    await sdk.action.createTask(
-      effects,
-      packageId,
-      payInvoiceAction,
-      'important',
-      {
-        input: {
-          kind: 'partial',
-          accept: [],
-          set: {
-            invoice: order.invoice,
-            amount: { selection: 'invoice', value: {} },
-            'max-fee-percent': 1,
-            confirmed: false,
+    // Records the order, queueing the replaced order's pay task for the
+    // settlement health check to clear in the same write, then raises this
+    // order's task; serialized with other purchases (see
+    // recordPaymentThenRaiseTask). The key is stored before the invoice is
+    // payable, so a paid order can always be claimed.
+    await recordPaymentThenRaiseTask('order', order.paymentHash, {
+      // A read error fails the purchase: treating it as "nothing pending"
+      // would replace a pending payment without queuing its task. A missing
+      // file reads as null.
+      readCurrent: async () => {
+        const current = await tunnelsatsMeta.read().once()
+        return (
+          current && {
+            pending: current.pendingOrder,
+            payTasksToClear: current.payTasksToClear,
+          }
+        )
+      },
+      record: (patch) =>
+        tunnelsatsMeta.merge(effects, {
+          pendingOrder: {
+            paymentHash: order.paymentHash,
+            orderId: order.orderId,
+            privateKey: keypair.privateKey,
+            publicKey: keypair.publicKey,
+            targetNode,
+            serverId: input['server-region'],
+            createdAt: new Date().toISOString(),
+            // merge() is a deep merge: without these, a backoff left by an
+            // earlier order would delay settling this one.
+            lastError: undefined,
+            nextAttemptAt: undefined,
           },
-        },
-        reason: i18n(
-          'Pay TunnelSats VPN subscription invoice (${amount} sats)',
+          ...patch,
+        }),
+      raiseTask: () =>
+        sdk.action.createTask(
+          effects,
+          packageId,
+          payInvoiceAction,
+          'important',
           {
-            amount: String(order.amountSats),
+            // The settlement health check clears the task under this ID once the
+            // order is settled or expired.
+            replayId: payTaskReplayId('order', targetNode, order.paymentHash),
+            input: {
+              kind: 'partial',
+              accept: [],
+              set: {
+                invoice: order.invoice,
+                amount: { selection: 'invoice', value: {} },
+                'max-fee-percent': 1,
+                confirmed: false,
+              },
+            },
+            reason: i18n(
+              'Pay TunnelSats VPN subscription invoice (${amount} sats)',
+              {
+                amount: String(order.amountSats),
+              },
+            ),
           },
         ),
-      },
-    )
+    })
 
     return {
       version: '1' as const,

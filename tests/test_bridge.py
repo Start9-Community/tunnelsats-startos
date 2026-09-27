@@ -155,7 +155,7 @@ class TestBridgeKeygenAndConfig(unittest.TestCase):
                     "Endpoint = de2.tunnelsats.com:51820\n"
                 )
 
-                bridge.save_configuration(sample_conf, "eclair")
+                bridge.save_configuration(sample_conf, "bogus")
 
                 with open(app_conf_file, "r") as f:
                     import json

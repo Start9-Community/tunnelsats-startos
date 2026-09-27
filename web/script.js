@@ -7,6 +7,11 @@ let selectedRenewalDuration = 3
 let activePaymentHash = null
 let activePollingInterval = null
 let currentKeypair = null
+// Each checkout gets a number; a response for a superseded one is dropped.
+let checkoutSeq = 0
+// Payment hash of a paid order whose claim is still being saved. Its key
+// exists only in this page, so no new checkout may start until it is done.
+let paidClaimInFlight = null
 let serversList = []
 
 // ─────────────────────────────────────────────
@@ -460,6 +465,15 @@ async function generateKeys() {
 }
 
 async function startCheckout() {
+  // The claim is saved for the node chosen now: the operator may change the
+  // selection while a paid claim is still retrying.
+  const targetNode = selectedNode
+  if (paidClaimInFlight) {
+    alert(
+      `A paid order is still being provisioned (payment hash ${paidClaimInFlight}). Keep this page open until it is saved before starting another checkout.`,
+    )
+    return
+  }
   const serverSelect = document.getElementById('select-server')
   const serverId = serverSelect ? serverSelect.value : ''
   if (!serverId) {
@@ -467,11 +481,18 @@ async function startCheckout() {
     return
   }
 
+  const seq = ++checkoutSeq
+  // A newer checkout started while this one awaited: drop this one. Its
+  // invoice, if created, was never shown and cannot have been paid.
+  const superseded = () => seq !== checkoutSeq
+
   openPaymentModal()
   setPaymentStatus('Generating WireGuard keypair...', 'pulse-amber')
 
   try {
-    currentKeypair = await generateKeys()
+    const keypair = await generateKeys()
+    if (superseded()) return
+    currentKeypair = keypair
     setPaymentStatus('Creating Lightning invoice...', 'pulse-amber')
 
     const orderRes = await fetch(
@@ -479,7 +500,11 @@ async function startCheckout() {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ serverId, duration: selectedDuration }),
+        body: JSON.stringify({
+          serverId,
+          duration: selectedDuration,
+          wgPublicKey: keypair.publicKey,
+        }),
       },
     )
 
@@ -488,14 +513,16 @@ async function startCheckout() {
     }
 
     const order = await orderRes.json()
+    if (superseded()) return
     renderPaymentDetails(
       order.invoice,
       order.amountSats ||
         calculatePlanPrice(selectedDuration, currentSatsPerDollar),
       `${selectedDuration} Month${selectedDuration > 1 ? 's' : ''} Subscription`,
     )
-    pollOrderSettlement(order.paymentHash, currentKeypair, serverId)
+    pollOrderSettlement(order.paymentHash, keypair, serverId, targetNode)
   } catch (err) {
+    if (superseded()) return
     console.error('Checkout error:', err)
     setPaymentStatus(`Error: ${err.message}`, 'pulse-amber')
   }
@@ -535,7 +562,7 @@ function renderPaymentDetails(invoice, sats, planDesc) {
   setPaymentStatus('Waiting for payment settlement...', 'pulse-amber')
 }
 
-function pollOrderSettlement(paymentHash, keypair, serverId) {
+function pollOrderSettlement(paymentHash, keypair, serverId, targetNode) {
   if (activePollingInterval) clearInterval(activePollingInterval)
   activePaymentHash = paymentHash
 
@@ -549,11 +576,12 @@ function pollOrderSettlement(paymentHash, keypair, serverId) {
         if (data.status === 'paid') {
           clearInterval(activePollingInterval)
           activePollingInterval = null
+          paidClaimInFlight = paymentHash
           setPaymentStatus(
             'Payment confirmed! Provisioning tunnel...',
             'pulse-green',
           )
-          await claimAndSaveConfig(paymentHash, keypair)
+          await claimAndSaveConfig(paymentHash, keypair, targetNode)
         }
       }
     } catch (err) {
@@ -562,76 +590,243 @@ function pollOrderSettlement(paymentHash, keypair, serverId) {
   }, 3500)
 }
 
-function assembleWireguardConfig(claimData, privateKey) {
-  const vpnPort =
-    claimData.vpnPort ||
-    parseInt((claimData.server?.endpoint || '').split(':')[1] || '9735', 10)
-  const serverDomain = (claimData.server?.endpoint || '').split(':')[0]
+// Claim field validation, mirroring bridge.py (assemble_claimed_config).
+const WG_KEY_RE = /^[A-Za-z0-9+/]{43}=$/
+const HOSTNAME_RE =
+  /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/
+
+function isIPv4(value) {
+  const parts = value.split('.')
+  return (
+    parts.length === 4 &&
+    parts.every((p) => /^(0|[1-9]\d{0,2})$/.test(p) && Number(p) <= 255)
+  )
+}
+
+function isIPv6(value) {
+  if (!value.includes(':') || !/^[0-9A-Fa-f:.]+$/.test(value)) return false
+  try {
+    new URL(`http://[${value}]/`)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// An address or network with an optional prefix length.
+function isIpWithPrefix(value) {
+  const [ip, prefix, ...rest] = value.split('/')
+  if (rest.length) return false
+  const v4 = isIPv4(ip)
+  if (!v4 && !isIPv6(ip)) return false
+  if (prefix === undefined) return true
+  return /^\d{1,3}$/.test(prefix) && Number(prefix) <= (v4 ? 32 : 128)
+}
+
+function isEndpoint(value) {
+  const parts = value.split(':')
+  if (parts.length !== 2) return false
+  const [host, port] = parts
+  return (
+    HOSTNAME_RE.test(host) &&
+    /^\d{1,5}$/.test(port) &&
+    Number(port) >= 1 &&
+    Number(port) <= 65535
+  )
+}
+
+// A claim is only accepted for the key generated here; its config is built
+// from the structured fields and the local private key. fullConfig, config
+// and any private key in the response are never used, and every value is
+// validated so the response cannot add lines (a PostUp) to the config or
+// save a config that cannot form a tunnel.
+function assembleWireguardConfig(claimData, keypair) {
+  const server = claimData.server || {}
+  const peer = claimData.peer || {}
+  if (peer.publicKey !== keypair.publicKey) {
+    throw new Error(
+      'The claim was provisioned for a different WireGuard key; not saving it.',
+    )
+  }
+  const vpnPort = claimData.vpnPort
+  if (!Number.isInteger(vpnPort) || vpnPort < 1 || vpnPort > 65535) {
+    throw new Error('The claim has no valid VPN port.')
+  }
+  const str = (v) => typeof v === 'string' && v === v.trim() && v !== ''
+  const allowedIPs =
+    server.allowedIPs === undefined || server.allowedIPs === null
+      ? '0.0.0.0/0, ::/0'
+      : server.allowedIPs
+  const valid =
+    str(server.endpoint) &&
+    isEndpoint(server.endpoint) &&
+    str(server.publicKey) &&
+    WG_KEY_RE.test(server.publicKey) &&
+    str(peer.address) &&
+    isIpWithPrefix(peer.address) &&
+    typeof allowedIPs === 'string' &&
+    allowedIPs.split(',').every((n) => isIpWithPrefix(n.trim())) &&
+    (peer.presharedKey == null ||
+      (typeof peer.presharedKey === 'string' &&
+        WG_KEY_RE.test(peer.presharedKey))) &&
+    (claimData.subscriptionEnd == null ||
+      (str(claimData.subscriptionEnd) &&
+        !Number.isNaN(Date.parse(claimData.subscriptionEnd))))
+  if (!valid) {
+    throw new Error('The claim is incomplete or malformed.')
+  }
 
   const lines = [
     '[Interface]',
-    `PrivateKey = ${privateKey}`,
-    `Address = ${claimData.peer?.address || claimData.vpnIp}`,
+    `PrivateKey = ${keypair.privateKey}`,
+    `Address = ${peer.address}`,
   ]
-
   if (claimData.subscriptionEnd) {
-    lines.push(`# Valid Until: ${claimData.subscriptionEnd}`)
+    lines.push(
+      `# Valid Until: ${new Date(claimData.subscriptionEnd).toISOString()}`,
+    )
   }
   lines.push(`# VPNPort: ${vpnPort}`)
-  lines.push(`# Server: ${serverDomain}`)
+  lines.push(`# Server: ${server.endpoint.split(':')[0]}`)
   lines.push('')
   lines.push('[Peer]')
+  lines.push(`PublicKey = ${server.publicKey}`)
+  lines.push(`Endpoint = ${server.endpoint}`)
   lines.push(
-    `PublicKey = ${claimData.server?.publicKey || claimData.serverPublicKey}`,
+    `AllowedIPs = ${allowedIPs
+      .split(',')
+      .map((n) => n.trim())
+      .join(', ')}`,
   )
-  lines.push(`Endpoint = ${claimData.server?.endpoint || claimData.endpoint}`)
-  lines.push(`AllowedIPs = ${claimData.server?.allowedIPs || '0.0.0.0/0'}`)
-
-  if (claimData.peer?.presharedKey) {
-    lines.push(`PresharedKey = ${claimData.peer.presharedKey}`)
+  if (peer.presharedKey != null) {
+    lines.push(`PresharedKey = ${peer.presharedKey}`)
   }
-
   return lines.join('\n') + '\n'
 }
 
-async function claimAndSaveConfig(paymentHash, keypair) {
-  try {
-    const claimRes = await fetch(
-      'https://tunnelsats.com/api/public/v1/subscription/claim',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          paymentHash: paymentHash,
-          wgPublicKey: keypair.publicKey,
-        }),
-      },
-    )
+// A paid claim is retried for as long as the page is open while the outcome
+// is transient: the private key only exists in this page, so giving up would
+// strand the payment. Only a claim that can never be accepted stops it.
+const CLAIM_RETRY_BASE_MS = 3500
+const CLAIM_RETRY_MAX_MS = 60000
 
+function isTransientStatus(status) {
+  return status === 429 || status >= 500
+}
+
+function retryClaim(paymentHash, keypair, targetNode, attempt, reason) {
+  const delay = Math.min(
+    CLAIM_RETRY_BASE_MS * 2 ** (attempt - 1),
+    CLAIM_RETRY_MAX_MS,
+  )
+  setPaymentStatus(
+    `${reason} Retrying in ${Math.round(delay / 1000)} s. Keep this page open (payment hash ${paymentHash}).`,
+    'pulse-amber',
+  )
+  setTimeout(
+    () => claimAndSaveConfig(paymentHash, keypair, targetNode, attempt + 1),
+    delay,
+  )
+}
+
+async function claimAndSaveConfig(
+  paymentHash,
+  keypair,
+  targetNode,
+  attempt = 1,
+) {
+  try {
+    if (targetNode !== 'lnd' && targetNode !== 'cln') {
+      throw new Error('No Lightning node was chosen for this checkout.')
+    }
+    let claimRes
+    try {
+      claimRes = await fetch(
+        'https://tunnelsats.com/api/public/v1/subscription/claim',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            paymentHash: paymentHash,
+            wgPublicKey: keypair.publicKey,
+          }),
+        },
+      )
+    } catch (err) {
+      retryClaim(
+        paymentHash,
+        keypair,
+        targetNode,
+        attempt,
+        `Network error: ${err.message}.`,
+      )
+      return
+    }
+
+    if (isTransientStatus(claimRes.status)) {
+      retryClaim(
+        paymentHash,
+        keypair,
+        targetNode,
+        attempt,
+        `The TunnelSats API is unavailable (HTTP ${claimRes.status}).`,
+      )
+      return
+    }
     if (!claimRes.ok) {
       throw new Error(`Failed to claim configuration (HTTP ${claimRes.status})`)
     }
 
     const claimData = await claimRes.json()
-    const fullConfig =
-      claimData.fullConfig ||
-      assembleWireguardConfig(claimData, keypair.privateKey)
+    if (claimRes.status === 202 || claimData.status === 'processing') {
+      retryClaim(
+        paymentHash,
+        keypair,
+        targetNode,
+        attempt,
+        'Payment confirmed! The tunnel is being provisioned.',
+      )
+      return
+    }
+    const fullConfig = assembleWireguardConfig(claimData, keypair)
 
     // Save to local container bridge
-    const saveRes = await fetch('/api/config/save', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Requested-With': 'XMLHttpRequest',
-        'X-TunnelSats-CSRF': getCsrfToken(),
-        'X-CSRF-Token': getCsrfToken(),
-      },
-      body: JSON.stringify({
-        config: fullConfig,
-        target_node: selectedNode,
-      }),
-    })
+    let saveRes
+    try {
+      saveRes = await fetch('/api/config/save', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+          'X-TunnelSats-CSRF': getCsrfToken(),
+          'X-CSRF-Token': getCsrfToken(),
+        },
+        body: JSON.stringify({
+          config: fullConfig,
+          target_node: targetNode,
+        }),
+      })
+    } catch (err) {
+      retryClaim(
+        paymentHash,
+        keypair,
+        targetNode,
+        attempt,
+        `Could not reach StartOS to save the configuration: ${err.message}.`,
+      )
+      return
+    }
 
+    if (isTransientStatus(saveRes.status)) {
+      retryClaim(
+        paymentHash,
+        keypair,
+        targetNode,
+        attempt,
+        `Saving the configuration failed (HTTP ${saveRes.status}).`,
+      )
+      return
+    }
     if (!saveRes.ok) {
       const errJson = await saveRes.json().catch(() => ({}))
       throw new Error(
@@ -639,6 +834,7 @@ async function claimAndSaveConfig(paymentHash, keypair) {
       )
     }
 
+    if (paidClaimInFlight === paymentHash) paidClaimInFlight = null
     setPaymentStatus(
       'Configuration provisioned! Accept the routing prompt on your Lightning node.',
       'pulse-green',
@@ -653,7 +849,15 @@ async function claimAndSaveConfig(paymentHash, keypair) {
     }, 1600)
   } catch (err) {
     console.error('Claim error:', err)
-    setPaymentStatus(`Provisioning error: ${err.message}`, 'pulse-amber')
+    // A permanent failure: retrying cannot save this claim, so a new
+    // checkout is allowed again.
+    if (paidClaimInFlight === paymentHash) paidClaimInFlight = null
+    // Nothing was saved. The payment hash lets support recover the paid
+    // order; keep this page open, the private key only exists here.
+    setPaymentStatus(
+      `Provisioning error: ${err.message} Keep this page open and contact support with payment hash ${paymentHash}.`,
+      'pulse-amber',
+    )
   }
 }
 

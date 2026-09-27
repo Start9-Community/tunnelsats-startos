@@ -24,6 +24,9 @@ export const metaShape = z.object({
       targetNode: z.enum(['lnd', 'cln', 'eclair']),
       serverId: z.string(),
       createdAt: z.string(),
+      /** Set by the settlement tick (bridge.py) after a failed attempt. */
+      lastError: z.string().optional().catch(undefined),
+      nextAttemptAt: z.string().optional().catch(undefined),
     })
     .optional()
     .nullable(),
@@ -34,9 +37,21 @@ export const metaShape = z.object({
       oldExpiry: z.string(),
       newExpiry: z.string(),
       createdAt: z.string(),
+      /** The key the renewal was paid for; absent on older renewals. */
+      publicKey: z.string().optional().catch(undefined),
+      /** The node its pay task was raised on; absent on older renewals. */
+      targetNode: z.enum(['lnd', 'cln', 'eclair']).optional().catch(undefined),
+      lastError: z.string().optional().catch(undefined),
+      nextAttemptAt: z.string().optional().catch(undefined),
     })
     .optional()
     .nullable(),
+  /**
+   * Replay IDs of pay tasks whose payment is settled, expired or replaced by
+   * a newer Buy/Renew, queued (by bridge.py or the purchase actions) until
+   * the settlement health check has cleared them.
+   */
+  payTasksToClear: z.array(z.string()).optional().catch(undefined),
 })
 
 export const tunnelsatsMeta = FileHelper.json(

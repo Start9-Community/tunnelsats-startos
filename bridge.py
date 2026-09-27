@@ -8,10 +8,11 @@ import signal
 import fcntl
 import time
 import socket
+import ipaddress
 import urllib.request
 import urllib.error
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 DEFAULT_VPN_PORT = 9735
@@ -193,8 +194,15 @@ def ensure_inbound_markers(conf_content):
             return "\n".join(lines) + ("\n" if conf_content.endswith("\n") else "")
     return "\n".join(markers) + "\n" + conf_content
 
-def save_configuration(conf_content, target_node="lnd"):
-    if target_node not in ("lnd", "cln"):
+TARGET_NODES = ("lnd", "cln", "eclair")
+
+def save_configuration(conf_content, target_node="lnd", clear_pending_order=None):
+    """Saves a WireGuard configuration for target_node and resets the
+    metadata for it. clear_pending_order (a payment hash) is set by the
+    settlement watcher: when it still matches pendingOrder, the settled order
+    and its private key are dropped in the same locked write, and its pay
+    task is queued for clearing."""
+    if target_node not in TARGET_NODES:
         target_node = "lnd"
     validate_config(conf_content)
     conf_content = ensure_inbound_markers(conf_content)
@@ -228,6 +236,8 @@ def save_configuration(conf_content, target_node="lnd"):
         meta.update(hints)
         meta["lastSync"] = None
         meta["syncSuccess"] = False
+        if clear_pending_order:
+            _clear_pending(meta, "pendingOrder", clear_pending_order)
         atomic_write_json(META_FILE_PATH, meta)
 
 def get_default_gateway():
@@ -459,6 +469,413 @@ def subscription_sync_loop():
             wait_for_next_sync(outcome, pubkey)
         except KeyboardInterrupt:
             break
+
+# ─── Settlement watcher ──────────────────────────────────────────────────────
+# A Buy action leaves `pendingOrder` (with the private key generated on this
+# server) in the metadata, a Renew action `pendingRenewal`. settle_pending()
+# finishes them once paid, so no step outside StartOS is needed. It runs as a
+# StartOS health check (see startos/settlement.ts) every 20 s.
+#
+# Trust boundary: the claim response is only a source of tunnel parameters.
+# The config is assembled here with the local private key; `fullConfig`,
+# `config` and `peer.privateKey` are never read, and every field that ends up
+# in the config is validated so a response cannot inject extra lines (wg-quick
+# would run a `PostUp`). Anything incomplete or unexpected fails closed: the
+# pending order and its key stay, and the tick retries after a delay.
+
+PENDING_KINDS = (("order", "pendingOrder"), ("renewal", "pendingRenewal"))
+# Replay IDs of the Pay Invoice tasks the Buy/Renew actions raise on the node.
+# Must match payTaskReplayId() in startos/settlement.ts (see pay_task_replay_id).
+PAY_TASK_REPLAY_PREFIX = {"order": "tunnelsats-order", "renewal": "tunnelsats-renewal"}
+# Lightning invoices from TunnelSats expire after an hour; a day without
+# payment means the pending state can go.
+PENDING_TTL = timedelta(hours=24)
+SETTLE_RETRY_DELAY = timedelta(minutes=5)
+DEFAULT_ALLOWED_IPS = "0.0.0.0/0, ::/0"
+_WG_KEY_RE = re.compile(r"^[A-Za-z0-9+/]{43}=$")
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
+)
+
+
+class SettlementError(Exception):
+    """This tick could not finish the payment. Recorded on the pending entry
+    (lastError) and retried after SETTLE_RETRY_DELAY; never clears it."""
+
+
+class _ApiHttpError(SettlementError):
+    def __init__(self, code, message):
+        super().__init__(f"HTTP {code} from the TunnelSats API: {message}")
+        self.code = code
+
+
+def pay_task_replay_id(kind, node, payment_hash):
+    """Unique per payment, so clearing a settled payment's task can never
+    remove the task of a newer Buy/Renew on the same node."""
+    return f"{PAY_TASK_REPLAY_PREFIX[kind]}:{node}:{payment_hash[:16]}"
+
+
+def _iso(dt):
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_iso(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+@contextmanager
+def settle_lock():
+    """Non-blocking: yields False while another tick (health check, CLI) is
+    running, so two ticks never claim or save the same payment at once."""
+    fd = os.open(META_FILE_PATH + ".settle.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except BlockingIOError:
+            acquired = False
+        yield acquired
+    finally:
+        os.close(fd)
+
+
+def _api_call(method, path, body=None):
+    """Returns (http_status, json_object). HTTP errors raise _ApiHttpError,
+    network and parse errors SettlementError. Response bodies are never
+    logged: a claim response may carry key material."""
+    req = urllib.request.Request(
+        f"{TUNNELSATS_API_URL}{path}",
+        data=json.dumps(body).encode("utf-8") if body is not None else None,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": f"TunnelSats-StartOS/{get_package_version()}",
+        },
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            status = response.status
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        message = ""
+        try:
+            err = json.loads(e.read().decode("utf-8"))
+            message = str(err.get("message") or err.get("error") or "")
+        except Exception:
+            pass
+        raise _ApiHttpError(e.code, message[:200] or str(e.reason))
+    except (OSError, ValueError) as e:
+        raise SettlementError(f"TunnelSats API request failed: {e}")
+    if not isinstance(payload, dict):
+        raise SettlementError("TunnelSats API returned an unexpected response")
+    return status, payload
+
+
+def _payment_state(payment_hash):
+    """'paid', 'processing', 'unpaid' or 'unknown' (the API has no record)."""
+    try:
+        status, data = _api_call("GET", f"/subscription/{payment_hash}")
+    except _ApiHttpError as e:
+        if e.code == 404:
+            return "unknown"
+        raise
+    state = data.get("status")
+    if status == 202 or state == "processing":
+        return "processing"
+    if state == "paid":
+        return "paid"
+    if state in ("unpaid", "pending"):
+        return "unpaid"
+    raise SettlementError(f"TunnelSats API returned an unknown payment status: {str(state)[:40]!r}")
+
+
+def derive_wg_pubkey(private_key):
+    """Public key for a WireGuard private key, or None."""
+    try:
+        proc = subprocess.run(["wg", "pubkey"], input=private_key.encode(), capture_output=True)
+        pub = proc.stdout.decode().strip() if proc.returncode == 0 else ""
+        if pub:
+            return pub
+    except Exception:
+        pass
+    try:
+        import base64
+        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+        from cryptography.hazmat.primitives import serialization
+        key = X25519PrivateKey.from_private_bytes(base64.b64decode(private_key, validate=True))
+        raw = key.public_key().public_bytes(encoding=serialization.Encoding.Raw,
+                                            format=serialization.PublicFormat.Raw)
+        return base64.b64encode(raw).decode()
+    except Exception:
+        return None
+
+
+def _require_key(value, label):
+    if not isinstance(value, str) or not _WG_KEY_RE.match(value):
+        raise SettlementError(f"The claim has no valid {label}")
+    return value
+
+
+def _require_endpoint(value):
+    if isinstance(value, str) and value.count(":") == 1:
+        host, _, port = value.partition(":")
+        if _HOSTNAME_RE.match(host) and port.isdigit() and 1 <= int(port) <= 65535:
+            return value
+    raise SettlementError("The claim has no valid endpoint")
+
+
+def _require_address(value):
+    try:
+        if isinstance(value, str) and value == value.strip():
+            ipaddress.ip_interface(value)
+            return value
+    except ValueError:
+        pass
+    raise SettlementError("The claim has no valid address")
+
+
+def _require_allowed_ips(value):
+    if value is None:
+        return DEFAULT_ALLOWED_IPS
+    try:
+        if isinstance(value, str):
+            networks = [part.strip() for part in value.split(",")]
+            for network in networks:
+                ipaddress.ip_network(network, strict=False)
+            return ", ".join(networks)
+    except ValueError:
+        pass
+    raise SettlementError("The claim has no valid allowedIPs")
+
+
+def assemble_claimed_config(claim, pending):
+    """Builds the WireGuard config for a claimed order from the claim's
+    structured fields and the order's local private key. Raises
+    SettlementError instead of returning anything unverified."""
+    peer = claim.get("peer") if isinstance(claim.get("peer"), dict) else {}
+    server = claim.get("server") if isinstance(claim.get("server"), dict) else {}
+    private_key, public_key = pending.get("privateKey"), pending.get("publicKey")
+
+    if peer.get("publicKey") != public_key:
+        raise SettlementError(
+            "The claim was provisioned for a different WireGuard key than the one "
+            "generated on this server; not saving it"
+        )
+    if not isinstance(private_key, str) or derive_wg_pubkey(private_key) != public_key:
+        raise SettlementError("The stored private key does not match the registered public key")
+
+    server_key = _require_key(server.get("publicKey"), "server publicKey")
+    endpoint = _require_endpoint(server.get("endpoint"))
+    address = _require_address(peer.get("address"))
+    allowed_ips = _require_allowed_ips(server.get("allowedIPs"))
+    psk = peer.get("presharedKey")
+    if psk is not None:
+        _require_key(psk, "presharedKey")
+    vpn_port = claim.get("vpnPort")
+    if type(vpn_port) is not int or not 1 <= vpn_port <= 65535:
+        raise SettlementError("The claim has no valid vpnPort")
+
+    lines = [
+        "[Interface]",
+        f"PrivateKey = {private_key}",
+        f"Address = {address}",
+        f"# Server: {endpoint.partition(':')[0]}",
+        f"# Port Forwarding: {vpn_port}",
+        f"# myPubKey: {public_key}",
+    ]
+    end = claim.get("subscriptionEnd")
+    if isinstance(end, str) and is_valid_iso_expiry(end):
+        # A display hint only; the confirmed expiry always comes from lazy_sync.
+        lines.append(f"# Valid Until: {_iso(_parse_iso(end))}")
+    lines += ["", "[Peer]", f"PublicKey = {server_key}"]
+    if psk is not None:
+        lines.append(f"PresharedKey = {psk}")
+    lines += [f"Endpoint = {endpoint}", f"AllowedIPs = {allowed_ips}", "PersistentKeepalive = 25"]
+    return "\n".join(lines) + "\n"
+
+
+def _clear_pending(meta, key, payment_hash):
+    """Drops meta[key] if it still belongs to payment_hash and queues its pay
+    task for clearing. Caller holds meta_lock and writes meta afterwards."""
+    pending = meta.get(key)
+    if not isinstance(pending, dict) or pending.get("paymentHash") != payment_hash:
+        return False
+    kind = "order" if key == "pendingOrder" else "renewal"
+    node = pending.get("targetNode")
+    meta.pop(key, None)
+    if node in TARGET_NODES:
+        tasks = [t for t in meta.get("payTasksToClear") or [] if isinstance(t, str)]
+        replay_id = pay_task_replay_id(kind, node, payment_hash)
+        if replay_id not in tasks:
+            tasks.append(replay_id)
+        meta["payTasksToClear"] = tasks
+    return True
+
+
+def _finish_pending(key, payment_hash):
+    with meta_lock():
+        meta = read_meta()
+        if _clear_pending(meta, key, payment_hash):
+            atomic_write_json(META_FILE_PATH, meta)
+
+
+def _update_pending(key, payment_hash, fields):
+    """Sets (value) or removes (None) fields on meta[key] if it still belongs
+    to payment_hash; a newer Buy/Renew is never touched."""
+    with meta_lock():
+        meta = read_meta()
+        pending = meta.get(key)
+        if not isinstance(pending, dict) or pending.get("paymentHash") != payment_hash:
+            return
+        for name, value in fields.items():
+            if value is None:
+                pending.pop(name, None)
+            else:
+                pending[name] = value
+        atomic_write_json(META_FILE_PATH, meta)
+
+
+def _outcome(kind, result, message, payment_hash):
+    return {"kind": kind, "result": result, "message": message, "paymentHash": payment_hash}
+
+
+def _unpaid(kind, key, pending, state, now):
+    created = _parse_iso(pending.get("createdAt"))
+    if created is not None and now - created >= PENDING_TTL:
+        _finish_pending(key, pending["paymentHash"])
+        return _outcome(kind, "expired", "The invoice was not paid within 24 hours; the pending payment was cleared.",
+                        pending["paymentHash"])
+    if state == "unknown":
+        raise SettlementError("The TunnelSats API has no record of this payment")
+    return _outcome(kind, "waiting", "Waiting for the invoice to be paid.", pending["paymentHash"])
+
+
+def _settle_order(pending, now):
+    payment_hash = pending["paymentHash"]
+    state = _payment_state(payment_hash)
+    if state == "processing":
+        return _outcome("order", "waiting", "Payment received; the tunnel is being provisioned.", payment_hash)
+    if state != "paid":
+        return _unpaid("order", "pendingOrder", pending, state, now)
+
+    status, claim = _api_call("POST", "/subscription/claim",
+                              {"paymentHash": payment_hash, "wgPublicKey": pending.get("publicKey")})
+    if status == 202 or claim.get("status") == "processing":
+        return _outcome("order", "waiting", "Payment received; the tunnel is being provisioned.", payment_hash)
+    conf = assemble_claimed_config(claim, pending)
+    # Applied even if a newer Buy replaced pendingOrder meanwhile: this order
+    # is paid and its private key exists only in this tick, while the newer
+    # one is at best unpaid. Skipping it would lose a paid tunnel for good.
+    # save_configuration's hash check keeps the newer pendingOrder, which
+    # the next tick settles (and applies) once it is paid.
+    save_configuration(conf, pending.get("targetNode"), clear_pending_order=payment_hash)
+    return _outcome("order", "provisioned", "The new tunnel was configured.", payment_hash)
+
+
+def _settle_renewal(pending, now):
+    payment_hash = pending["paymentHash"]
+    state = _payment_state(payment_hash)
+    if state == "processing":
+        return _outcome("renewal", "waiting", "Payment received; the renewal is being applied.", payment_hash)
+    if state != "paid":
+        return _unpaid("renewal", "pendingRenewal", pending, state, now)
+
+    key = pending.get("publicKey")
+    if not key:
+        # Recorded by an earlier version without the key it was paid for.
+        # The configured key's expiry proves nothing about it, so it is
+        # released rather than reported as renewed.
+        _finish_pending("pendingRenewal", payment_hash)
+        return _outcome("renewal", "superseded",
+                        "A renewal from an earlier version was paid; TunnelSats applies it to the key it was "
+                        "bought for. Check the expiry under Subscription Status.", payment_hash)
+    if key != get_wg_pubkey():
+        _finish_pending("pendingRenewal", payment_hash)
+        return _outcome("renewal", "superseded",
+                        "The renewal was paid for a key that is no longer configured.", payment_hash)
+
+    result = lazy_sync(key)
+    if result == "confirmed":
+        confirmed = _parse_iso(read_meta().get("expiresAt"))
+        old = _parse_iso(pending.get("oldExpiry"))
+        if confirmed is not None and (old is None or confirmed > old):
+            _finish_pending("pendingRenewal", payment_hash)
+            return _outcome("renewal", "renewed", "The subscription was extended.", payment_hash)
+        return _outcome("renewal", "waiting", "Renewal paid; waiting for the extended expiry to be confirmed.",
+                        payment_hash)
+    if result == "superseded":
+        return _outcome("renewal", "waiting", "The configured key changed; checking again.", payment_hash)
+    raise SettlementError("The renewal is paid, but its new expiry could not be confirmed yet")
+
+
+def _settle_one(kind, key, pending, now):
+    payment_hash = pending["paymentHash"]
+    retry_at = _parse_iso(pending.get("nextAttemptAt"))
+    if retry_at is not None and retry_at > now:
+        return _outcome(kind, "failed", str(pending.get("lastError") or "Retrying shortly."), payment_hash)
+    try:
+        outcome = (_settle_order if kind == "order" else _settle_renewal)(pending, now)
+    except Exception as e:
+        # SettlementError is an expected, explained failure; anything else is
+        # a bug or an I/O error. Both keep the pending entry and retry later.
+        message = str(e) if isinstance(e, SettlementError) else f"Unexpected error: {e}"
+        print(f"Settlement of {kind} {payment_hash[:8]} failed: {message}", file=sys.stderr)
+        _update_pending(key, payment_hash, {"lastError": message,
+                                            "nextAttemptAt": _iso(now + SETTLE_RETRY_DELAY)})
+        return _outcome(kind, "failed", message, payment_hash)
+    if outcome["result"] == "waiting" and ("lastError" in pending or "nextAttemptAt" in pending):
+        _update_pending(key, payment_hash, {"lastError": None, "nextAttemptAt": None})
+    return outcome
+
+
+def _pay_tasks_to_clear(meta):
+    return [t for t in meta.get("payTasksToClear") or [] if isinstance(t, str)]
+
+
+def settle_pending(now=None):
+    """One settlement tick. Returns {"outcomes": [...], "clearPayTasks": [...],
+    "busy": bool}. Each outcome's result is one of "waiting", "provisioned",
+    "renewed", "superseded", "expired" or "failed". clearPayTasks lists the
+    replay IDs of pay tasks whose payment is settled or expired; they stay
+    listed until acknowledged with ack_pay_tasks, so a restart between
+    settling and clearing the task cannot leave the task behind. The IDs are
+    unique per payment, so clearing them never touches a newer payment's
+    task."""
+    now = now or datetime.now(timezone.utc)
+    with settle_lock() as acquired:
+        if not acquired:
+            return {"outcomes": [], "clearPayTasks": [], "busy": True}
+        with meta_lock():
+            meta = read_meta()
+        outcomes = []
+        for kind, key in PENDING_KINDS:
+            pending = meta.get(key)
+            if isinstance(pending, dict) and isinstance(pending.get("paymentHash"), str) and pending["paymentHash"]:
+                outcomes.append(_settle_one(kind, key, pending, now))
+        with meta_lock():
+            tasks = _pay_tasks_to_clear(read_meta())
+        return {"outcomes": outcomes, "clearPayTasks": tasks, "busy": False}
+
+
+def ack_pay_tasks(replay_ids):
+    """Removes replay IDs whose pay tasks were cleared from payTasksToClear."""
+    with meta_lock():
+        meta = read_meta()
+        if "payTasksToClear" not in meta:
+            return
+        remaining = [t for t in _pay_tasks_to_clear(meta) if t not in replay_ids]
+        if remaining:
+            meta["payTasksToClear"] = remaining
+        else:
+            meta.pop("payTasksToClear", None)
+        atomic_write_json(META_FILE_PATH, meta)
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1064,6 +1481,15 @@ def main():
 
     elif command == "status":
         print(json.dumps(get_status(), indent=2))
+
+    elif command == "settle":
+        # Runs regardless of `enabled`: a first Buy completes on a package
+        # that has no configuration (and is therefore disabled) yet.
+        print(json.dumps(settle_pending()))
+
+    elif command == "settle-ack":
+        ack_pay_tasks(sys.argv[2:])
+        print(json.dumps({"acknowledged": sys.argv[2:]}))
 
     elif command == "health":
         target = sys.argv[2] if len(sys.argv) > 2 else "subscription"

@@ -95,9 +95,9 @@ class TestBridgeKeygenAndConfig(unittest.TestCase):
                 self.assertTrue(os.path.exists(conf_file))
                 with open(conf_file, "r") as f:
                     saved_conf = f.read()
-                    self.assertIn("# StartTunnel\n", saved_conf)
-                    self.assertIn("# inbound: yes\n", saved_conf)
-                    self.assertIn("PrivateKey = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\n", saved_conf)
+                    self.assertEqual(saved_conf, sample_conf)
+                    self.assertNotIn("# StartTunnel", saved_conf)
+                    self.assertNotIn("# inbound: yes", saved_conf)
 
                 self.assertTrue(os.path.exists(app_conf_file))
                 with open(app_conf_file, "r") as f:
@@ -105,6 +105,7 @@ class TestBridgeKeygenAndConfig(unittest.TestCase):
                     app_data = json.load(f)
                     self.assertTrue(app_data.get("enabled"))
                     self.assertEqual(app_data.get("target-node"), "cln")
+                    self.assertEqual(app_data.get("tunnelsats-conf"), sample_conf)
 
                 self.assertTrue(os.path.exists(meta_file))
                 with open(meta_file, "r") as f:
@@ -192,26 +193,39 @@ class TestBridgeKeygenAndConfig(unittest.TestCase):
             finally:
                 bridge.CONFIG_PATH = orig_conf
 
-    def test_ensure_inbound_markers_injection_and_preservation(self):
-        conf_without = (
-            "[Interface]\n"
-            "PrivateKey = key=\n"
+    def test_save_configuration_keeps_legacy_markers_byte_identical(self):
+        # Configs written by earlier versions carry the markers of the retired
+        # StartOS gateway model. The node task accepts the stored string
+        # exactly, so it must be neither stripped nor "completed".
+        import json
+        import tempfile
+        body = (
+            "PrivateKey = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\n"
             "Address = 10.9.0.2/32\n"
+            "# VPNPort: 24556\n"
+            "\n"
+            "[Peer]\n"
+            "PublicKey = bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=\n"
+            "Endpoint = de2.tunnelsats.com:51820\n"
         )
-        marked = bridge.ensure_inbound_markers(conf_without)
-        self.assertIn("# StartTunnel\n", marked)
-        self.assertIn("# inbound: yes\n", marked)
-
-        # Idempotent preservation
-        self.assertEqual(bridge.ensure_inbound_markers(marked), marked)
-
-        # Handles non-canonical casing by adding canonical # inbound: yes
-        non_canon = (
-            "[Interface]\n"
-            "# StartTunnel\n"
-            "# Inbound: Yes\n"
-            "PrivateKey = key=\n"
+        variants = (
+            "[Interface]\n# StartTunnel\n# inbound: yes\n" + body,
+            "[Interface]\n# Inbound: Yes\n" + body,
         )
-        marked_non_canon = bridge.ensure_inbound_markers(non_canon)
-        self.assertIn("# inbound: yes\n", marked_non_canon)
-        self.assertIn("# Inbound: Yes\n", marked_non_canon)
+        orig = (bridge.CONFIG_PATH, bridge.APP_CONFIG_PATH, bridge.META_FILE_PATH)
+        try:
+            for conf in variants:
+                with self.subTest(conf=conf.splitlines()[1]), \
+                        tempfile.TemporaryDirectory() as tmpdir:
+                    bridge.CONFIG_PATH = os.path.join(tmpdir, "tunnelsatsv3.conf")
+                    bridge.APP_CONFIG_PATH = os.path.join(tmpdir, "config.json")
+                    bridge.META_FILE_PATH = os.path.join(tmpdir, "tunnelsats-meta.json")
+
+                    bridge.save_configuration(conf, "lnd")
+
+                    with open(bridge.CONFIG_PATH, "r") as f:
+                        self.assertEqual(f.read(), conf)
+                    with open(bridge.APP_CONFIG_PATH, "r") as f:
+                        self.assertEqual(json.load(f)["tunnelsats-conf"], conf)
+        finally:
+            bridge.CONFIG_PATH, bridge.APP_CONFIG_PATH, bridge.META_FILE_PATH = orig

@@ -173,28 +173,6 @@ def generate_wg_keypair():
     except Exception as e:
         raise RuntimeError(f"Unable to generate WireGuard keypair: {e}")
 
-def ensure_inbound_markers(conf_content):
-    if not conf_content or not conf_content.strip():
-        return conf_content
-    lines = conf_content.splitlines()
-    has_start_tunnel = any(line.strip().lower() in ("# starttunnel", "starttunnel") for line in lines)
-    has_inbound_yes = any(line.strip() == "# inbound: yes" for line in lines)
-    if has_start_tunnel and has_inbound_yes:
-        return conf_content
-
-    markers = []
-    if not has_start_tunnel:
-        markers.append("# StartTunnel")
-    if not has_inbound_yes:
-        markers.append("# inbound: yes")
-
-    for i, line in enumerate(lines):
-        if re.match(r"^\s*\[Interface\]\s*$", line, re.IGNORECASE):
-            for m in reversed(markers):
-                lines.insert(i + 1, m)
-            return "\n".join(lines) + ("\n" if conf_content.endswith("\n") else "")
-    return "\n".join(markers) + "\n" + conf_content
-
 TARGET_NODES = ("lnd", "cln", "eclair")
 
 def save_configuration(conf_content, target_node="lnd", clear_pending_order=None):
@@ -202,11 +180,14 @@ def save_configuration(conf_content, target_node="lnd", clear_pending_order=None
     metadata for it. clear_pending_order (a payment hash) is set by the
     settlement watcher: when it still matches pendingOrder, the settled order
     and its private key are dropped in the same locked write, and its pay
-    task is queued for clearing."""
+    task is queued for clearing.
+
+    The configuration is stored exactly as given: the node's clearnet-vpn
+    task accepts this string verbatim, so rewriting it (e.g. stripping the
+    markers earlier versions added) would re-raise that task."""
     if target_node not in TARGET_NODES:
         target_node = "lnd"
     validate_config(conf_content)
-    conf_content = ensure_inbound_markers(conf_content)
     atomic_write_file(CONFIG_PATH, conf_content)
 
     app_config = {}
@@ -1107,7 +1088,6 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 "version": status_data.get("version", get_package_version()),
                 "enabled": status_data.get("enabled", is_enabled()),
                 "configured": status_data.get("configured", False),
-                "gateway_mode": status_data.get("gateway_mode", "host_managed"),
                 "allow_ipv6": status_data.get("allow_ipv6", is_allow_ipv6()),
                 "status": status_data.get("status", "stopped"),
                 "subscription_active": status_data.get("subscription_active", False),
@@ -1506,7 +1486,6 @@ def get_status():
         "status": status,
         "enabled": enabled,
         "configured": has_config,
-        "gateway_mode": "host_managed",
         "subscription_active": is_active,
         "subscription_linked": sub_info["linked"],
         "expires_at": sub_info["expiresAt"] or "Unknown",

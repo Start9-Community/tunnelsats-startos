@@ -182,7 +182,8 @@ class TestOrderSettlement(SettlementTestBase):
         self.assertIn(f"PresharedKey = {PSK}\n", conf)
         self.assertIn("Endpoint = de2.tunnelsats.com:51820\n", conf)
         self.assertIn("# Port Forwarding: 24556\n", conf)
-        self.assertIn("# inbound: yes\n", conf)
+        self.assertNotIn("# inbound: yes", conf)
+        self.assertNotIn("# StartTunnel", conf)
         self.assertEqual(bridge.get_wg_pubkey(), self.pub)
         with open(bridge.APP_CONFIG_PATH) as f:
             app = json.load(f)

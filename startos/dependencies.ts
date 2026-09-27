@@ -130,38 +130,6 @@ export function getTargetVpnConfig(
   }
 }
 
-/** Compatibility shim for legacy gateway routing tests */
-export function getTargetGatewayConfig(config: any) {
-  const vpn = getTargetVpnConfig(config)
-  if (!vpn) return null
-  return {
-    targetPackage: vpn.targetPackage,
-    clearPackage: vpn.clearPackages[0],
-    gatewayName: 'tunnelsats',
-    announceEndpoint: vpn.announceEndpoint,
-  }
-}
-
-/** Compatibility shim for legacy gateway task details */
-export function getGatewayTaskDetails(
-  targetPackage: 'lnd' | 'c-lightning',
-  announceEndpoint: string,
-) {
-  const isLnd = targetPackage === 'lnd'
-  return {
-    targetPackage,
-    clearTaskKey: isLnd
-      ? 'c-lightning:config'
-      : 'lnd:custom-external-host-config',
-    reason: i18n('Advertise TunnelSats VPN endpoint to the Lightning Network'),
-    input: {
-      kind: 'partial' as const,
-      accept: [{ 'custom-external-host': announceEndpoint }],
-      set: { 'custom-external-host': announceEndpoint },
-    },
-  }
-}
-
 /**
  * The subscription expiry this package may act on: the value the TunnelSats
  * API returned for the key in the stored config. The `# Valid Until` comment

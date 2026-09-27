@@ -54,6 +54,10 @@ class TestHTTPHandler(unittest.TestCase):
         # Should NOT have sent an error
         handler.send_error.assert_not_called()
         handler.send_response.assert_called_with(200)
+        # The retired StartOS gateway model is not reported any more.
+        payload = json.loads(wfile.getvalue())
+        self.assertEqual(payload["status"], "running")
+        self.assertNotIn("gateway_mode", payload)
         
         # Test local address with port and IPv6 formats
         for host in ["localhost:8080", "[::1]", "[::1]:8080", "127.0.0.1:8080"]:

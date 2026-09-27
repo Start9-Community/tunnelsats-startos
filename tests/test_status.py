@@ -46,7 +46,7 @@ class TestBridgeStatus(unittest.TestCase):
             self.assertTrue(status["enabled"])
             self.assertTrue(status["configured"])
             self.assertTrue(status["subscription_active"])
-            self.assertEqual(status["gateway_mode"], "host_managed")
+            self.assertNotIn("gateway_mode", status)
             self.assertEqual(status["vpn_ip"], "10.9.0.102")
             self.assertEqual(status["vpn_port"], 24556)
             self.assertEqual(status["server"], "ch1.tunnelsats.com")

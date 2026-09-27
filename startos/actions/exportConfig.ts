@@ -2,7 +2,6 @@ import { sdk } from '../sdk'
 import { tunnelsatsConf } from '../fileModels/tunnelsatsConf'
 import { configJson } from '../fileModels/config.json'
 import { i18n } from '../i18n'
-import { ensureInboundMarker } from '../utils'
 
 export const exportConfig = sdk.Action.withoutInput(
   'export-config',
@@ -49,7 +48,7 @@ export const exportConfig = sdk.Action.withoutInput(
       ),
       result: {
         type: 'single' as const,
-        value: ensureInboundMarker(conf.trim()),
+        value: conf,
         copyable: true,
         masked: true,
         qr: false,

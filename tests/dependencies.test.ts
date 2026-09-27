@@ -4,6 +4,7 @@ import {
   getDependenciesForConfig,
   getSubscriptionExpiryTask,
   getConfirmedExpiry,
+  getTargetVpnConfig,
   EXPIRY_TASK_KEY,
   RETIRED_TASK_KEYS,
   updateOwnTasks,
@@ -66,6 +67,70 @@ test('getDependenciesForConfig keeps nodes with a pending off-task as exists dep
   assert.deepEqual(disabled, {
     eclair: { kind: 'exists', versionRange: '>=0.10.0:0' },
   })
+})
+
+// ---------------------------------------------------------------------------
+// Target selection for the clearnet-vpn handoff (ported from the retired
+// gateway routing tests).
+// ---------------------------------------------------------------------------
+
+const TARGET_CONF = `[Interface]
+PrivateKey = DUMMY_TEST_PRIVATE_KEY_FOR_TESTING_123456=
+Address = 10.9.0.102/32
+# VPNPort: 24556
+
+[Peer]
+PublicKey = DUMMY_TEST_PUBLIC_KEY_FOR_TESTING_123456=
+Endpoint = ch1.tunnelsats.com:51820
+`
+
+test('getTargetVpnConfig returns null when disabled or unconfigured', () => {
+  assert.equal(getTargetVpnConfig(null), null)
+  assert.equal(getTargetVpnConfig(undefined), null)
+  assert.equal(getTargetVpnConfig({ enabled: false }), null)
+  assert.equal(
+    getTargetVpnConfig({
+      enabled: false,
+      'target-node': 'lnd',
+      'tunnelsats-conf': TARGET_CONF,
+    }),
+    null,
+  )
+  assert.equal(
+    getTargetVpnConfig({ enabled: true, 'target-node': 'lnd' }),
+    null,
+  )
+})
+
+test('getTargetVpnConfig targets the selected node and clears every other node', () => {
+  const cases = [
+    { node: 'lnd', target: 'lnd', clear: ['c-lightning', 'eclair'] },
+    { node: 'cln', target: 'c-lightning', clear: ['lnd', 'eclair'] },
+    { node: 'eclair', target: 'eclair', clear: ['lnd', 'c-lightning'] },
+  ] as const
+  for (const { node, target, clear } of cases) {
+    assert.deepEqual(
+      getTargetVpnConfig({
+        enabled: true,
+        'target-node': node,
+        'tunnelsats-conf': TARGET_CONF,
+      }),
+      {
+        targetPackage: target,
+        clearPackages: clear,
+        announceEndpoint: 'ch1.tunnelsats.com:24556',
+        wgConf: TARGET_CONF,
+      },
+    )
+  }
+})
+
+test('getTargetVpnConfig defaults to LND when no target node is stored', () => {
+  const vpn = getTargetVpnConfig({
+    enabled: true,
+    'tunnelsats-conf': TARGET_CONF,
+  })
+  assert.equal(vpn?.targetPackage, 'lnd')
 })
 
 // ---------------------------------------------------------------------------

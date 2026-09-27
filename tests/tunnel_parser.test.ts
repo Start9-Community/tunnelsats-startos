@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import {
   validateWireguardConfig,
   parseWireguardTunnelInfo,
-  ensureInboundMarker,
 } from '../startos/utils'
 
 test('validateWireguardConfig accepts valid WireGuard configuration', () => {
@@ -121,85 +120,4 @@ Endpoint = 2001:db8::1:51820
   const infoRaw = parseWireguardTunnelInfo(confRaw)
   assert.equal(infoBracketed.serverDomain, '2001:db8::1')
   assert.equal(infoRaw.serverDomain, '2001:db8::1')
-})
-
-test('ensureInboundMarker prepends both markers if [Interface] header is absent', () => {
-  const conf = `PrivateKey = DUMMY_TEST_PRIVATE_KEY_FOR_TESTING_123456=
-Address = 10.9.0.102/32
-# VPNPort: 24556
-`
-  const updated = ensureInboundMarker(conf)
-  assert.ok(updated.startsWith('# StartTunnel\n# inbound: yes\n'))
-})
-
-test('ensureInboundMarker handles empty or whitespace input gracefully', () => {
-  assert.equal(ensureInboundMarker(''), '')
-  assert.equal(ensureInboundMarker('   '), '   ')
-})
-
-test('ensureInboundMarker injects canonical lowercase # inbound: yes when only non-canonical casing is present', () => {
-  const confMixed = `[Interface]
-# StartTunnel
-# Inbound: Yes
-PrivateKey = DUMMY_TEST_PRIVATE_KEY_FOR_TESTING_123456=
-Address = 10.9.0.102/32
-`
-  const updatedMixed = ensureInboundMarker(confMixed)
-  const linesMixed = updatedMixed.split(/\r?\n/)
-  assert.ok(linesMixed.includes('# inbound: yes'))
-  assert.ok(linesMixed.includes('# Inbound: Yes'))
-
-  const confUpper = `[Interface]
-# StartTunnel
-# INBOUND: YES
-PrivateKey = DUMMY_TEST_PRIVATE_KEY_FOR_TESTING_123456=
-Address = 10.9.0.102/32
-`
-  const updatedUpper = ensureInboundMarker(confUpper)
-  const linesUpper = updatedUpper.split(/\r?\n/)
-  assert.ok(linesUpper.includes('# inbound: yes'))
-  assert.ok(linesUpper.includes('# INBOUND: YES'))
-
-  const confWithoutStartTunnel = `[Interface]
-# Inbound: Yes
-PrivateKey = DUMMY_TEST_PRIVATE_KEY_FOR_TESTING_123456=
-Address = 10.9.0.102/32
-`
-  const updatedWithoutStartTunnel = ensureInboundMarker(confWithoutStartTunnel)
-  const linesWithout = updatedWithoutStartTunnel.split(/\r?\n/)
-  assert.ok(linesWithout.includes('# StartTunnel'))
-  assert.ok(linesWithout.includes('# inbound: yes'))
-  assert.ok(linesWithout.includes('# Inbound: Yes'))
-})
-
-test('ensureInboundMarker preserves exact canonical # inbound: yes when already present without duplicate lines', () => {
-  const conf = `[Interface]
-# StartTunnel
-# inbound: yes
-PrivateKey = DUMMY_TEST_PRIVATE_KEY_FOR_TESTING_123456=
-Address = 10.9.0.102/32
-# VPNPort: 24556
-
-[Peer]
-PublicKey = DUMMY_TEST_PUBLIC_KEY_FOR_TESTING_123456=
-Endpoint = ch1.tunnelsats.com:51820
-`
-  const updated = ensureInboundMarker(conf)
-  assert.equal(updated, conf)
-  const exactMatches = updated
-    .split(/\r?\n/)
-    .filter((line) => line.trim() === '# inbound: yes')
-  assert.equal(exactMatches.length, 1)
-
-  const confMissingStartTunnel = `[Interface]
-# inbound: yes
-PrivateKey = DUMMY_TEST_PRIVATE_KEY_FOR_TESTING_123456=
-Address = 10.9.0.102/32
-`
-  const updatedMissingStartTunnel = ensureInboundMarker(confMissingStartTunnel)
-  const exactMatchesAfterAdd = updatedMissingStartTunnel
-    .split(/\r?\n/)
-    .filter((line) => line.trim() === '# inbound: yes')
-  assert.equal(exactMatchesAfterAdd.length, 1)
-  assert.match(updatedMissingStartTunnel, /# StartTunnel/)
 })

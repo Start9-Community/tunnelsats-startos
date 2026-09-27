@@ -1,7 +1,7 @@
 import { sdk } from '../sdk'
 import { configJson } from '../fileModels/config.json'
 import { tunnelsatsConf } from '../fileModels/tunnelsatsConf'
-import { validateWireguardConfig, ensureInboundMarker } from '../utils'
+import { getAnnounceEndpoint, validateWireguardConfig } from '../utils'
 import { i18n } from '../i18n'
 import { rm } from 'node:fs/promises'
 
@@ -11,7 +11,7 @@ export const inputSpec = InputSpec.of({
   enabled: Value.toggle({
     name: i18n('Enable TunnelSats'),
     description: i18n(
-      'Enable subscription monitoring and automated external host announcement for TunnelSats.',
+      'Route the selected Lightning node through the TunnelSats tunnel. Turning this off asks the node to switch its tunnel off.',
     ),
     default: false,
   }),
@@ -47,7 +47,9 @@ export const configure = sdk.Action.withInput(
   'configure',
   {
     name: i18n('Configure'),
-    description: i18n('Adjust TunnelSats settings and WireGuard configuration'),
+    description: i18n(
+      'Enable/disable TunnelSats, pick the target node, and replace the WireGuard configuration',
+    ),
     warning: null,
     allowedStatuses: 'any',
     group: null,
@@ -64,7 +66,7 @@ export const configure = sdk.Action.withInput(
     }
   },
   async ({ effects, input }) => {
-    let processedConf = input['tunnelsats-conf']?.trim()
+    const processedConf = input['tunnelsats-conf']?.trim()
       ? input['tunnelsats-conf']
       : undefined
     if (input.enabled && !processedConf) {
@@ -76,7 +78,20 @@ export const configure = sdk.Action.withInput(
       if (!validation.valid) {
         throw new Error(validation.error || 'Invalid WireGuard configuration')
       }
-      processedConf = ensureInboundMarker(processedConf)
+    }
+
+    // Same rule as Import Subscription: the handoff raises the activation
+    // task only for a config it can announce (see handedOverTarget).
+    if (
+      input.enabled &&
+      processedConf &&
+      !getAnnounceEndpoint(processedConf, input['allow-ipv6'])
+    ) {
+      throw new Error(
+        i18n(
+          'This configuration has no endpoint that can be announced to the Lightning Network (an IPv6 endpoint needs Allow Home IPv6 Coexistence).',
+        ),
+      )
     }
 
     await configJson.merge(effects, {
@@ -97,9 +112,15 @@ export const configure = sdk.Action.withInput(
       return {
         version: '1' as const,
         title: i18n('Configuration Saved'),
-        message: i18n(
-          "Add this as a new gateway under System → Gateways (delete any existing TunnelSats gateway first). Then open your node's Peer interface to enable the address and assign the Outbound Gateway (see Instructions).",
-        ),
+        // The clearnet-vpn on/off tasks are raised by setDependencies,
+        // which reacts to this config write.
+        message: input.enabled
+          ? i18n(
+              'WireGuard configuration saved. Your Lightning node will ask you to activate the VPN tunnel. If TunnelSats routed a different node before, that node first asks you to turn its tunnel off.',
+            )
+          : i18n(
+              'TunnelSats is switched off and your WireGuard configuration is kept. If a Lightning node used the tunnel, it will ask you to turn it off.',
+            ),
         result: {
           type: 'single' as const,
           value: processedConf,

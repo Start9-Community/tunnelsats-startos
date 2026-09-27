@@ -96,37 +96,6 @@ export function parseWireguardTunnelInfo(
   return info
 }
 
-export function ensureInboundMarker(wgConf: string): string {
-  if (!wgConf || !wgConf.trim()) return wgConf
-
-  const lines = wgConf.split(/\r?\n/)
-  const hasStartTunnel = lines.some((line) => {
-    const trimmed = line.trim().toLowerCase()
-    return trimmed === '# starttunnel' || trimmed === 'starttunnel'
-  })
-  const hasInboundYes = lines.some((line) => {
-    return line.trim() === '# inbound: yes'
-  })
-
-  if (hasStartTunnel && hasInboundYes) {
-    return wgConf
-  }
-
-  const markersToAdd: string[] = []
-  if (!hasStartTunnel) markersToAdd.push('# StartTunnel')
-  if (!hasInboundYes) markersToAdd.push('# inbound: yes')
-
-  const interfaceIndex = lines.findIndex((line) =>
-    /^\s*\[Interface\]\s*$/i.test(line),
-  )
-  if (interfaceIndex !== -1) {
-    lines.splice(interfaceIndex + 1, 0, ...markersToAdd)
-    return lines.join('\n')
-  }
-
-  return `${markersToAdd.join('\n')}\n${wgConf}`
-}
-
 export function getAnnounceEndpoint(
   wgConf: string | null | undefined,
   allowIpv6 = false,

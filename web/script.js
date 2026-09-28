@@ -1,1300 +1,635 @@
-let statusData = {}
-let countdownInterval = null
-let targetExpiry = null
-let selectedNode = 'lnd'
-let selectedDuration = 3
-let selectedRenewalDuration = 3
-let activePaymentHash = null
-let activePollingInterval = null
-let currentKeypair = null
-// Each checkout gets a number; a response for a superseded one is dropped.
-let checkoutSeq = 0
-// Payment hash of a paid order whose claim is still being saved. Its key
-// exists only in this page, so no new checkout may start until it is done.
-let paidClaimInFlight = null
-let serversList = []
+// TunnelSats dashboard: read-only.
+//
+// Everything shown here comes from GET /api/dashboard, an allow-listed read
+// model without secrets (bridge.py get_dashboard). Buying, renewing,
+// resetting, importing, configuring and exporting run as StartOS actions,
+// which need the operator's StartOS login and pay through the node's Pay
+// Invoice task; this page only explains where to find them. It makes no
+// request to any other host.
 
-// ─────────────────────────────────────────────
-// Initializer & Status Fetch
-// ─────────────────────────────────────────────
-async function fetchStatus(force = false) {
-  try {
-    const url = force ? '/api/status?force=1' : '/api/status'
-    const response = await fetch(url)
-    if (response.ok) {
-      statusData = await response.json()
-      updateUI()
-    }
-  } catch (error) {
-    console.error('Failed to fetch status:', error)
-  }
-}
+const DASHBOARD_URL = '/api/dashboard'
+const POLL_MS = 30000
+const DAY_MS = 24 * 60 * 60 * 1000
+// The expiry progress bar is scaled to a one-month plan.
+const PROGRESS_TERM_MS = 30 * DAY_MS
+const BANDWIDTH_WARN_PCT = 70
+const BANDWIDTH_CRITICAL_PCT = 90
 
-function getCsrfToken() {
-  const meta = document.querySelector('meta[name="csrf-token"]')
-  if (meta && meta.content) return meta.content
-  if (statusData && statusData.csrf_token) return statusData.csrf_token
-  return ''
-}
-
-function updateUI() {
-  const isConfigured = Boolean(statusData.configured && statusData.enabled)
-  const storefrontView = document.getElementById('view-storefront')
-  const telemetryView = document.getElementById('view-telemetry')
-  const backBtn = document.getElementById('btn-back-to-telemetry')
-
-  // Determine initial view if not manually navigated
-  if (!storefrontView.dataset.userNavigated) {
-    if (isConfigured) {
-      storefrontView.style.display = 'none'
-      telemetryView.style.display = 'flex'
-      if (backBtn) backBtn.style.display = 'inline-flex'
-    } else {
-      storefrontView.style.display = 'flex'
-      telemetryView.style.display = 'none'
-      if (backBtn) backBtn.style.display = 'none'
-    }
-  }
-
-  // 1. Status Badge
-  const badge = document.getElementById('status-badge')
-  const badgeText = badge.querySelector('.status-text')
-
-  if (statusData.enabled) {
-    if (statusData.status === 'running' || statusData.subscription_active) {
-      badge.className = 'status-badge active'
-      badgeText.textContent = 'SUBSCRIPTION ACTIVE'
-    } else if (statusData.status === 'expired') {
-      badge.className = 'status-badge inactive'
-      badgeText.textContent = 'SUBSCRIPTION EXPIRED'
-    } else if (statusData.status === 'unconfigured') {
-      badge.className = 'status-badge inactive'
-      badgeText.textContent = 'UNCONFIGURED'
-    } else {
-      badge.className = 'status-badge inactive'
-      badgeText.textContent = 'SYNCING'
-    }
-  } else {
-    badge.className = 'status-badge inactive'
-    badgeText.textContent = 'TUNNEL DISABLED'
-  }
-
-  // 2. Telemetry Properties
-  const targetNodeEl = document.getElementById('val-target-node')
-  if (targetNodeEl) {
-    targetNodeEl.textContent =
-      statusData.target_host && statusData.target_host.includes('c-lightning')
-        ? 'Core Lightning'
-        : 'LND'
-  }
-
-  const endpointEl = document.getElementById('val-public-endpoint')
-  if (endpointEl) {
-    if (statusData.public_ip && statusData.public_ip !== 'Unknown') {
-      endpointEl.textContent = `${statusData.public_ip}:${statusData.vpn_port || 9735}`
-    } else {
-      endpointEl.textContent = '...'
-    }
-  }
-
-  const pubkeyEl = document.getElementById('val-pubkey')
-  if (pubkeyEl) {
-    pubkeyEl.textContent = statusData.pubkey || '...'
-    pubkeyEl.title = statusData.pubkey || ''
-  }
-
-  const vpnIpEl = document.getElementById('val-vpn-ip')
-  if (vpnIpEl) {
-    vpnIpEl.textContent = statusData.vpn_ip || '...'
-  }
-
-  const lastSyncEl = document.getElementById('val-last-sync')
-  if (lastSyncEl) {
-    if (statusData.last_sync) {
-      try {
-        lastSyncEl.textContent = new Date(statusData.last_sync).toLocaleString()
-      } catch {
-        lastSyncEl.textContent = statusData.last_sync
-      }
-    } else {
-      lastSyncEl.textContent = 'Pending sync'
-    }
-  }
-
-  // Bandwidth Telemetry
-  const usedGb =
-    typeof statusData.bandwidth_used_gb === 'number'
-      ? statusData.bandwidth_used_gb
-      : 0.0
-  const limitGb = statusData.bandwidth_limit_gb || 100
-  const bwPct = Math.min(100, Math.max(0, (usedGb / limitGb) * 100))
-
-  const valBwUsed = document.getElementById('val-bandwidth-used')
-  if (valBwUsed) {
-    valBwUsed.textContent = `${usedGb.toFixed(2)} GB`
-  }
-
-  const bwBar = document.getElementById('bandwidth-progress')
-  if (bwBar) {
-    bwBar.style.width = `${bwPct}%`
-    bwBar.classList.remove('warning', 'critical')
-    if (bwPct >= 90) {
-      bwBar.classList.add('critical')
-    } else if (bwPct >= 70) {
-      bwBar.classList.add('warning')
-    }
-  }
-
-  // Update Bandwidth Modal Stats
-  const modalBwUsed = document.getElementById('modal-bandwidth-used')
-  if (modalBwUsed) modalBwUsed.textContent = usedGb.toFixed(2)
-
-  const modalBwFill = document.getElementById('modal-bandwidth-fill')
-  if (modalBwFill) {
-    modalBwFill.style.width = `${bwPct}%`
-    modalBwFill.classList.remove('warning', 'critical')
-    if (bwPct >= 90) modalBwFill.classList.add('critical')
-    else if (bwPct >= 70) modalBwFill.classList.add('warning')
-  }
-
-  const modalStatUsed = document.getElementById('modal-stat-used')
-  if (modalStatUsed) modalStatUsed.textContent = `${usedGb.toFixed(2)} GB`
-
-  const modalStatRemaining = document.getElementById('modal-stat-remaining')
-  if (modalStatRemaining) {
-    const remaining = Math.max(0, limitGb - usedGb)
-    modalStatRemaining.textContent = `${remaining.toFixed(2)} GB`
-  }
-
-  // Footer Version
-  if (statusData.version) {
-    const versionEl = document.getElementById('footer-version')
-    if (versionEl) versionEl.textContent = 'v' + statusData.version
-  }
-
-  // IPv6 Exposure Notice
-  const ipv6Banner = document.getElementById('ipv6-warning-banner')
-  if (ipv6Banner) {
-    ipv6Banner.style.display = statusData.allow_ipv6 ? 'block' : 'none'
-  }
-
-  // 3. Expiry / Countdown Timer
-  const expiryRaw = document.getElementById('expiry-date-raw')
-  const timerEl = document.getElementById('countdown-timer')
-  const progressEl = document.getElementById('subscription-progress')
-
-  if (statusData.expires_at && statusData.expires_at !== 'Unknown') {
-    const parsedDate = new Date(statusData.expires_at)
-    if (!isNaN(parsedDate.getTime())) {
-      expiryRaw.textContent = parsedDate.toLocaleString()
-      targetExpiry = parsedDate
-    } else {
-      targetExpiry = null
-      expiryRaw.textContent = 'Invalid Expiry Date'
-      timerEl.textContent = 'No Active Subscription'
-      progressEl.style.width = '0%'
-    }
-  } else {
-    targetExpiry = null
-    expiryRaw.textContent = 'Unconfigured / Inactive'
-    timerEl.textContent = 'No Active Subscription'
-    progressEl.style.width = '0%'
-  }
-
-  if (!countdownInterval) {
-    countdownInterval = setInterval(() => {
-      if (!targetExpiry) return
-
-      const now = new Date()
-      const timeDiff = targetExpiry - now
-
-      const tEl = document.getElementById('countdown-timer')
-      const pEl = document.getElementById('subscription-progress')
-      if (!tEl || !pEl) return
-
-      if (timeDiff <= 0) {
-        tEl.textContent = 'Expired'
-        tEl.style.color = '#ef4444'
-        pEl.style.width = '0%'
-      } else {
-        tEl.style.color = ''
-        const days = Math.floor(timeDiff / (1000 * 60 * 60 * 24))
-        const hours = Math.floor(
-          (timeDiff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60),
-        )
-        const minutes = Math.floor((timeDiff % (1000 * 60 * 60)) / (1000 * 60))
-        const seconds = Math.floor((timeDiff % (1000 * 60)) / 1000)
-
-        if (days > 0) {
-          tEl.textContent = `${days}d ${hours}h ${minutes}m`
-        } else {
-          tEl.textContent = `${hours}h ${minutes}m ${seconds}s`
-        }
-
-        const maxTerm = 30 * 24 * 60 * 60 * 1000
-        const percentage = Math.min(
-          100,
-          Math.max(0, (timeDiff / maxTerm) * 100),
-        )
-        pEl.style.width = `${percentage}%`
-      }
-    }, 1000)
-  }
-}
-
-// ─────────────────────────────────────────────
-// Navigation & Views
-// ─────────────────────────────────────────────
-function showStorefrontView() {
-  const storefrontView = document.getElementById('view-storefront')
-  const telemetryView = document.getElementById('view-telemetry')
-  const backBtn = document.getElementById('btn-back-to-telemetry')
-  const byocHomeBtn = document.getElementById('btn-byoc-home')
-
-  storefrontView.dataset.userNavigated = 'true'
-  storefrontView.style.display = 'flex'
-  telemetryView.style.display = 'none'
-  const isConfigured = Boolean(statusData && statusData.configured)
-  if (backBtn) backBtn.style.display = isConfigured ? 'inline-flex' : 'none'
-  if (byocHomeBtn)
-    byocHomeBtn.style.display = isConfigured ? 'inline-flex' : 'none'
-}
-
-function showTelemetryView() {
-  const storefrontView = document.getElementById('view-storefront')
-  const telemetryView = document.getElementById('view-telemetry')
-
-  storefrontView.dataset.userNavigated = 'true'
-  storefrontView.style.display = 'none'
-  telemetryView.style.display = 'flex'
-}
-
-function goToHomepage() {
-  closeAllModals()
-  toggleByoc(false)
-  if (statusData && statusData.configured) {
-    showTelemetryView()
-  } else {
-    showStorefrontView()
-    window.scrollTo({ top: 0, behavior: 'smooth' })
-  }
-}
-
-function closeAllModals() {
-  ;[
-    'bandwidth-modal',
-    'payment-modal',
-    'renewal-modal',
-    'faq-modal',
-    'export-modal',
-  ].forEach((id) => {
-    const modal = document.getElementById(id)
-    if (modal && modal.open) {
-      modal.close()
-    }
-  })
-  if (activePollingInterval) {
-    clearInterval(activePollingInterval)
-    activePollingInterval = null
-  }
-}
-
-// ─────────────────────────────────────────────
-// Storefront Selection Handlers
-// ─────────────────────────────────────────────
-function selectNode(node, btn) {
-  selectedNode = node === 'cln' ? 'cln' : 'lnd'
-  document.querySelectorAll('.node-selector-pills .pill-btn').forEach((el) => {
-    el.classList.remove('active')
-  })
-  btn.classList.add('active')
-}
-
-function selectPlan(duration, card) {
-  selectedDuration = duration
-  document.querySelectorAll('.plan-cards-grid .plan-card').forEach((el) => {
-    el.classList.remove('active')
-  })
-  card.classList.add('active')
-}
-
-function selectRenewalPlan(duration, card) {
-  selectedRenewalDuration = duration
-  document.querySelectorAll('#renewal-modal .plan-card').forEach((el) => {
-    el.classList.remove('active')
-  })
-  card.classList.add('active')
-}
-
-function toggleByoc(forceOpen) {
-  const harmonica = document.getElementById('byoc-harmonica')
-  const btn = document.getElementById('byoc-toggle-btn')
-  if (!harmonica || !btn) return
-  const isOpen =
-    typeof forceOpen === 'boolean'
-      ? forceOpen
-        ? (harmonica.classList.add('open'), true)
-        : (harmonica.classList.remove('open'), false)
-      : harmonica.classList.toggle('open')
-  btn.setAttribute('aria-expanded', isOpen ? 'true' : 'false')
-}
-
-// ─────────────────────────────────────────────
-// Dynamic Bitcoin & Subscription Pricing Logic
-// ─────────────────────────────────────────────
+// Reference USD plan pricing from the TunnelSats backend's pricing module
+// (Tunnelsats/tunnelsats-v2-web, src/lib/pricing.ts: BASE_PRICE_USD = 3 per
+// month, DISCOUNTS 1/3/6/12 months = 0/5/10/20 %). GET /api/dashboard supplies
+// m.plans from bridge.py; the Buy/Renew action fetches the live quote and
+// shows the exact amount in sats on the invoice.
 const BASE_PRICE_USD = 3
-const PLAN_DISCOUNTS = {
-  1: 0,
-  3: 0.05,
-  6: 0.1,
-  12: 0.2,
-}
-let currentSatsPerDollar = 1200 // Conservative fallback rate (~$83.3k BTC)
-
-function calculatePlanPrice(months, satsPerDollar) {
-  const discount = PLAN_DISCOUNTS[months] || 0
-  const grossUsd = BASE_PRICE_USD * months
-  const discountedUsd = grossUsd * (1 - discount)
-  return Math.floor(discountedUsd * satsPerDollar)
-}
-
-async function fetchSatsPerDollar() {
-  // Try Mempool.space first
-  try {
-    const res = await fetch('https://mempool.space/api/v1/prices')
-    if (res.ok) {
-      const data = await res.json()
-      if (data && data.USD && Number(data.USD) > 0) {
-        return Math.floor(100_000_000 / Number(data.USD))
-      }
-    }
-  } catch (e) {
-    console.warn('mempool.space price API failed, trying fallback:', e)
-  }
-
-  // Fallback: blockchain.info ticker
-  try {
-    const res = await fetch('https://blockchain.info/ticker')
-    if (res.ok) {
-      const data = await res.json()
-      const btcPrice = data && data.USD && (data.USD.buy || data.USD.last)
-      if (btcPrice && Number(btcPrice) > 0) {
-        return Math.floor(100_000_000 / Number(btcPrice))
-      }
-    }
-  } catch (e) {
-    console.warn('blockchain.info price API failed:', e)
-  }
-
-  return currentSatsPerDollar
-}
-
-async function updateDynamicPricing() {
-  try {
-    currentSatsPerDollar = await fetchSatsPerDollar()
-    const durations = [1, 3, 6, 12]
-    durations.forEach((months) => {
-      const sats = calculatePlanPrice(months, currentSatsPerDollar)
-      const formatted = sats.toLocaleString()
-
-      // Update storefront plan cards
-      const storefrontPriceEl = document.getElementById(`plan-price-${months}`)
-      if (storefrontPriceEl) {
-        storefrontPriceEl.textContent = formatted
-      }
-
-      // Update renewal modal plan cards
-      const renewalPriceEl = document.getElementById(
-        `renewal-plan-price-${months}`,
-      )
-      if (renewalPriceEl) {
-        renewalPriceEl.textContent = formatted
-      }
-    })
-  } catch (e) {
-    console.warn('Dynamic pricing update failed:', e)
-  }
-}
-
-// ─────────────────────────────────────────────
-// Checkout & Payment Modal Flow
-// ─────────────────────────────────────────────
-async function generateKeys() {
-  try {
-    const res = await fetch('/api/keys/generate', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Requested-With': 'XMLHttpRequest',
-        'X-TunnelSats-CSRF': getCsrfToken(),
-        'X-CSRF-Token': getCsrfToken(),
-      },
-    })
-    if (res.ok) {
-      const data = await res.json()
-      return { privateKey: data.private_key, publicKey: data.public_key }
-    }
-  } catch (err) {
-    console.warn('Server-side keygen failed, using WebCrypto fallback:', err)
-  }
-
-  // Fallback: WebCrypto X25519 if supported
-  if (window.crypto && window.crypto.subtle) {
-    try {
-      const pair = await window.crypto.subtle.generateKey(
-        { name: 'X25519' },
-        true,
-        ['deriveKey', 'deriveBits'],
-      )
-      const privRaw = await window.crypto.subtle.exportKey(
-        'pkcs8',
-        pair.privateKey,
-      )
-      const pubRaw = await window.crypto.subtle.exportKey('raw', pair.publicKey)
-      const privBytes = new Uint8Array(privRaw).slice(16)
-      const pubBytes = new Uint8Array(pubRaw)
-      return {
-        privateKey: btoa(String.fromCharCode(...privBytes)),
-        publicKey: btoa(String.fromCharCode(...pubBytes)),
-      }
-    } catch (e) {
-      console.error('WebCrypto keygen error:', e)
-    }
-  }
-  throw new Error('Unable to generate WireGuard keypair.')
-}
-
-async function startCheckout() {
-  // The claim is saved for the node chosen now: the operator may change the
-  // selection while a paid claim is still retrying.
-  const targetNode = selectedNode
-  if (paidClaimInFlight) {
-    alert(
-      `A paid order is still being provisioned (payment hash ${paidClaimInFlight}). Keep this page open until it is saved before starting another checkout.`,
-    )
-    return
-  }
-  const serverSelect = document.getElementById('select-server')
-  const serverId = serverSelect ? serverSelect.value : ''
-  if (!serverId) {
-    alert('Please select a VPN server region.')
-    return
-  }
-
-  const seq = ++checkoutSeq
-  // A newer checkout started while this one awaited: drop this one. Its
-  // invoice, if created, was never shown and cannot have been paid.
-  const superseded = () => seq !== checkoutSeq
-
-  openPaymentModal()
-  setPaymentStatus('Generating WireGuard keypair...', 'pulse-amber')
-
-  try {
-    const keypair = await generateKeys()
-    if (superseded()) return
-    currentKeypair = keypair
-    setPaymentStatus('Creating Lightning invoice...', 'pulse-amber')
-
-    const orderRes = await fetch(
-      'https://tunnelsats.com/api/public/v1/subscription/create',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          serverId,
-          duration: selectedDuration,
-          wgPublicKey: keypair.publicKey,
-        }),
-      },
-    )
-
-    if (!orderRes.ok) {
-      throw new Error(`Order creation failed (HTTP ${orderRes.status})`)
-    }
-
-    const order = await orderRes.json()
-    if (superseded()) return
-    renderPaymentDetails(
-      order.invoice,
-      order.amountSats ||
-        calculatePlanPrice(selectedDuration, currentSatsPerDollar),
-      `${selectedDuration} Month${selectedDuration > 1 ? 's' : ''} Subscription`,
-    )
-    pollOrderSettlement(order.paymentHash, keypair, serverId, targetNode)
-  } catch (err) {
-    if (superseded()) return
-    console.error('Checkout error:', err)
-    setPaymentStatus(`Error: ${err.message}`, 'pulse-amber')
-  }
-}
-
-function renderPaymentDetails(invoice, sats, planDesc) {
-  const amountEl = document.getElementById('payment-sats-amount')
-  const planEl = document.getElementById('payment-plan-desc')
-  const invoiceInput = document.getElementById('invoice-text')
-  const walletBtn = document.getElementById('btn-open-wallet')
-  const qrContainer = document.getElementById('payment-qr-container')
-
-  if (amountEl) amountEl.textContent = sats.toLocaleString()
-  if (planEl) planEl.textContent = planDesc
-  if (invoiceInput) invoiceInput.value = invoice
-  if (walletBtn) walletBtn.href = `lightning:${invoice}`
-
-  // Render QR Code using qrcode.js
-  if (qrContainer) {
-    try {
-      if (typeof qrcode !== 'undefined') {
-        const qr = qrcode(0, 'M')
-        qr.addData(invoice)
-        qr.make()
-        qrContainer.innerHTML = qr.createSvgTag(4, 0)
-      } else {
-        qrContainer.innerHTML =
-          "<div class='qr-loading'>Invoice generated. Copy text below.</div>"
-      }
-    } catch (e) {
-      console.error('QR render error:', e)
-      qrContainer.innerHTML =
-        "<div class='qr-loading'>Scan via wallet or copy invoice below.</div>"
-    }
-  }
-
-  setPaymentStatus('Waiting for payment settlement...', 'pulse-amber')
-}
-
-function pollOrderSettlement(paymentHash, keypair, serverId, targetNode) {
-  if (activePollingInterval) clearInterval(activePollingInterval)
-  activePaymentHash = paymentHash
-
-  activePollingInterval = setInterval(async () => {
-    try {
-      const res = await fetch(
-        `https://tunnelsats.com/api/public/v1/subscription/${paymentHash}`,
-      )
-      if (res.ok) {
-        const data = await res.json()
-        if (data.status === 'paid') {
-          clearInterval(activePollingInterval)
-          activePollingInterval = null
-          paidClaimInFlight = paymentHash
-          setPaymentStatus(
-            'Payment confirmed! Provisioning tunnel...',
-            'pulse-green',
-          )
-          await claimAndSaveConfig(paymentHash, keypair, targetNode)
-        }
-      }
-    } catch (err) {
-      console.warn('Polling status error:', err)
-    }
-  }, 3500)
-}
-
-// Claim field validation, mirroring bridge.py (assemble_claimed_config).
-const WG_KEY_RE = /^[A-Za-z0-9+/]{43}=$/
-const HOSTNAME_RE =
-  /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/
-
-function isIPv4(value) {
-  const parts = value.split('.')
-  return (
-    parts.length === 4 &&
-    parts.every((p) => /^(0|[1-9]\d{0,2})$/.test(p) && Number(p) <= 255)
-  )
-}
-
-function isIPv6(value) {
-  if (!value.includes(':') || !/^[0-9A-Fa-f:.]+$/.test(value)) return false
-  try {
-    new URL(`http://[${value}]/`)
-    return true
-  } catch {
-    return false
-  }
-}
-
-// An address or network with an optional prefix length.
-function isIpWithPrefix(value) {
-  const [ip, prefix, ...rest] = value.split('/')
-  if (rest.length) return false
-  const v4 = isIPv4(ip)
-  if (!v4 && !isIPv6(ip)) return false
-  if (prefix === undefined) return true
-  return /^\d{1,3}$/.test(prefix) && Number(prefix) <= (v4 ? 32 : 128)
-}
-
-function isEndpoint(value) {
-  const parts = value.split(':')
-  if (parts.length !== 2) return false
-  const [host, port] = parts
-  return (
-    HOSTNAME_RE.test(host) &&
-    /^\d{1,5}$/.test(port) &&
-    Number(port) >= 1 &&
-    Number(port) <= 65535
-  )
-}
-
-// A claim is only accepted for the key generated here; its config is built
-// from the structured fields and the local private key. fullConfig, config
-// and any private key in the response are never used, and every value is
-// validated so the response cannot add lines (a PostUp) to the config or
-// save a config that cannot form a tunnel.
-function assembleWireguardConfig(claimData, keypair) {
-  const server = claimData.server || {}
-  const peer = claimData.peer || {}
-  if (peer.publicKey !== keypair.publicKey) {
-    throw new Error(
-      'The claim was provisioned for a different WireGuard key; not saving it.',
-    )
-  }
-  const vpnPort = claimData.vpnPort
-  if (!Number.isInteger(vpnPort) || vpnPort < 1 || vpnPort > 65535) {
-    throw new Error('The claim has no valid VPN port.')
-  }
-  const str = (v) => typeof v === 'string' && v === v.trim() && v !== ''
-  const allowedIPs =
-    server.allowedIPs === undefined || server.allowedIPs === null
-      ? '0.0.0.0/0, ::/0'
-      : server.allowedIPs
-  const valid =
-    str(server.endpoint) &&
-    isEndpoint(server.endpoint) &&
-    str(server.publicKey) &&
-    WG_KEY_RE.test(server.publicKey) &&
-    str(peer.address) &&
-    isIpWithPrefix(peer.address) &&
-    typeof allowedIPs === 'string' &&
-    allowedIPs.split(',').every((n) => isIpWithPrefix(n.trim())) &&
-    (peer.presharedKey == null ||
-      (typeof peer.presharedKey === 'string' &&
-        WG_KEY_RE.test(peer.presharedKey))) &&
-    (claimData.subscriptionEnd == null ||
-      (str(claimData.subscriptionEnd) &&
-        !Number.isNaN(Date.parse(claimData.subscriptionEnd))))
-  if (!valid) {
-    throw new Error('The claim is incomplete or malformed.')
-  }
-
-  const lines = [
-    '[Interface]',
-    `PrivateKey = ${keypair.privateKey}`,
-    `Address = ${peer.address}`,
-  ]
-  if (claimData.subscriptionEnd) {
-    lines.push(
-      `# Valid Until: ${new Date(claimData.subscriptionEnd).toISOString()}`,
-    )
-  }
-  lines.push(`# VPNPort: ${vpnPort}`)
-  lines.push(`# Server: ${server.endpoint.split(':')[0]}`)
-  lines.push('')
-  lines.push('[Peer]')
-  lines.push(`PublicKey = ${server.publicKey}`)
-  lines.push(`Endpoint = ${server.endpoint}`)
-  lines.push(
-    `AllowedIPs = ${allowedIPs
-      .split(',')
-      .map((n) => n.trim())
-      .join(', ')}`,
-  )
-  if (peer.presharedKey != null) {
-    lines.push(`PresharedKey = ${peer.presharedKey}`)
-  }
-  return lines.join('\n') + '\n'
-}
-
-// A paid claim is retried for as long as the page is open while the outcome
-// is transient: the private key only exists in this page, so giving up would
-// strand the payment. Only a claim that can never be accepted stops it.
-const CLAIM_RETRY_BASE_MS = 3500
-const CLAIM_RETRY_MAX_MS = 60000
-
-function isTransientStatus(status) {
-  return status === 429 || status >= 500
-}
-
-function retryClaim(paymentHash, keypair, targetNode, attempt, reason) {
-  const delay = Math.min(
-    CLAIM_RETRY_BASE_MS * 2 ** (attempt - 1),
-    CLAIM_RETRY_MAX_MS,
-  )
-  setPaymentStatus(
-    `${reason} Retrying in ${Math.round(delay / 1000)} s. Keep this page open (payment hash ${paymentHash}).`,
-    'pulse-amber',
-  )
-  setTimeout(
-    () => claimAndSaveConfig(paymentHash, keypair, targetNode, attempt + 1),
-    delay,
-  )
-}
-
-async function claimAndSaveConfig(
-  paymentHash,
-  keypair,
-  targetNode,
-  attempt = 1,
-) {
-  try {
-    if (targetNode !== 'lnd' && targetNode !== 'cln') {
-      throw new Error('No Lightning node was chosen for this checkout.')
-    }
-    let claimRes
-    try {
-      claimRes = await fetch(
-        'https://tunnelsats.com/api/public/v1/subscription/claim',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            paymentHash: paymentHash,
-            wgPublicKey: keypair.publicKey,
-          }),
-        },
-      )
-    } catch (err) {
-      retryClaim(
-        paymentHash,
-        keypair,
-        targetNode,
-        attempt,
-        `Network error: ${err.message}.`,
-      )
-      return
-    }
-
-    if (isTransientStatus(claimRes.status)) {
-      retryClaim(
-        paymentHash,
-        keypair,
-        targetNode,
-        attempt,
-        `The TunnelSats API is unavailable (HTTP ${claimRes.status}).`,
-      )
-      return
-    }
-    if (!claimRes.ok) {
-      throw new Error(`Failed to claim configuration (HTTP ${claimRes.status})`)
-    }
-
-    const claimData = await claimRes.json()
-    if (claimRes.status === 202 || claimData.status === 'processing') {
-      retryClaim(
-        paymentHash,
-        keypair,
-        targetNode,
-        attempt,
-        'Payment confirmed! The tunnel is being provisioned.',
-      )
-      return
-    }
-    const fullConfig = assembleWireguardConfig(claimData, keypair)
-
-    // Save to local container bridge
-    let saveRes
-    try {
-      saveRes = await fetch('/api/config/save', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Requested-With': 'XMLHttpRequest',
-          'X-TunnelSats-CSRF': getCsrfToken(),
-          'X-CSRF-Token': getCsrfToken(),
-        },
-        body: JSON.stringify({
-          config: fullConfig,
-          target_node: targetNode,
-        }),
-      })
-    } catch (err) {
-      retryClaim(
-        paymentHash,
-        keypair,
-        targetNode,
-        attempt,
-        `Could not reach StartOS to save the configuration: ${err.message}.`,
-      )
-      return
-    }
-
-    if (isTransientStatus(saveRes.status)) {
-      retryClaim(
-        paymentHash,
-        keypair,
-        targetNode,
-        attempt,
-        `Saving the configuration failed (HTTP ${saveRes.status}).`,
-      )
-      return
-    }
-    if (!saveRes.ok) {
-      const errJson = await saveRes.json().catch(() => ({}))
-      throw new Error(
-        errJson.error || 'Failed to save configuration to StartOS',
-      )
-    }
-
-    if (paidClaimInFlight === paymentHash) paidClaimInFlight = null
-    setPaymentStatus(
-      'Configuration provisioned! Accept the routing prompt on your Lightning node.',
-      'pulse-green',
-    )
-    setTimeout(() => {
-      closePaymentModal()
-      delete document.getElementById('view-storefront').dataset.userNavigated
-      fetchStatus(true)
-      alert(
-        'Configuration provisioned successfully!\n\nTo activate routing, accept the 1-click prompt on your Lightning node: "Route [Node] through the TunnelSats tunnel". Your node will start its in-container WireGuard tunnel and announce its public address.',
-      )
-    }, 1600)
-  } catch (err) {
-    console.error('Claim error:', err)
-    // A permanent failure: retrying cannot save this claim, so a new
-    // checkout is allowed again.
-    if (paidClaimInFlight === paymentHash) paidClaimInFlight = null
-    // Nothing was saved. The payment hash lets support recover the paid
-    // order; keep this page open, the private key only exists here.
-    setPaymentStatus(
-      `Provisioning error: ${err.message} Keep this page open and contact support with payment hash ${paymentHash}.`,
-      'pulse-amber',
-    )
-  }
-}
-
-// ─────────────────────────────────────────────
-// Bring Your Own Config (BYOC)
-// ─────────────────────────────────────────────
-async function saveManualConfig() {
-  const textarea = document.getElementById('byoc-conf-input')
-  const conf = textarea ? textarea.value.trim() : ''
-  if (!conf) {
-    alert('Please paste a valid WireGuard configuration file.')
-    return
-  }
-
-  try {
-    const res = await fetch('/api/config/save', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Requested-With': 'XMLHttpRequest',
-        'X-TunnelSats-CSRF': getCsrfToken(),
-        'X-CSRF-Token': getCsrfToken(),
-      },
-      body: JSON.stringify({ config: conf, target_node: selectedNode }),
-    })
-
-    if (res.ok) {
-      alert(
-        'Configuration saved successfully!\n\nTo complete activation, accept the 1-click prompt on your Lightning node: "Route [Node] through the TunnelSats tunnel".',
-      )
-      if (textarea) textarea.value = ''
-      delete document.getElementById('view-storefront').dataset.userNavigated
-      fetchStatus(true)
-    } else {
-      const err = await res.json().catch(() => ({ error: 'Validation failed' }))
-      alert(`Failed to save configuration: ${err.error || 'Unknown error'}`)
-    }
-  } catch (e) {
-    alert(`Error saving configuration: ${e.message}`)
-  }
-}
-
-// ─────────────────────────────────────────────
-// Renewal Flow
-// ─────────────────────────────────────────────
-const SERVER_DOMAIN_TO_ID = {
-  'de2.tunnelsats.com': 'eu-de',
-  'de3.tunnelsats.com': 'eu-de',
-  'ch1.tunnelsats.com': 'eu-ch',
-  'us3.tunnelsats.com': 'us-east',
-  'us1.tunnelsats.com': 'us-east',
-  'us2.tunnelsats.com': 'us-west',
-  'sg1.tunnelsats.com': 'asia-sg',
-  'au1.tunnelsats.com': 'oc-au',
-  'br1.tunnelsats.com': 'sa-br',
-}
-
-function mapDomainToServerId(domainOrId) {
-  if (!domainOrId || domainOrId === 'Unknown' || domainOrId === 'None')
-    return null
-  const lower = String(domainOrId).toLowerCase().trim()
-  if (SERVER_DOMAIN_TO_ID[lower]) return SERVER_DOMAIN_TO_ID[lower]
-  if (
-    [
-      'eu-de',
-      'eu-ch',
-      'us-east',
-      'us-west',
-      'asia-sg',
-      'sa-br',
-      'oc-au',
-    ].includes(lower)
-  ) {
-    return lower
-  }
-  if (
-    lower.includes('de2') ||
-    lower.includes('de3') ||
-    lower.includes('frankfurt') ||
-    lower.includes('nuremberg') ||
-    lower.includes('germany')
-  )
-    return 'eu-de'
-  if (
-    lower.includes('ch1') ||
-    lower.includes('zurich') ||
-    lower.includes('geneva') ||
-    lower.includes('switzerland')
-  )
-    return 'eu-ch'
-  if (
-    lower.includes('us3') ||
-    lower.includes('us1') ||
-    lower.includes('ashburn') ||
-    lower.includes('new york') ||
-    lower.includes('us-east')
-  )
-    return 'us-east'
-  if (
-    lower.includes('us2') ||
-    lower.includes('hillsboro') ||
-    lower.includes('oregon') ||
-    lower.includes('los angeles') ||
-    lower.includes('us-west')
-  )
-    return 'us-west'
-  if (
-    lower.includes('sg1') ||
-    lower.includes('singapore') ||
-    lower.includes('asia-sg')
-  )
-    return 'asia-sg'
-  if (
-    lower.includes('au1') ||
-    lower.includes('sydney') ||
-    lower.includes('australia') ||
-    lower.includes('oc-au')
-  )
-    return 'oc-au'
-  if (
-    lower.includes('br1') ||
-    lower.includes('sao paulo') ||
-    lower.includes('brazil') ||
-    lower.includes('sa-br')
-  )
-    return 'sa-br'
-  return null
-}
-
-function openRenewalModal() {
-  const modal = document.getElementById('renewal-modal')
-  if (!modal) return
-
-  const serverSelectEl = document.getElementById('renewal-server-select')
-  const pubkeyEl = document.getElementById('renewal-pubkey')
-  const expiryEl = document.getElementById('renewal-current-expiry')
-
-  // Only derive from server domain or server metadata, never from public_ip
-  const currentServer =
-    statusData.server && statusData.server !== 'Unknown'
-      ? statusData.server
-      : statusData.server_domain && statusData.server_domain !== 'Unknown'
-        ? statusData.server_domain
-        : ''
-
-  const canonicalServerId = mapDomainToServerId(currentServer)
-  if (serverSelectEl) {
-    if (canonicalServerId) {
-      serverSelectEl.value = canonicalServerId
-    } else {
-      serverSelectEl.value = ''
-    }
-  }
-
-  if (pubkeyEl) pubkeyEl.textContent = statusData.pubkey || '...'
-  if (expiryEl) expiryEl.textContent = statusData.expiry_formatted || '...'
-
-  modal.showModal()
-}
-
-function closeRenewalModal() {
-  const modal = document.getElementById('renewal-modal')
-  if (!modal) return
-  modal.close()
-}
-
-async function startRenewalCheckout() {
-  const pubkey = statusData.pubkey
-  if (!pubkey || pubkey === 'None' || pubkey === 'Unknown') {
-    alert(
-      'No active WireGuard public key found for renewal. Please configure a tunnel first.',
-    )
-    return
-  }
-
-  const serverSelectEl = document.getElementById('renewal-server-select')
-  let serverId = serverSelectEl ? serverSelectEl.value : ''
-  if (!serverId) {
-    const rawServer =
-      statusData.server && statusData.server !== 'Unknown'
-        ? statusData.server
-        : statusData.server_domain && statusData.server_domain !== 'Unknown'
-          ? statusData.server_domain
-          : ''
-    serverId = mapDomainToServerId(rawServer)
-  }
-
-  if (!serverId) {
-    alert('Please select your VPN server region before renewing.')
-    return
-  }
-
-  closeRenewalModal()
-  openPaymentModal()
-  setPaymentStatus('Requesting renewal invoice...', 'pulse-amber')
-
-  try {
-    const res = await fetch(
-      'https://tunnelsats.com/api/public/v1/subscription/renew',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          serverId: serverId,
-          duration: selectedRenewalDuration,
-          wgPublicKey: pubkey,
-        }),
-      },
-    )
-
-    if (!res.ok) {
-      throw new Error(`Renewal request failed (HTTP ${res.status})`)
-    }
-
-    const data = await res.json()
-    renderPaymentDetails(
-      data.invoice,
-      data.amountSats ||
-        calculatePlanPrice(selectedRenewalDuration, currentSatsPerDollar),
-      `${selectedRenewalDuration} Month${selectedRenewalDuration > 1 ? 's' : ''} Renewal`,
-    )
-    pollRenewalSettlement(data.paymentHash)
-  } catch (err) {
-    console.error('Renewal error:', err)
-    setPaymentStatus(`Renewal error: ${err.message}`, 'pulse-amber')
-  }
-}
-
-function pollRenewalSettlement(paymentHash) {
-  if (activePollingInterval) clearInterval(activePollingInterval)
-  activePaymentHash = paymentHash
-
-  activePollingInterval = setInterval(async () => {
-    try {
-      const res = await fetch(
-        `https://tunnelsats.com/api/public/v1/subscription/${paymentHash}`,
-      )
-      if (res.ok) {
-        const data = await res.json()
-        if (data.status === 'paid') {
-          clearInterval(activePollingInterval)
-          activePollingInterval = null
-          setPaymentStatus(
-            'Renewal settled! Synchronizing status...',
-            'pulse-green',
-          )
-
-          if (data.new_expiry || data.newExpiry) {
-            statusData.expires_at = data.new_expiry || data.newExpiry
-            updateUI()
-          }
-
-          setTimeout(async () => {
-            closePaymentModal()
-            await fetchStatus(true) // Triggers immediate bridge-side lazy_sync
-          }, 1500)
-        }
-      }
-    } catch (err) {
-      console.warn('Polling status error:', err)
-    }
-  }, 3500)
-}
-
-// ─────────────────────────────────────────────
-// Export Configuration
-// ─────────────────────────────────────────────
-function exportConfiguration() {
-  const modal = document.getElementById('export-modal')
-  if (modal) {
-    modal.showModal()
-  } else {
-    alert(
-      'To export your WireGuard configuration with your private key securely masked, navigate to StartOS Actions → Export WireGuard Configuration.',
-    )
-  }
-}
-
-function closeExportModal() {
-  const modal = document.getElementById('export-modal')
-  if (modal) modal.close()
-}
-
-// ─────────────────────────────────────────────
-// Modals Open / Close Helpers
-// ─────────────────────────────────────────────
-function openBandwidthModal() {
-  const modal = document.getElementById('bandwidth-modal')
-  if (modal) modal.showModal()
-}
-
-function closeBandwidthModal() {
-  const modal = document.getElementById('bandwidth-modal')
-  if (modal) modal.close()
-}
-
-function openPaymentModal() {
-  const modal = document.getElementById('payment-modal')
-  if (modal) modal.showModal()
-}
-
-function closePaymentModal() {
-  const modal = document.getElementById('payment-modal')
-  if (modal) {
-    if (activePollingInterval) {
-      clearInterval(activePollingInterval)
-      activePollingInterval = null
-    }
-    modal.close()
-  }
-}
-
-function setPaymentStatus(text, indicatorClass) {
-  const textEl = document.getElementById('payment-status-text')
-  const dotEl = document.getElementById('payment-status-dot')
-  if (textEl) textEl.textContent = text
-  if (dotEl) {
-    dotEl.className = `status-indicator-dot ${indicatorClass}`
-  }
-}
-
-function openFaqModal() {
-  const modal = document.getElementById('faq-modal')
-  if (modal) modal.showModal()
-}
-
-function closeFaqModal() {
-  const modal = document.getElementById('faq-modal')
-  if (modal) modal.close()
-}
-
-// ─────────────────────────────────────────────
-// Copy Utilities
-// ─────────────────────────────────────────────
-function handleCopySuccess(btn, successText) {
-  const originalText = btn.textContent
-  btn.textContent = successText
-  btn.classList.add('copied')
-  setTimeout(() => {
-    btn.textContent = originalText
-    btn.classList.remove('copied')
-  }, 1500)
-}
-
-function copyText(elementId, btn) {
-  const el = document.getElementById(elementId)
-  const text = el ? el.title || el.textContent : ''
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard
-      .writeText(text)
-      .then(() => handleCopySuccess(btn, 'Copied!'))
-  } else {
-    fallbackCopy(text, btn, 'Copied!')
-  }
-}
-
-function copyInvoice(btn) {
-  const input = document.getElementById('invoice-text')
-  const text = input ? input.value : ''
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard
-      .writeText(text)
-      .then(() => handleCopySuccess(btn, 'Copied!'))
-  } else {
-    fallbackCopy(text, btn, 'Copied!')
-  }
-}
-
-function fallbackCopy(text, btn, successText) {
-  const textarea = document.createElement('textarea')
-  textarea.value = text
-  textarea.style.position = 'fixed'
-  textarea.style.opacity = '0'
-  document.body.appendChild(textarea)
-  textarea.select()
-  try {
-    document.execCommand('copy')
-    handleCopySuccess(btn, successText)
-  } catch (err) {
-    console.error('Fallback copy failed', err)
-  }
-  document.body.removeChild(textarea)
-}
-
-// Modal Backdrop Click Handlers
-;[
-  'bandwidth-modal',
-  'payment-modal',
-  'renewal-modal',
-  'faq-modal',
-  'export-modal',
-].forEach((id) => {
-  const modal = document.getElementById(id)
-  if (modal) {
-    modal.addEventListener('click', (e) => {
-      const inner = modal.querySelector(
-        '.modal-dialog-inner, .faq-dialog-inner',
-      )
-      if (inner) {
-        if (!inner.contains(e.target)) {
-          modal.close()
-          if (id === 'payment-modal' && activePollingInterval) {
-            clearInterval(activePollingInterval)
-            activePollingInterval = null
-          }
-        }
-      } else if (e.target === modal) {
-        modal.close()
-        if (id === 'payment-modal' && activePollingInterval) {
-          clearInterval(activePollingInterval)
-          activePollingInterval = null
-        }
-      }
-    })
-    modal.addEventListener('cancel', () => {
-      if (id === 'payment-modal' && activePollingInterval) {
-        clearInterval(activePollingInterval)
-        activePollingInterval = null
-      }
-    })
-  }
+const PLAN_DISCOUNTS_PCT = Object.freeze([
+  Object.freeze({ months: 1, discountPct: 0 }),
+  Object.freeze({ months: 3, discountPct: 5 }),
+  Object.freeze({ months: 6, discountPct: 10 }),
+  Object.freeze({ months: 12, discountPct: 20 }),
+])
+const PLAN_PRICES_USD = Object.freeze(
+  PLAN_DISCOUNTS_PCT.map(({ months, discountPct }) =>
+    Object.freeze({
+      months,
+      usd: Math.round(BASE_PRICE_USD * months * (100 - discountPct)) / 100,
+      discountPct,
+    }),
+  ),
+)
+
+const NODE_LABELS = Object.freeze({
+  lnd: 'LND',
+  cln: 'Core Lightning',
+  'c-lightning': 'Core Lightning',
+  eclair: 'Eclair',
 })
 
-// Initial Status & Pricing Fetch
-fetchStatus()
-updateDynamicPricing()
+// StartOS package IDs, for `start-cli package attach <id>`.
+const NODE_PACKAGE_IDS = Object.freeze({
+  lnd: 'lnd',
+  cln: 'c-lightning',
+  'c-lightning': 'c-lightning',
+  eclair: 'eclair',
+})
 
-// Sensible gentle polling (every 60s while dashboard open)
-setInterval(() => {
-  if (!document.hidden) {
-    fetchStatus()
-  }
-}, 60000)
+let model = null
+let loadFailed = false
+let countdownTimer = null
 
-// Refresh BTC/USD exchange rate every 10 minutes
-setInterval(() => {
-  if (!document.hidden) {
-    updateDynamicPricing()
+// ─────────────────────────────────────────────
+// Pure helpers (unit-tested in tests/web_dashboard.test.ts)
+// ─────────────────────────────────────────────
+function nodeLabel(id) {
+  return NODE_LABELS[id] || 'your Lightning node'
+}
+
+function nodePackageId(id) {
+  return NODE_PACKAGE_IDS[id] || 'lnd'
+}
+
+function listNodes(ids) {
+  const labels = ids.map(nodeLabel)
+  if (labels.length <= 1) return labels.join('')
+  return `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`
+}
+
+function formatUsd(usd) {
+  return `$${usd.toFixed(2)}`
+}
+
+function formatTime(iso) {
+  if (!iso) return null
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleString()
+}
+
+function formatRemaining(ms) {
+  if (ms <= 0) return 'Expired'
+  const days = Math.floor(ms / DAY_MS)
+  const hours = Math.floor((ms % DAY_MS) / 3600000)
+  const minutes = Math.floor((ms % 3600000) / 60000)
+  return days > 0 ? `${days}d ${hours}h` : `${hours}h ${minutes}m`
+}
+
+function bandwidthPercent(m) {
+  const used = m && m.bandwidth ? m.bandwidth.usedGb : null
+  const limit = m && m.bandwidth ? m.bandwidth.limitGb : null
+  if (typeof used !== 'number' || typeof limit !== 'number' || limit <= 0) {
+    return null
   }
-}, 600000)
+  return Math.min(100, Math.max(0, (used / limit) * 100))
+}
+
+function isPaidPendingError(err) {
+  if (!err) return false
+  return /payment was received|renewal is paid|bandwidth reset was applied|bandwidth reset failed|claim|Provisioning failed|stored private key/i.test(
+    String(err),
+  )
+}
+
+function isPaymentReceived(pending) {
+  if (!pending) return false
+  return Boolean(
+    pending.paymentReceived || isPaidPendingError(pending.lastError),
+  )
+}
+
+function nextRetrySuffix(pending) {
+  const at = pending && formatTime(pending.nextAttemptAt)
+  return at ? ` Next try: ${at}.` : ''
+}
+
+function retryText(pending) {
+  if (!pending || !pending.lastError) return ''
+  return ` Last check failed: ${pending.lastError}${nextRetrySuffix(pending)}`
+}
+
+/**
+ * What needs the operator's attention, from the read model. Each notice
+ * names the StartOS action or node task to use; none claims anything the
+ * read model does not show.
+ */
+function buildNotices(m) {
+  const notices = []
+  if (!m) return notices
+  const sub = m.subscription || {}
+  const pending = m.pending || {}
+  const handoff = m.handoff
+  const target = nodeLabel(m.targetNode)
+
+  if (pending.order) {
+    if (isPaymentReceived(pending.order)) {
+      notices.push({
+        level: pending.order.lastError ? 'warning' : 'info',
+        title: 'Tunnel provisioning pending',
+        text: pending.order.lastError
+          ? `${pending.order.lastError}${nextRetrySuffix(pending.order)}`
+          : 'Payment received; TunnelSats is provisioning the tunnel and will save the configuration automatically.',
+      })
+    } else {
+      const node = nodeLabel(pending.order.targetNode)
+      notices.push({
+        level: 'info',
+        title: 'Payment pending',
+        text: `If you have not paid yet, accept the Pay Invoice task on ${node}. Once paid, TunnelSats sets up the tunnel automatically.${retryText(pending.order)}`,
+      })
+    }
+  }
+  if (pending.renewal) {
+    if (isPaymentReceived(pending.renewal)) {
+      notices.push({
+        level: pending.renewal.lastError ? 'warning' : 'info',
+        title: 'Renewal confirmation pending',
+        text: pending.renewal.lastError
+          ? `${pending.renewal.lastError}${nextRetrySuffix(pending.renewal)}`
+          : 'Payment received; waiting for TunnelSats to confirm the extended expiry.',
+      })
+    } else {
+      const node = nodeLabel(pending.renewal.targetNode)
+      notices.push({
+        level: 'info',
+        title: 'Renewal payment pending',
+        text: `If you have not paid yet, accept the Pay Invoice task on ${node}. Once paid, the new expiry is confirmed automatically.${retryText(pending.renewal)}`,
+      })
+    }
+  }
+  if (pending.reset) {
+    if (isPaymentReceived(pending.reset)) {
+      const failed = /bandwidth reset failed/i.test(
+        pending.reset.lastError || '',
+      )
+      notices.push({
+        level: failed ? 'error' : pending.reset.lastError ? 'warning' : 'info',
+        title: failed
+          ? 'Bandwidth reset failed'
+          : 'Bandwidth reset confirmation pending',
+        text: pending.reset.lastError
+          ? `${pending.reset.lastError}${failed ? '' : nextRetrySuffix(pending.reset)}`
+          : 'Payment received; waiting for TunnelSats to apply the bandwidth reset.',
+      })
+    } else {
+      const node = nodeLabel(pending.reset.targetNode)
+      const expires = formatTime(pending.reset.expiresAt)
+      notices.push({
+        level: 'info',
+        title: 'Bandwidth reset payment pending',
+        text: `If you have not paid yet, accept the Pay Invoice task on ${node}; once paid, the reset is applied automatically.${expires ? ` The invoice expires ${expires}.` : ''}${retryText(pending.reset)}`,
+      })
+    }
+  }
+
+  if (handoff && handoff.pendingOff && handoff.pendingOff.length) {
+    const nodes = listNodes(handoff.pendingOff)
+    notices.push({
+      level: 'warning',
+      title: `Waiting for ${nodes} to turn off the tunnel`,
+      text: `Accept the TunnelSats task on ${nodes} that turns its clearnet VPN off. ${target} is asked to take over afterwards.`,
+    })
+  }
+  if (handoff && handoff.unraised && handoff.unraised.length) {
+    notices.push({
+      level: 'warning',
+      title: `A task could not be raised on ${listNodes(handoff.unraised)}`,
+      text: 'TunnelSats retries automatically. Check that the node is installed and running.',
+    })
+  }
+
+  if (m.configured && !m.enabled) {
+    notices.push({
+      level: 'warning',
+      title: 'TunnelSats is switched off',
+      text: 'Turn it on again with the Configure action.',
+    })
+  }
+
+  if (m.configured && m.enabled) {
+    if (sub.keyUnknown) {
+      notices.push({
+        level: 'error',
+        title: 'Key unknown to TunnelSats',
+        text: 'TunnelSats has no subscription for the WireGuard key in this configuration. Run Import Subscription with a valid configuration, or Buy Subscription.',
+      })
+    } else if (m.status === 'expired') {
+      notices.push({
+        level: 'error',
+        title: 'Subscription expired',
+        text: 'Run Renew Subscription. Until then, TunnelSats has disabled the tunnel on its server, so clearnet peer connections through it stop.',
+      })
+    } else if (m.status === 'sync_error') {
+      notices.push({
+        level: 'warning',
+        title: 'Subscription not confirmed',
+        text: sub.syncError
+          ? `TunnelSats could not confirm the subscription: ${sub.syncError}`
+          : 'TunnelSats could not confirm the subscription yet; checking again.',
+      })
+    } else if (m.status === 'pending_sync') {
+      notices.push({
+        level: 'info',
+        title: 'Checking the subscription',
+        text: 'Waiting for TunnelSats to confirm the subscription for this key.',
+      })
+    } else if (
+      sub.active &&
+      typeof sub.daysRemaining === 'number' &&
+      sub.daysRemaining < 7 &&
+      !pending.renewal
+    ) {
+      notices.push({
+        level: 'warning',
+        title:
+          sub.daysRemaining < 1
+            ? 'Subscription ends within a day'
+            : `Subscription ends in ${sub.daysRemaining} day${sub.daysRemaining === 1 ? '' : 's'}`,
+        text: 'Run Renew Subscription to extend it.',
+      })
+    }
+
+    const pct = bandwidthPercent(m)
+    if (pct !== null && pct >= BANDWIDTH_WARN_PCT && !pending.reset) {
+      notices.push({
+        level: pct >= BANDWIDTH_CRITICAL_PCT ? 'warning' : 'info',
+        title: `${Math.floor(pct)}% of this month's bandwidth used`,
+        text: 'Run Reset Bandwidth to reset the counter early, or wait for the reset on the 1st.',
+      })
+    }
+  }
+
+  if (m.connection && m.connection.allowIpv6) {
+    notices.push({
+      level: 'info',
+      title: 'Allow IPv6 Endpoint is on',
+      text: 'TunnelSats may hand your node an IPv6 server endpoint to announce. How your node routes its own IPv6 traffic is decided by the Lightning node package.',
+    })
+  }
+  return notices
+}
+
+/** The StartOS actions that fit the current state (highlighted in the list). */
+function suggestedActions(m) {
+  const suggested = []
+  if (!m) return suggested
+  const sub = m.subscription || {}
+  const pending = m.pending || {}
+  if (!m.configured) {
+    if (!pending.order) suggested.push('buy', 'import')
+    return suggested
+  }
+  if (!m.enabled) return ['configure']
+  if (sub.keyUnknown) return ['import', 'buy']
+  if (
+    !pending.renewal &&
+    (m.status === 'expired' ||
+      (sub.active &&
+        typeof sub.daysRemaining === 'number' &&
+        sub.daysRemaining < 7))
+  ) {
+    suggested.push('renew')
+  }
+  const pct = bandwidthPercent(m)
+  if (pct !== null && pct >= BANDWIDTH_WARN_PCT && !pending.reset) {
+    suggested.push('reset')
+  }
+  return suggested
+}
+
+/** Routing handoff state in words; never claims the tunnel is up. */
+function handoffText(m) {
+  const handoff = m && m.handoff
+  if (!handoff) return 'No task raised yet'
+  if (handoff.pendingOff && handoff.pendingOff.length) {
+    return `Waiting for ${listNodes(handoff.pendingOff)} to turn off`
+  }
+  if (handoff.unraised && handoff.unraised.length) {
+    return `Retrying task on ${listNodes(handoff.unraised)}`
+  }
+  if (handoff.activeTarget) {
+    return `Task raised on ${nodeLabel(handoff.activeTarget)}`
+  }
+  return 'No task raised yet'
+}
+
+function badgeState(m, failed) {
+  if (failed) return { cls: 'neutral', text: 'Status unavailable' }
+  if (!m) return { cls: 'neutral', text: 'Loading…' }
+  if (!m.configured) {
+    if (m.pending && m.pending.order) {
+      return isPaymentReceived(m.pending.order)
+        ? { cls: 'pending', text: 'Provisioning tunnel' }
+        : { cls: 'pending', text: 'Payment pending' }
+    }
+    return { cls: 'neutral', text: 'Not set up' }
+  }
+  if (!m.enabled) return { cls: 'neutral', text: 'Switched off' }
+  switch (m.status) {
+    case 'running':
+      return { cls: 'active', text: 'Subscription active' }
+    case 'expired':
+      return { cls: 'alert', text: 'Subscription expired' }
+    case 'unknown_key':
+      return { cls: 'alert', text: 'Key unknown' }
+    case 'sync_error':
+      return { cls: 'pending', text: 'Not confirmed' }
+    default:
+      return { cls: 'pending', text: 'Checking…' }
+  }
+}
+
+// ─────────────────────────────────────────────
+// Rendering (textContent only: values from the read model are never parsed
+// as HTML)
+// ─────────────────────────────────────────────
+function byId(id) {
+  return document.getElementById(id)
+}
+
+function setText(id, text) {
+  const el = byId(id)
+  if (el) el.textContent = text
+}
+
+function setWidth(id, pct) {
+  const el = byId(id)
+  if (el) el.style.width = `${pct}%`
+}
+
+function setLevel(el, pct) {
+  if (!el) return
+  el.classList.remove('warning', 'critical')
+  if (pct >= BANDWIDTH_CRITICAL_PCT) el.classList.add('critical')
+  else if (pct >= BANDWIDTH_WARN_PCT) el.classList.add('warning')
+}
+
+function renderPlans(m) {
+  const list = byId('plan-list')
+  if (!list) return
+  const plans =
+    m && Array.isArray(m.plans) && m.plans.length ? m.plans : PLAN_PRICES_USD
+  const items = plans.map((plan) => {
+    const li = document.createElement('li')
+    li.className = 'plan-card'
+    const duration = document.createElement('span')
+    duration.className = 'plan-duration'
+    duration.textContent = `${plan.months} month${plan.months > 1 ? 's' : ''}`
+    const price = document.createElement('span')
+    price.className = 'plan-price'
+    price.textContent = formatUsd(plan.usd)
+    const perMonth = document.createElement('span')
+    perMonth.className = 'plan-per-mo'
+    perMonth.textContent =
+      plan.discountPct > 0
+        ? `${formatUsd(plan.usd / plan.months)}/mo · save ${plan.discountPct}%`
+        : `${formatUsd(plan.usd)}/mo`
+    li.append(duration, price, perMonth)
+    return li
+  })
+  list.replaceChildren(...items)
+}
+
+function renderNotices(m) {
+  const section = byId('notices')
+  const list = byId('notice-list')
+  if (!section || !list) return
+  const items = buildNotices(m).map((notice) => {
+    const li = document.createElement('li')
+    li.className = `notice-item notice-${notice.level}`
+    const title = document.createElement('strong')
+    title.className = 'notice-title'
+    title.textContent = notice.title
+    const text = document.createElement('span')
+    text.className = 'notice-text'
+    text.textContent = notice.text
+    li.append(title, text)
+    return li
+  })
+  list.replaceChildren(...items)
+  section.hidden = items.length === 0
+}
+
+function renderBadge() {
+  const badge = byId('status-badge')
+  const state = badgeState(model, loadFailed)
+  if (badge) badge.className = `status-badge ${state.cls}`
+  setText('status-text', state.text)
+}
+
+function renderActions(m) {
+  const suggested = suggestedActions(m)
+  for (const id of ['buy', 'renew', 'reset', 'import', 'configure', 'export']) {
+    const item = byId(`action-${id}`)
+    if (item) item.classList.toggle('is-suggested', suggested.includes(id))
+  }
+}
+
+function renderCountdown() {
+  const expiresAt =
+    model && model.subscription ? model.subscription.expiresAt : null
+  const expiry = expiresAt ? new Date(expiresAt) : null
+  const timer = byId('countdown')
+  if (!expiry || Number.isNaN(expiry.getTime())) {
+    setText('expiry-date', 'Not confirmed')
+    setText('countdown', 'Unknown')
+    if (timer) timer.classList.remove('expired')
+    setWidth('subscription-progress', 0)
+    return
+  }
+  const remaining = expiry.getTime() - Date.now()
+  setText('expiry-date', `Expires ${expiry.toLocaleString()}`)
+  setText('countdown', formatRemaining(remaining))
+  if (timer) timer.classList.toggle('expired', remaining <= 0)
+  setWidth(
+    'subscription-progress',
+    Math.min(100, Math.max(0, (remaining / PROGRESS_TERM_MS) * 100)),
+  )
+}
+
+function formatPublicAddress(server, vpnPort) {
+  if (!server || !vpnPort) return 'Unknown'
+  const clean = String(server).replace(/^\[|\]$/g, '')
+  const host = clean.includes(':') ? `[${clean}]` : clean
+  return `${host}:${vpnPort}`
+}
+
+function renderOverview(m) {
+  const conn = m.connection || {}
+  setText('val-target-node', nodeLabel(m.targetNode))
+  setText('val-handoff', handoffText(m))
+  setText('val-endpoint', formatPublicAddress(conn.server, conn.vpnPort))
+  const pubkey = byId('val-pubkey')
+  if (pubkey) {
+    pubkey.textContent = conn.publicKey || 'Unknown'
+    pubkey.title = conn.publicKey || ''
+  }
+  setText('val-vpn-ip', conn.vpnIp || 'Unknown')
+  setText(
+    'val-last-sync',
+    formatTime(m.subscription && m.subscription.lastSync) || 'Not yet',
+  )
+
+  const pct = bandwidthPercent(m)
+  const used = m.bandwidth ? m.bandwidth.usedGb : null
+  const limit = m.bandwidth ? m.bandwidth.limitGb : 100
+  setText(
+    'bandwidth-used',
+    typeof used === 'number' ? `${used.toFixed(2)} GB` : 'Unknown',
+  )
+  setText('bandwidth-limit', `/ ${limit} GB`)
+  setText(
+    'modal-bandwidth-used',
+    typeof used === 'number' ? used.toFixed(2) : '–',
+  )
+  setText('modal-bandwidth-limit', `GB / ${limit} GB`)
+  setWidth('bandwidth-progress', pct || 0)
+  setWidth('modal-bandwidth-fill', pct || 0)
+  setLevel(byId('bandwidth-progress'), pct || 0)
+  setLevel(byId('modal-bandwidth-fill'), pct || 0)
+  renderCountdown()
+}
+
+function render() {
+  renderBadge()
+  const error = byId('load-error')
+  if (error) {
+    error.hidden = !loadFailed
+    error.textContent = loadFailed
+      ? 'The TunnelSats service did not answer. The values below may be out of date; retrying.'
+      : ''
+  }
+  if (!model) return
+  const setup = byId('view-setup')
+  const overview = byId('view-overview')
+  if (setup) setup.hidden = model.configured
+  if (overview) overview.hidden = !model.configured
+  setText(
+    'attach-command',
+    `start-cli package attach ${nodePackageId(model.targetNode)}`,
+  )
+  if (model.version) setText('footer-version', `v${model.version}`)
+  renderPlans(model)
+  renderNotices(model)
+  renderActions(model)
+  if (model.configured) renderOverview(model)
+}
+
+// ─────────────────────────────────────────────
+// Data
+// ─────────────────────────────────────────────
+async function refresh() {
+  try {
+    const response = await fetch(DASHBOARD_URL, {
+      cache: 'no-store',
+      credentials: 'same-origin',
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    model = await response.json()
+    loadFailed = false
+  } catch (error) {
+    console.error('Failed to load the dashboard state:', error)
+    loadFailed = true
+  }
+  render()
+}
+
+// ─────────────────────────────────────────────
+// Interaction
+// ─────────────────────────────────────────────
+function copyText(elementId, button) {
+  const el = byId(elementId)
+  const text = el ? el.title || el.textContent : ''
+  if (!text || text === 'Unknown') return
+  const done = () => {
+    const original = button.textContent
+    button.textContent = 'Copied'
+    button.classList.add('copied')
+    setTimeout(() => {
+      button.textContent = original
+      button.classList.remove('copied')
+    }, 1500)
+  }
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(done, () => {})
+    return
+  }
+  // Plain-HTTP LAN access has no clipboard API.
+  const area = document.createElement('textarea')
+  area.value = text
+  area.setAttribute('readonly', '')
+  area.className = 'copy-buffer'
+  document.body.append(area)
+  area.select()
+  try {
+    if (document.execCommand('copy')) done()
+  } catch (error) {
+    console.error('Copy failed:', error)
+  }
+  area.remove()
+}
+
+function bindEvents() {
+  document.addEventListener('click', (event) => {
+    const target = event.target
+    if (!target || typeof target.closest !== 'function') return
+    const opener = target.closest('[data-open-dialog]')
+    if (opener) {
+      const dialog = byId(opener.getAttribute('data-open-dialog'))
+      if (dialog && !dialog.open) dialog.showModal()
+      return
+    }
+    const closer = target.closest('[data-close-dialog]')
+    if (closer) {
+      const dialog = closer.closest('dialog')
+      if (dialog) dialog.close()
+      return
+    }
+    const copier = target.closest('[data-copy]')
+    if (copier) {
+      copyText(copier.getAttribute('data-copy'), copier)
+      return
+    }
+    // Light dismiss: .app-modal fills the viewport around .modal-dialog-inner,
+    // so a click on the backdrop targets the <dialog> element directly.
+    if (target.tagName === 'DIALOG' && target.open) {
+      target.close()
+    }
+  })
+
+  const refreshButton = byId('btn-refresh')
+  if (refreshButton) refreshButton.addEventListener('click', () => refresh())
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) refresh()
+  })
+}
+
+function init() {
+  renderPlans()
+  bindEvents()
+  render()
+  refresh()
+  setInterval(() => {
+    if (!document.hidden) refresh()
+  }, POLL_MS)
+  if (!countdownTimer) countdownTimer = setInterval(renderCountdown, 30000)
+}
+
+init()

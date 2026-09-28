@@ -14,7 +14,7 @@ TunnelSats is built using the StartOS TypeScript SDK (`@start9labs/start-sdk`).
 - **`startos/main.ts`**: Sets up the primary daemon, readiness probes for the Web Dashboard on port 80, and registers background subscription health checks.
 - **`startos/actions/`**: Storefront actions: Buy, Renew and Import Subscription, Reset Bandwidth, Export WireGuard Configuration, and Configure (enable/disable TunnelSats, pick the target node `lnd` / `cln` / `eclair`, replace the WireGuard config, IPv6 coexistence).
 - **`startos/dependencies.ts`** / **`startos/vpnHandoff.ts`**: Dynamic dependencies, the Renew reminder task, and the clearnet-vpn handoff: an on-task on the target node's `clearnet-vpn` action (which runs the tunnel as `wg0` inside the node container) and an off-task for a node that used the tunnel before.
-- **`bridge.py`**: Python orchestrator managing the Web Dashboard, `/api/status`, `/api/properties`, telemetry synchronization and payment settlement.
+- **`bridge.py`**: Python orchestrator serving the read-only Web Dashboard (`/api/dashboard`), `/api/status`, telemetry synchronization and payment settlement.
 - **`verify.sh`**: In-container diagnostics (stored config, subscription health, dashboard API). The tunnel runs on the node, so the node-side checks (`wg show`, `ip rule`, `ip route show table 51820`, egress probes) are printed as manual steps and never reported as verified.
 
 ---

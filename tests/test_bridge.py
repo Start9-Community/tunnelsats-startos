@@ -55,12 +55,13 @@ class TestPackageVersion(unittest.TestCase):
             self.assertEqual(ver, "1.2.3")
 
 class TestBridgeKeygenAndConfig(unittest.TestCase):
-    def test_generate_wg_keypair(self):
-        priv, pub = bridge.generate_wg_keypair()
-        self.assertTrue(isinstance(priv, str) and len(priv) == 44)
+    def test_derive_wg_pubkey(self):
+        import base64
+        priv = base64.b64encode(os.urandom(32)).decode()
+        pub = bridge.derive_wg_pubkey(priv)
         self.assertTrue(isinstance(pub, str) and len(pub) == 44)
-        self.assertTrue(priv.endswith("="))
         self.assertTrue(pub.endswith("="))
+        self.assertIsNone(bridge.derive_wg_pubkey("not-a-valid-key"))
 
     def test_save_configuration_valid(self):
         import tempfile

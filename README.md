@@ -25,11 +25,11 @@ TunnelSats provides dedicated WireGuard VPN infrastructure specifically designed
 > **Native Storefront & In-Container Clearnet VPN Architecture**:
 >
 > - **In-Process Keygen**: Generates Curve25519 WireGuard keypairs in-process on your device; private keys never leave your node.
-> - **Native Storefront**: Browse plans, generate BOLT11 invoices, and pay directly via WebLN or any Lightning wallet.
+> - **Native Storefront**: Browse plans, generate BOLT11 invoices, and pay directly through StartOS Actions and a Pay Invoice task on your Lightning node (or with any external Lightning wallet).
 > - **In-Container Egress Privacy**: The Lightning node owns the WireGuard tunnel directly inside its own container (`wg0` with routing table 51820). Egress policy routing sends outgoing clearnet peer traffic (gossip, handshakes, ping/pong acks) through the tunnel, while hybrid Tor traffic continues across the bridge network. See the kill switch caveat under [Network & Privacy Disclosure](#network--privacy-disclosure).
 > - **No Box-Wide Changes**: Nothing is configured in the StartOS system settings, no config markers, no firewall toggles, and no multi-node port 9735 race. Only the target node's own traffic uses the tunnel.
-> - **Bandwidth Telemetry**: 100GB monthly bandwidth limit per calendar month, fetched on-demand when the UI is opened.
-> - **Sovereign Config Export**: Download or export your raw `.conf` anytime.
+> - **Bandwidth Telemetry**: 100GB monthly bandwidth limit per calendar month, synced by the background daemon and shown in the read-only Web Dashboard.
+> - **Sovereign Config Export**: Export your raw `.conf` anytime via the **Export WireGuard Configuration** action.
 > - **Renewal Reminders**: A Renew Subscription task is raised when the subscription expires in 7 days or less, updated at 3 days or less, and again once it has expired.
 
 ## Quick Reference for AI Consumers
@@ -71,8 +71,8 @@ tasks:
 
 ## Architecture & How It Works
 
-1. **Native Storefront**: Users can purchase or renew subscriptions directly from the Web Dashboard. The package generates a fresh Curve25519 WireGuard keypair locally, submits an order to `api.tunnelsats.com`, and displays a BOLT11 invoice. Once settled, the active `.conf` is provisioned automatically.
-2. **Bring Your Own Config**: Users with an existing TunnelSats subscription can paste their `.conf` via the **Import Subscription** action or Web Dashboard.
+1. **Native Storefront**: Users purchase or renew subscriptions via StartOS Actions (**Buy Subscription** / **Renew Subscription**). The action generates a fresh Curve25519 WireGuard keypair locally, submits an order to `api.tunnelsats.com`, raises a **Pay Invoice** task on the target Lightning node, and displays the BOLT11 invoice. Once settled, the active `.conf` is provisioned automatically.
+2. **Bring Your Own Config**: Users with an existing TunnelSats subscription can paste their `.conf` via the **Import Subscription** action.
 3. **In-Container Clearnet VPN & Egress**: The WireGuard tunnel runs directly inside the target Lightning node container (`lnd`, `c-lightning` or `eclair`). Inbound peer connections arrive directly on `<tunnel-ip>:9735` where the daemon is already listening—eliminating host-level port forwards and port 9735 multi-node conflicts. The container's policy routing (`table 51820`) sends all outbound clearnet peer traffic (handshakes, gossip, ping/pong acknowledgments) through the tunnel while it is up (see the kill switch caveat below), while Tor traffic continues across the bridge network (`eth0`). The operator simply accepts a 1-click prompt on their node: **"Route [Node] through the TunnelSats tunnel"**.
 4. **Subscription Lifecycle & Renewal**: The background daemon monitors subscription expiration, updating the local dashboard, raising StartOS tasks when renewal is required, and posting StartOS notifications 7 and 3 days before expiry, on lapse, and when the configured key has no subscription.
 

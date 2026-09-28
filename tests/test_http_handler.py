@@ -289,134 +289,39 @@ class TestHTTPHandler(unittest.TestCase):
         bridge.DashboardHTTPRequestHandler.do_POST(handler4)
         handler4.send_error.assert_called_with(403, "Cross-site request rejected")
 
-    @patch('os.path.exists')
     @patch('bridge.save_configuration')
     @patch('bridge.get_default_gateway')
-    def test_do_POST_save_config_success(self, mock_get_gw, mock_save_config, mock_path_exists):
+    def test_removed_write_endpoints_return_404(self, mock_get_gw, mock_save_config):
         mock_get_gw.return_value = "172.18.0.1"
-        mock_path_exists.return_value = False
-
         req_body = json.dumps({
             "config": "[Interface]\nPrivateKey = abc=\n",
-            "target_node": "lnd"
+            "target_node": "lnd",
         }).encode("utf-8")
 
-        handler = bridge.DashboardHTTPRequestHandler.__new__(bridge.DashboardHTTPRequestHandler)
-        handler.command = "POST"
-        handler.client_address = ("127.0.0.1", 12345)
-        handler.path = "/api/config/save"
-        handler.headers = DummyHeaders({
-            "Host": "localhost",
-            "Content-Type": "application/json",
-            "Content-Length": str(len(req_body)),
-            "X-CSRF-Token": bridge.get_csrf_token()
-        })
-        handler.rfile = BytesIO(req_body)
-        wfile = BytesIO()
-        handler.wfile = wfile
-        handler.send_response = MagicMock()
-        handler.send_header = MagicMock()
-        handler.end_headers = MagicMock()
+        for path in ("/api/keys/generate", "/api/config/save"):
+            with self.subTest(path=path):
+                handler = bridge.DashboardHTTPRequestHandler.__new__(bridge.DashboardHTTPRequestHandler)
+                handler.command = "POST"
+                handler.client_address = ("127.0.0.1", 12345)
+                handler.path = path
+                handler.headers = DummyHeaders({
+                    "Host": "localhost",
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(req_body)),
+                    "X-CSRF-Token": bridge.get_csrf_token(),
+                })
+                handler.rfile = BytesIO(req_body)
+                handler.wfile = BytesIO()
+                handler.send_response = MagicMock()
+                handler.send_header = MagicMock()
+                handler.end_headers = MagicMock()
+                handler.send_error = MagicMock()
 
-        bridge.DashboardHTTPRequestHandler.do_POST(handler)
+                bridge.DashboardHTTPRequestHandler.do_POST(handler)
 
-        mock_save_config.assert_called_once_with("[Interface]\nPrivateKey = abc=", "lnd")
-        handler.send_response.assert_called_with(200)
-        res = json.loads(wfile.getvalue().decode("utf-8"))
-        self.assertTrue(res.get("success"))
-        self.assertEqual(res.get("message"), "Configuration saved. Accept the routing prompt on your Lightning node.")
-        # Ensure it does NOT claim to have activated the configuration
-        self.assertNotIn("activated", res.get("message").lower())
-
-    @patch('bridge.get_subscription_info')
-    @patch('os.path.exists')
-    @patch('bridge.get_default_gateway')
-    def test_do_POST_save_config_active_config_rejected(self, mock_get_gw, mock_path_exists, mock_sub_info):
-        mock_get_gw.return_value = "172.18.0.1"
-        mock_path_exists.return_value = True
-        mock_sub_info.return_value = {
-            "linked": True,
-            "isExpired": False
-        }
-
-        req_body = json.dumps({
-            "config": "[Interface]\nPrivateKey = attacker=\n",
-            "target_node": "lnd"
-        }).encode("utf-8")
-
-        handler = bridge.DashboardHTTPRequestHandler.__new__(bridge.DashboardHTTPRequestHandler)
-        handler.command = "POST"
-        handler.client_address = ("127.0.0.1", 12345)
-        handler.path = "/api/config/save"
-        handler.headers = DummyHeaders({
-            "Host": "localhost",
-            "Content-Type": "application/json",
-            "Content-Length": str(len(req_body)),
-            "X-CSRF-Token": bridge.get_csrf_token()
-        })
-        handler.rfile = BytesIO(req_body)
-        wfile = BytesIO()
-        handler.wfile = wfile
-        handler.send_response = MagicMock()
-        handler.send_header = MagicMock()
-        handler.end_headers = MagicMock()
-
-        bridge.DashboardHTTPRequestHandler.do_POST(handler)
-
-        handler.send_response.assert_called_with(403)
-        res = json.loads(wfile.getvalue().decode("utf-8"))
-        self.assertIn("Active configuration already present", res.get("error", ""))
-
-    def _post_save_over_existing_config(self, sub_info):
-        req_body = json.dumps({
-            "config": "[Interface]\nPrivateKey = replacement=\n",
-            "target_node": "lnd"
-        }).encode("utf-8")
-
-        handler = bridge.DashboardHTTPRequestHandler.__new__(bridge.DashboardHTTPRequestHandler)
-        handler.command = "POST"
-        handler.client_address = ("127.0.0.1", 12345)
-        handler.path = "/api/config/save"
-        handler.headers = DummyHeaders({
-            "Host": "localhost",
-            "Content-Type": "application/json",
-            "Content-Length": str(len(req_body)),
-            "X-CSRF-Token": bridge.get_csrf_token()
-        })
-        handler.rfile = BytesIO(req_body)
-        handler.wfile = BytesIO()
-        handler.send_response = MagicMock()
-        handler.send_header = MagicMock()
-        handler.end_headers = MagicMock()
-
-        with patch('bridge.get_default_gateway', return_value="172.18.0.1"), \
-             patch('os.path.exists', return_value=True), \
-             patch('bridge.get_wg_pubkey', return_value="CURRENT_KEY") as mock_pubkey, \
-             patch('bridge.get_subscription_info', return_value=sub_info) as mock_sub_info, \
-             patch('bridge.save_configuration') as mock_save:
-            bridge.DashboardHTTPRequestHandler.do_POST(handler)
-        mock_pubkey.assert_called()
-        mock_sub_info.assert_called_with("CURRENT_KEY")
-        return handler, mock_save
-
-    def test_do_POST_save_config_unconfirmed_subscription_rejected(self):
-        # Fail closed: an unsynced / sync-failed subscription is not known to be
-        # expired, so the unauthenticated web UI must not replace it.
-        handler, mock_save = self._post_save_over_existing_config({
-            "linked": False,
-            "isExpired": False,
-            "syncError": "unreachable",
-        })
-        handler.send_response.assert_called_with(403)
-        mock_save.assert_not_called()
-
-    def test_do_POST_save_config_expired_subscription_allowed(self):
-        handler, mock_save = self._post_save_over_existing_config({
-            "linked": True,
-            "isExpired": True,
-        })
-        handler.send_response.assert_called_with(200)
-        mock_save.assert_called_once_with("[Interface]\nPrivateKey = replacement=", "lnd")
+                handler.send_error.assert_called_once_with(404, "Not found")
+                handler.send_response.assert_not_called()
+        mock_save_config.assert_not_called()
 
     @patch('bridge.get_default_gateway')
     def test_do_GET_api_csrf(self, mock_get_gw):

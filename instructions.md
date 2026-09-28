@@ -6,10 +6,10 @@ TunnelSats provides dedicated, privacy-focused WireGuard VPN infrastructure spec
 
 ### Option 1: Native Storefront (Recommended)
 
-1. In StartOS, open the **TunnelSats Web Dashboard**, or run **Services** &rarr; **TunnelSats** &rarr; **Actions** &rarr; **Buy Subscription**.
+1. In StartOS, open **Services** &rarr; **TunnelSats** &rarr; **Actions** &rarr; **Buy Subscription**.
 2. Select your target Lightning node (`LND`, `Core Lightning` or `Eclair`) and your preferred plan duration.
 3. The package generates a fresh Curve25519 WireGuard keypair locally in-process on your device (your private key never leaves your server).
-4. Pay the Lightning invoice: through the **Pay Invoice** task the Buy Subscription action raises on your node, via WebLN, or by scanning the BOLT11 QR code with any Lightning wallet.
+4. Pay the Lightning invoice: through the **Pay Invoice** task the Buy Subscription action raises on your node, or by scanning / copying the BOLT11 invoice returned by the action with any Lightning wallet.
 5. Once settled, TunnelSats automatically provisions your configuration and emits a routing task to your Lightning node.
 6. **Activate Routing**:
    - Open your target Lightning node in StartOS.
@@ -18,7 +18,7 @@ TunnelSats provides dedicated, privacy-focused WireGuard VPN infrastructure spec
 
 ### Option 2: Bring Your Own Configuration
 
-1. If you already have an active TunnelSats WireGuard configuration, open **Services** &rarr; **TunnelSats** &rarr; **Actions** &rarr; **Import Subscription** (or click "Bring Your Own Config" in the Web Dashboard).
+1. If you already have an active TunnelSats WireGuard configuration, open **Services** &rarr; **TunnelSats** &rarr; **Actions** &rarr; **Import Subscription**.
 2. Select your **Target Lightning Node** (`LND`, `Core Lightning` or `Eclair`) and paste your `.conf` file.
 3. Accept the 1-click routing prompt on your target Lightning node.
 
@@ -42,7 +42,7 @@ Use the **Configure** action to switch TunnelSats off, pick a different target n
 ## Bandwidth & Renewals
 
 - **Monthly Allowance**: Subscriptions include 100 GB of transfer bandwidth per calendar month. Bandwidth counters reset automatically on the 1st of every month.
-- **On-Demand Telemetry**: Current bandwidth usage and subscription validity are fetched on-demand when opening the Web Dashboard.
+- **Subscription & Bandwidth Telemetry**: Current bandwidth usage and subscription validity are synced by the TunnelSats daemon and displayed in the read-only Web Dashboard.
 - **Renewal Reminders**: TunnelSats raises a **Renew Subscription** task when the subscription expires in 7 days or less, updates it at 3 days or less, and again once it has expired. Run **Renew Subscription** at any time to extend it; the invoice is paid through a Pay Invoice task on your Lightning node.
 - **Lapsed Subscription**: When the subscription expires, TunnelSats disables the tunnel on its server, so your node's clearnet peer connections through TunnelSats stop until you renew or turn off the clearnet VPN on your node.
 - **Notifications**: TunnelSats also posts a StartOS notification 7 and 3 days before the subscription expires, once it has expired, and when TunnelSats has no subscription for the WireGuard key in your configuration (then an **Import Subscription** task asks you to import a valid configuration or buy a new one). Each notification is sent once per subscription period; none are sent while TunnelSats is stopped.
@@ -54,7 +54,7 @@ Use the **Configure** action to switch TunnelSats off, pick a different target n
 
 You retain full ownership and sovereignty over your cryptographic keys and WireGuard tunnel:
 
-- Download or copy your active `.conf` anytime via the **Web Dashboard** or the **Export WireGuard Configuration** action.
+- Copy your active `.conf` anytime via **Services** &rarr; **TunnelSats** &rarr; **Actions** &rarr; **Export WireGuard Configuration**.
 - WireGuard configurations and subscription metadata are securely preserved in encrypted StartOS system backups.
 
 ---

@@ -3,10 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tunnel⚡Sats</title>
+    <meta name="color-scheme" content="dark" />
+    <title>TunnelSats Dashboard</title>
     <meta
       name="description"
-      content="TunnelSats native storefront and WireGuard VPN router for Lightning Network nodes on StartOS."
+      content="TunnelSats subscription, bandwidth and connection status for your Lightning node on StartOS."
     />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
@@ -16,526 +17,399 @@
   </head>
 
   <body>
-    <div class="background-glow"></div>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="background-glow" aria-hidden="true"></div>
     <div class="dashboard-container">
-      <!-- Header -->
       <header class="dashboard-header">
-        <div
-          class="brand"
-          onclick="goToHomepage()"
-          role="button"
-          tabindex="0"
-          title="Return to Dashboard"
-          aria-label="Return to Dashboard"
-          onkeydown="
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault()
-              goToHomepage()
-            }
-          "
-        >
+        <a class="brand" href="./" aria-label="TunnelSats dashboard">
           <img
             src="ts_logo_rectangle.svg"
-            alt="TunnelSats Logo"
+            alt="TunnelSats"
             class="brand-logo-rect"
+            width="152"
+            height="38"
           />
-          <div class="brand-text">
-            <span class="subtext">In-Container Lightning VPN</span>
-          </div>
-        </div>
-        <div class="header-right">
-          <span id="status-badge" class="status-badge inactive">
-            <span class="pulse-dot"></span>
-            <span class="status-text">CONNECTING...</span>
+          <span class="brand-text">
+            <span class="subtext">Lightning VPN for StartOS</span>
           </span>
+        </a>
+        <div class="header-right">
+          <span id="status-badge" class="status-badge neutral">
+            <span class="pulse-dot" aria-hidden="true"></span>
+            <span class="status-text" id="status-text">Loading…</span>
+          </span>
+          <button
+            id="btn-refresh"
+            class="btn-refresh"
+            type="button"
+            aria-label="Reload status"
+            title="Reload status"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+            </svg>
+          </button>
         </div>
       </header>
 
-      <!-- Notice if Allow IPv6 Endpoint is enabled -->
-      <div
-        id="ipv6-warning-banner"
-        class="info-box-warning"
-        style="display: none"
+      <p id="load-error" class="load-error" role="alert" hidden></p>
+
+      <!-- Live state from GET /api/dashboard: pending payments, handoff, key and expiry. -->
+      <section
+        id="notices"
+        class="notices"
+        aria-labelledby="notices-title"
+        aria-live="polite"
+        hidden
       >
-        <div class="warning-title">
-          <svg class="warning-icon" viewBox="0 0 24 24">
-            <path d="M12 2L1 21h22L12 2zm1 14h-2v-2h2v2zm0-4h-2V10h2v2z" />
-          </svg>
-          <span>IPv6 Endpoint Allowed</span>
-        </div>
-        <p>
-          "Allow IPv6 Endpoint" is enabled: TunnelSats may hand your node an
-          IPv6 server endpoint to announce. How your node routes its own IPv6
-          traffic is decided by the Lightning node package, not by this
-          setting.
-        </p>
-      </div>
+        <h2 id="notices-title" class="visually-hidden">Status updates</h2>
+        <ul id="notice-list" class="notice-list"></ul>
+      </section>
 
-      <!-- Main Dynamic Content Container -->
-      <main class="dashboard-grid">
-        <!-- ════════════════════════════════════════════ -->
-        <!-- VIEW 1: STOREFRONT VIEW (When Unconfigured) -->
-        <!-- ════════════════════════════════════════════ -->
+      <main id="main" class="dashboard-grid">
+        <!-- ══════════ Not set up yet ══════════ -->
         <section
-          id="view-storefront"
-          class="card glass-card span-2 storefront-card"
-          style="display: none"
+          id="view-setup"
+          class="card glass-card span-2 setup-card"
+          aria-labelledby="setup-title"
+          hidden
         >
-          <div class="storefront-top-nav">
-            <button
-              id="btn-back-to-telemetry"
-              class="btn-back-nav"
-              style="display: none"
-              onclick="goToHomepage()"
-              type="button"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                width="16"
-                height="16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
-                <polyline points="9 22 9 12 15 12 15 22"></polyline>
-              </svg>
-              <span>← Back to Active Dashboard</span>
-            </button>
-          </div>
-
           <div class="storefront-hero">
-            <div class="hero-tag">
-              <img src="Bitcoin.svg" alt="Bitcoin" class="icon-btc" /> Native
-              Lightning Storefront
-            </div>
-            <h2>Get Your Dedicated Lightning VPN Tunnel</h2>
+            <p class="hero-tag">
+              <img src="Bitcoin.svg" alt="" class="icon-btc" /> Paid over
+              Lightning
+            </p>
+            <h1 id="setup-title">Get a dedicated Lightning VPN tunnel</h1>
             <p class="hero-desc">
-              Generate cryptographic WireGuard keys locally in-process on your
-              device and pay via Lightning. Your node sends its clearnet peer
-              traffic through the tunnel.
+              Your Lightning node (LND, Core Lightning or Eclair) sends its
+              clearnet peer traffic through a TunnelSats WireGuard tunnel. While
+              the tunnel is up, clearnet peers see the TunnelSats server address
+              instead of your home IP.
             </p>
           </div>
 
-          <!-- Step 1: Select Node -->
-          <div class="storefront-step">
-            <label class="step-label">1. Select Target Lightning Node</label>
-            <div class="node-selector-pills">
-              <button
-                type="button"
-                class="pill-btn active"
-                data-node="lnd"
-                onclick="selectNode('lnd', this)"
-              >
-                <span class="pill-title">LND</span>
-                <span class="pill-sub"
-                  >Lightning Network Daemon by Lightning Labs</span
+          <div class="setup-block">
+            <h2 class="step-label" id="plans-title">Plans</h2>
+            <ul
+              id="plan-list"
+              class="plan-cards-grid"
+              aria-labelledby="plans-title"
+            ></ul>
+            <p class="price-note">
+              Reference prices in USD. The <strong>Buy Subscription</strong> and
+              <strong>Renew Subscription</strong> actions fetch the live quote
+              and show the exact amount in sats on the invoice. 100 GB of
+              transfer per month included.
+            </p>
+          </div>
+
+          <div class="setup-block">
+            <h2 class="step-label">How to buy</h2>
+            <ol class="guide-steps">
+              <li>
+                In StartOS, open
+                <strong class="path"
+                  >Services → TunnelSats → Actions → Buy Subscription</strong
                 >
-              </button>
-              <button
-                type="button"
-                class="pill-btn"
-                data-node="cln"
-                onclick="selectNode('cln', this)"
-              >
-                <span class="pill-title">CLN</span>
-                <span class="pill-sub">Core Lightning by Blockstream</span>
-              </button>
-            </div>
-          </div>
-
-          <!-- Step 2: Select Server Region -->
-          <div class="storefront-step">
-            <label class="step-label" for="select-server"
-              >2. Choose Server Region</label
-            >
-            <select id="select-server" class="select-input">
-              <option value="eu-de">
-                Frankfurt / Nuremberg, Germany 🇩🇪 (eu-de)
-              </option>
-              <option value="eu-ch">
-                Zurich / Geneva, Switzerland 🇨🇭 (eu-ch)
-              </option>
-              <option value="us-east">
-                Ashburn / New York, USA 🇺🇸 (us-east)
-              </option>
-              <option value="us-west">
-                Hillsboro, Oregon, USA 🇺🇸 (us-west)
-              </option>
-              <option value="asia-sg">Singapore 🇸🇬 (asia-sg)</option>
-              <option value="sa-br">Sao Paulo, Brazil 🇧🇷 (sa-br)</option>
-              <option value="oc-au">Sydney, Australia 🇦🇺 (oc-au)</option>
-            </select>
-          </div>
-
-          <!-- Step 3: Select Plan Duration -->
-          <div class="storefront-step">
-            <label class="step-label">3. Select Plan Duration</label>
-            <div class="plan-cards-grid">
-              <div
-                class="plan-card"
-                data-duration="1"
-                onclick="selectPlan(1, this)"
-              >
-                <div class="plan-duration">1 Month</div>
-                <div class="plan-price">
-                  <span id="plan-price-1">25,000</span>
-                  <span class="price-unit">sats</span>
-                </div>
-                <div class="plan-per-mo">$3.00/mo</div>
-              </div>
-
-              <div
-                class="plan-card active"
-                data-duration="3"
-                onclick="selectPlan(3, this)"
-              >
-                <div class="plan-badge">Popular</div>
-                <div class="plan-duration">3 Months</div>
-                <div class="plan-price">
-                  <span id="plan-price-3">70,000</span>
-                  <span class="price-unit">sats</span>
-                </div>
-                <div class="plan-per-mo">Save ~5%</div>
-              </div>
-
-              <div
-                class="plan-card"
-                data-duration="6"
-                onclick="selectPlan(6, this)"
-              >
-                <div class="plan-duration">6 Months</div>
-                <div class="plan-price">
-                  <span id="plan-price-6">135,000</span>
-                  <span class="price-unit">sats</span>
-                </div>
-                <div class="plan-per-mo">Save ~10%</div>
-              </div>
-
-              <div
-                class="plan-card"
-                data-duration="12"
-                onclick="selectPlan(12, this)"
-              >
-                <div class="plan-badge best-value">Best Value</div>
-                <div class="plan-duration">12 Months</div>
-                <div class="plan-price">
-                  <span id="plan-price-12">250,000</span>
-                  <span class="price-unit">sats</span>
-                </div>
-                <div class="plan-per-mo">Save ~20%</div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Step 4: Checkout Action -->
-          <div class="storefront-checkout-bar">
-            <button
-              id="btn-create-order"
-              class="btn-primary-glow"
-              onclick="startCheckout()"
-            >
-              <svg
-                class="btn-zap-svg"
-                viewBox="0 0 24 24"
-                width="18"
-                height="18"
-                fill="currentColor"
-              >
-                <polygon
-                  points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"
-                ></polygon>
-              </svg>
-              <span>Order Dedicated Tunnel</span>
-            </button>
-          </div>
-
-          <!-- Alternative: Modern Harmonica for Bring Your Own Config -->
-          <div class="byoc-harmonica" id="byoc-harmonica">
-            <button
-              type="button"
-              class="byoc-toggle-btn"
-              id="byoc-toggle-btn"
-              onclick="toggleByoc()"
-              aria-expanded="false"
-              aria-controls="byoc-panel"
-            >
-              <div class="byoc-toggle-left">
-                <svg
-                  class="byoc-icon"
-                  viewBox="0 0 24 24"
-                  width="18"
-                  height="18"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                  <polyline points="17 8 12 3 7 8"></polyline>
-                  <line x1="12" y1="3" x2="12" y2="15"></line>
-                </svg>
-                <span class="byoc-title"
-                  >Have an existing TunnelSats configuration?</span
-                >
-                <span class="byoc-pill">Bring Your Own Config</span>
-              </div>
-              <svg
-                class="byoc-chevron"
-                viewBox="0 0 24 24"
-                width="18"
-                height="18"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <polyline points="6 9 12 15 18 9"></polyline>
-              </svg>
-            </button>
-            <div class="byoc-panel" id="byoc-panel">
-              <div class="byoc-panel-inner">
-                <p class="byoc-desc">
-                  Paste an existing TunnelSats <code>.conf</code> file directly
-                  to activate your tunnel or configure via StartOS
-                  <strong>⚙ → Configure</strong>.
-                </p>
-                <textarea
-                  id="byoc-conf-input"
-                  class="byoc-textarea"
-                  placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = 10.9.0.xxx/32&#10;# VPNPort: 24556&#10;..."
-                  spellcheck="false"
-                ></textarea>
-                <div class="byoc-actions">
-                  <button
-                    type="button"
-                    class="btn-secondary"
-                    onclick="saveManualConfig()"
-                  >
-                    Activate Configuration
-                  </button>
-                  <button
-                    type="button"
-                    class="btn-byoc-cancel"
-                    onclick="toggleByoc(false)"
-                  >
-                    ← Cancel & Close BYOC
-                  </button>
-                  <button
-                    type="button"
-                    class="btn-byoc-home"
-                    id="btn-byoc-home"
-                    style="display: none"
-                    onclick="goToHomepage()"
-                  >
-                    🏠 Return to Dashboard
-                  </button>
-                </div>
-              </div>
-            </div>
+                and pick your node, a server region and a plan.
+              </li>
+              <li>
+                Accept the <strong>Pay Invoice</strong> task TunnelSats raises
+                on your Lightning node, or pay the invoice shown in the action
+                result with any Lightning wallet.
+              </li>
+              <li>
+                Once the payment settles, TunnelSats saves the configuration by
+                itself. Open your node and accept the task that routes it
+                through TunnelSats.
+              </li>
+            </ol>
+            <p class="guide-alt">
+              Already have a TunnelSats configuration? Run
+              <strong class="path"
+                >Services → TunnelSats → Actions → Import Subscription</strong
+              >.
+            </p>
           </div>
         </section>
 
-        <!-- ════════════════════════════════════════════ -->
-        <!-- VIEW 2: ACTIVE TELEMETRY VIEW                -->
-        <!-- ════════════════════════════════════════════ -->
+        <!-- ══════════ Configured ══════════ -->
         <section
-          id="view-telemetry"
+          id="view-overview"
           class="telemetry-wrapper span-2"
-          style="display: none"
+          aria-labelledby="overview-title"
+          hidden
         >
+          <h1 id="overview-title" class="visually-hidden">
+            TunnelSats subscription
+          </h1>
           <div class="telemetry-top-cards">
-            <!-- Subscription Expiration Card -->
-            <div class="card glass-card metric-card subscription-card">
+            <section
+              class="card glass-card metric-card"
+              aria-labelledby="subscription-title"
+            >
               <div class="card-header">
-                <h2>Subscription Status</h2>
-                <span class="info-label" id="expiry-date-raw">Loading...</span>
+                <h2 id="subscription-title">Subscription</h2>
+                <span class="info-label" id="expiry-date">…</span>
               </div>
               <div class="metric-card-body">
-                <span class="metric-label">TIME REMAINING</span>
+                <span class="metric-label">Time remaining</span>
                 <div class="metric-value-row">
-                  <span
-                    class="metric-value countdown-timer"
-                    id="countdown-timer"
-                    >Checking...</span
+                  <span class="metric-value countdown-timer" id="countdown"
+                    >…</span
                   >
                 </div>
-                <div class="progress-bar-container">
-                  <div
-                    class="progress-bar"
-                    id="subscription-progress"
-                    style="width: 0%"
-                  ></div>
+                <div class="progress-bar-container" aria-hidden="true">
+                  <div class="progress-bar" id="subscription-progress"></div>
                 </div>
                 <div class="metric-footer">
                   <span class="metric-footer-text"
-                    >Expires automatically at end of term</span
+                    >Extend it with the
+                    <strong>Renew Subscription</strong> action.</span
                   >
-                  <button class="btn-link-action" onclick="openRenewalModal()">
-                    Renew
-                  </button>
                 </div>
               </div>
-            </div>
+            </section>
 
-            <!-- Bandwidth Usage Card -->
-            <div class="card glass-card metric-card bandwidth-card">
+            <section
+              class="card glass-card metric-card bandwidth-card"
+              aria-labelledby="bandwidth-title"
+            >
               <div class="card-header">
-                <h2>Monthly Bandwidth</h2>
+                <h2 id="bandwidth-title">Monthly bandwidth</h2>
                 <button
+                  type="button"
                   class="btn-info-circle"
-                  onclick="openBandwidthModal()"
-                  title="View Bandwidth Policy"
-                  aria-label="Bandwidth details"
+                  data-open-dialog="bandwidth-modal"
+                  aria-label="About the bandwidth allowance"
+                  aria-haspopup="dialog"
                 >
                   ℹ
                 </button>
               </div>
               <div class="metric-card-body">
-                <span class="metric-label">MONTHLY ALLOWANCE</span>
+                <span class="metric-label">Used this month</span>
                 <div class="metric-value-row">
-                  <span class="metric-value" id="val-bandwidth-used"
-                    >0.00 GB</span
-                  >
-                  <span class="metric-unit">/ 100 GB</span>
+                  <span class="metric-value" id="bandwidth-used">…</span>
+                  <span class="metric-unit" id="bandwidth-limit">/ 100 GB</span>
                 </div>
-                <div class="progress-bar-container">
+                <div class="progress-bar-container" aria-hidden="true">
                   <div
                     class="progress-bar bandwidth-bar"
                     id="bandwidth-progress"
-                    style="width: 0%"
                   ></div>
                 </div>
                 <div class="metric-footer">
                   <span class="metric-footer-text"
-                    >Allowance resets on 1st of every month</span
+                    >Resets on the 1st of each month (UTC).</span
                   >
-                  <button
-                    class="btn-link-action"
-                    onclick="openBandwidthModal()"
-                  >
-                    Details
-                  </button>
                 </div>
               </div>
-            </div>
+            </section>
           </div>
 
-          <!-- Connection Properties Grid -->
-          <div class="card glass-card properties-card">
+          <!-- W3: renewal timeline, bandwidth projection and server discovery slot in here. -->
+
+          <section
+            class="card glass-card properties-card"
+            aria-labelledby="connection-title"
+          >
             <div class="card-header">
-              <h2>Connection Properties &amp; Routing</h2>
-              <div class="header-actions">
-                <button
-                  class="btn-refresh"
-                  onclick="fetchStatus(true)"
-                  title="Refresh status"
-                >
-                  ↻
-                </button>
-              </div>
+              <h2 id="connection-title">Connection</h2>
             </div>
-            <div class="properties-grid">
+            <dl class="properties-grid">
               <div class="prop-item">
-                <div class="prop-label">Target Lightning Node</div>
-                <div class="prop-value-group">
-                  <span class="prop-value" id="val-target-node">LND</span>
-                </div>
+                <dt class="prop-label">Target Lightning node</dt>
+                <dd class="prop-value-group">
+                  <span class="prop-value" id="val-target-node">…</span>
+                </dd>
               </div>
               <div class="prop-item">
-                <div class="prop-label">TunnelSats Public Endpoint</div>
-                <div class="prop-value-group">
-                  <span class="prop-value" id="val-public-endpoint">...</span>
+                <dt class="prop-label">Routing handoff</dt>
+                <dd class="prop-value-group">
+                  <span class="prop-value" id="val-handoff">…</span>
+                </dd>
+              </div>
+              <div class="prop-item">
+                <dt class="prop-label">Public address (server:port)</dt>
+                <dd class="prop-value-group">
+                  <span class="prop-value" id="val-endpoint">…</span>
                   <button
+                    type="button"
                     class="btn-copy"
-                    onclick="copyText('val-public-endpoint', this)"
+                    data-copy="val-endpoint"
+                    aria-label="Copy public address"
                   >
                     Copy
                   </button>
-                </div>
+                </dd>
               </div>
               <div class="prop-item">
-                <div class="prop-label">WireGuard Public Key</div>
-                <div class="prop-value-group">
-                  <span class="prop-value truncated" id="val-pubkey">...</span>
+                <dt class="prop-label">WireGuard public key</dt>
+                <dd class="prop-value-group">
+                  <span class="prop-value truncated" id="val-pubkey">…</span>
                   <button
+                    type="button"
                     class="btn-copy"
-                    onclick="copyText('val-pubkey', this)"
+                    data-copy="val-pubkey"
+                    aria-label="Copy WireGuard public key"
                   >
                     Copy
                   </button>
-                </div>
+                </dd>
               </div>
               <div class="prop-item">
-                <div class="prop-label">Internal VPN IP</div>
-                <div class="prop-value-group">
-                  <span class="prop-value" id="val-vpn-ip">...</span>
-                  <button
-                    class="btn-copy"
-                    onclick="copyText('val-vpn-ip', this)"
-                  >
-                    Copy
-                  </button>
-                </div>
+                <dt class="prop-label">Tunnel address</dt>
+                <dd class="prop-value-group">
+                  <span class="prop-value" id="val-vpn-ip">…</span>
+                </dd>
               </div>
               <div class="prop-item">
-                <div class="prop-label">Routing Dataplane</div>
-                <div class="prop-value-group">
-                  <span class="prop-value highlight-signal" id="val-dataplane"
-                    >In-Container Clearnet VPN</span
-                  >
-                </div>
-              </div>
-              <div class="prop-item">
-                <div class="prop-label">Last Status Sync</div>
-                <div class="prop-value-group">
+                <dt class="prop-label">Last confirmed by TunnelSats</dt>
+                <dd class="prop-value-group">
                   <span class="prop-value text-muted" id="val-last-sync"
-                    >...</span
+                    >…</span
                   >
-                </div>
+                </dd>
               </div>
-            </div>
-          </div>
+            </dl>
+          </section>
+        </section>
 
-          <!-- Telemetry Action Bar -->
-          <div class="telemetry-action-bar">
-            <button class="btn-action-renew" onclick="openRenewalModal()">
-              <svg
-                class="btn-zap-svg"
-                viewBox="0 0 24 24"
-                width="18"
-                height="18"
-                fill="currentColor"
-              >
-                <polygon
-                  points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"
-                ></polygon>
-              </svg>
-              <span>Renew Subscription</span>
-            </button>
-            <button class="btn-action-export" onclick="exportConfiguration()">
-              <span class="btn-icon">📥</span>
-              <span>Export WireGuard Config</span>
-            </button>
-            <button class="btn-action-store" onclick="showStorefrontView()">
-              <span class="btn-icon">🛒</span>
-              <span>New Subscription</span>
-            </button>
+        <!-- ══════════ Actions live in StartOS ══════════ -->
+        <section
+          id="manage"
+          class="card glass-card span-2 manage-card"
+          aria-labelledby="manage-title"
+        >
+          <div class="card-header">
+            <h2 id="manage-title">Manage in StartOS</h2>
           </div>
+          <p class="card-intro">
+            Payments and changes run as StartOS actions: they need your StartOS
+            login, and every payment goes through a
+            <strong>Pay Invoice</strong> task on your node. Open
+            <strong class="path">Services → TunnelSats → Actions</strong>.
+          </p>
+          <ul class="action-list">
+            <li class="action-item" id="action-buy">
+              <span class="action-name">Buy Subscription</span>
+              <span class="action-desc"
+                >A new tunnel: pick the node, a server region and a plan.</span
+              >
+            </li>
+            <li class="action-item" id="action-renew">
+              <span class="action-name">Renew Subscription</span>
+              <span class="action-desc"
+                >Extends the current subscription. Your node and its
+                configuration stay as they are.</span
+              >
+            </li>
+            <li class="action-item" id="action-reset">
+              <span class="action-name">Reset Bandwidth</span>
+              <span class="action-desc" id="reset-desc"
+                >From 70% of this month's allowance: resets the counter for a
+                small fee (exact sats on the invoice), a limited number of times
+                per month.</span
+              >
+            </li>
+            <li class="action-item" id="action-import">
+              <span class="action-name">Import Subscription</span>
+              <span class="action-desc"
+                >Use an existing TunnelSats WireGuard configuration.</span
+              >
+            </li>
+            <li class="action-item" id="action-configure">
+              <span class="action-name">Configure</span>
+              <span class="action-desc"
+                >Switch TunnelSats off, change the target node or replace the
+                configuration.</span
+              >
+            </li>
+            <li class="action-item" id="action-export">
+              <span class="action-name">Export WireGuard Configuration</span>
+              <span class="action-desc"
+                >Shows the full configuration, including its private key.</span
+              >
+            </li>
+          </ul>
+        </section>
+
+        <!-- ══════════ Privacy: honest about what is verified ══════════ -->
+        <section
+          id="privacy"
+          class="card glass-card span-2 privacy-card"
+          aria-labelledby="privacy-title"
+        >
+          <div class="card-header">
+            <h2 id="privacy-title">Check your privacy on the node</h2>
+          </div>
+          <p class="caveat">
+            <strong>Kill switch caveat:</strong> The tunnel and its routing
+            belong to your Lightning node package, not to TunnelSats. With
+            current node builds, clearnet traffic can fall back to your home
+            connection if <code>wg0</code> goes down or is removed; a fix in the
+            node packages is pending. While <code>wg0</code> is up, clearnet
+            peer traffic uses the tunnel.
+          </p>
+          <p>
+            This dashboard runs in the TunnelSats container and cannot see
+            inside your node, so it never reports the tunnel as verified. Open a
+            shell on the node with
+            <code id="attach-command">start-cli package attach lnd</code> and
+            run:
+          </p>
+          <ul class="command-list">
+            <li>
+              <code>wg show wg0</code>
+              <span>a recent handshake and non-zero transfer</span>
+            </li>
+            <li>
+              <code>ip rule</code>
+              <span>a rule with <code>lookup 51820</code></span>
+            </li>
+            <li>
+              <code>ip route show table 51820</code>
+              <span><code>default dev wg0</code></span>
+            </li>
+            <li>
+              <code>curl -4 -s https://ifconfig.me</code>
+              <span
+                >must print the TunnelSats server IPv4, not your home IP</span
+              >
+            </li>
+            <li>
+              <code>curl -6 -s https://ifconfig.me</code>
+              <span
+                >must print the TunnelSats server IPv6 (or fail when IPv6 is
+                blocked), never your home IPv6</span
+              >
+            </li>
+          </ul>
+          <p class="note">
+            These checks show the tunnel while it is up; they do not test what
+            happens when it goes down.
+          </p>
         </section>
       </main>
 
-      <!-- Footer -->
       <footer class="dashboard-footer">
-        <div class="footer-links">
+        <nav class="footer-links" aria-label="More information">
           <a
             href="https://tunnelsats.com"
             target="_blank"
-            rel="noopener"
+            rel="noopener noreferrer"
             class="footer-link"
           >
             <svg
@@ -560,7 +434,7 @@
           <a
             href="https://tunnelsats.com/status"
             target="_blank"
-            rel="noopener"
+            rel="noopener noreferrer"
             class="footer-link"
           >
             <svg
@@ -579,8 +453,9 @@
           </a>
           <span class="footer-divider" aria-hidden="true">·</span>
           <button
+            type="button"
             class="footer-link footer-btn-faq"
-            onclick="openFaqModal()"
+            data-open-dialog="faq-modal"
             aria-haspopup="dialog"
           >
             <svg
@@ -597,19 +472,18 @@
               <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
               <line x1="12" y1="17" x2="12.01" y2="17"></line>
             </svg>
-            FAQ &amp; Architecture
+            FAQ
           </button>
-        </div>
+        </nav>
         <div class="footer-meta">
           <span
-            >TunnelSats StartOS Package
-            <strong id="footer-version">v0.4.0</strong></span
-          >
-          <span>&bull;</span>
+            >TunnelSats StartOS Package <strong id="footer-version"></strong
+          ></span>
+          <span aria-hidden="true">&bull;</span>
           <a
             href="https://github.com/Tunnelsats/tunnelsats-startos"
             target="_blank"
-            rel="noopener"
+            rel="noopener noreferrer"
             class="github-link"
             >GitHub Repository</a
           >
@@ -617,38 +491,21 @@
       </footer>
     </div>
 
-    <!-- ════════════════════════════════════════════ -->
-    <!-- Bandwidth Modal                              -->
-    <!-- ════════════════════════════════════════════ -->
+    <!-- ══════════ Bandwidth dialog ══════════ -->
     <dialog
       id="bandwidth-modal"
       class="app-modal"
       aria-labelledby="bandwidth-modal-title"
-      aria-modal="true"
+      closedby="any"
     >
       <div class="modal-dialog-inner">
         <div class="modal-header">
-          <div class="modal-title-row">
-            <button
-              type="button"
-              class="modal-brand-btn"
-              onclick="goToHomepage()"
-              title="Return to Dashboard"
-              aria-label="TunnelSats Dashboard"
-            >
-              <img
-                src="ts_logo_rectangle.svg"
-                alt="TunnelSats"
-                class="modal-brand-logo"
-              />
-            </button>
-            <span class="modal-title-sep">/</span>
-            <h2 id="bandwidth-modal-title">Monthly Bandwidth Allowance</h2>
-          </div>
+          <h2 id="bandwidth-modal-title">Monthly bandwidth allowance</h2>
           <button
+            type="button"
             class="modal-close-btn"
-            onclick="closeBandwidthModal()"
-            aria-label="Close modal"
+            data-close-dialog
+            aria-label="Close"
           >
             ✕
           </button>
@@ -656,509 +513,61 @@
         <div class="modal-body">
           <div class="bandwidth-visual-card">
             <div class="bandwidth-stat-main">
-              <span class="stat-big-num" id="modal-bandwidth-used">0.00</span>
-              <span class="stat-unit">GB / 100 GB</span>
-            </div>
-            <div class="modal-progress-track">
-              <div
-                class="modal-progress-fill"
-                id="modal-bandwidth-fill"
-                style="width: 0%"
-              ></div>
-            </div>
-            <div class="bandwidth-stat-row">
-              <div class="stat-pill">
-                <span class="stat-label">Used This Month</span>
-                <span class="stat-val" id="modal-stat-used">0.00 GB</span>
-              </div>
-              <div class="stat-pill">
-                <span class="stat-label">Remaining</span>
-                <span class="stat-val" id="modal-stat-remaining"
-                  >100.00 GB</span
-                >
-              </div>
-              <div class="stat-pill">
-                <span class="stat-label">Reset Cycle</span>
-                <span class="stat-val">1st of Month (00:00 UTC)</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="bandwidth-feature-grid">
-            <div class="bw-feature-card">
-              <div class="bw-feature-icon-badge">
-                <svg
-                  viewBox="0 0 24 24"
-                  width="18"
-                  height="18"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
-                  <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
-                  <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
-                </svg>
-              </div>
-              <div class="bw-feature-text">
-                <span class="bw-feature-title">100 GB Monthly Quota</span>
-                <span class="bw-feature-desc"
-                  >Ample capacity for heavy Lightning routing gossip and peer
-                  traffic.</span
-                >
-              </div>
-            </div>
-
-            <div class="bw-feature-card">
-              <div class="bw-feature-icon-badge">
-                <svg
-                  viewBox="0 0 24 24"
-                  width="18"
-                  height="18"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
-                  <line x1="16" y1="2" x2="16" y2="6"></line>
-                  <line x1="8" y1="2" x2="8" y2="6"></line>
-                  <line x1="3" y1="10" x2="21" y2="10"></line>
-                </svg>
-              </div>
-              <div class="bw-feature-text">
-                <span class="bw-feature-title">Automatic Reset</span>
-                <span class="bw-feature-desc"
-                  >Resets automatically to 0 GB at 00:00 UTC on the 1st of every
-                  month.</span
-                >
-              </div>
-            </div>
-
-            <div class="bw-feature-card">
-              <div class="bw-feature-icon-badge">
-                <svg
-                  viewBox="0 0 24 24"
-                  width="18"
-                  height="18"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <rect
-                    x="3"
-                    y="11"
-                    width="18"
-                    height="11"
-                    rx="2"
-                    ry="2"
-                  ></rect>
-                  <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
-                </svg>
-              </div>
-              <div class="bw-feature-text">
-                <span class="bw-feature-title">Encrypted WireGuard</span>
-                <span class="bw-feature-desc"
-                  >Only peer gossip, payments & keepalives routed through your
-                  tunnel count.</span
-                >
-              </div>
-            </div>
-
-            <div class="bw-feature-card">
-              <div class="bw-feature-icon-badge">
-                <svg
-                  viewBox="0 0 24 24"
-                  width="18"
-                  height="18"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                >
-                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-                  <polyline points="9 12 11 14 15 10"></polyline>
-                </svg>
-              </div>
-              <div class="bw-feature-text">
-                <span class="bw-feature-title">Zero Overage Charges</span>
-                <span class="bw-feature-desc"
-                  >Bandwidth is fully included. No hidden fees or unexpected
-                  bills.</span
-                >
-              </div>
-            </div>
-          </div>
-
-          <div class="bandwidth-action-box">
-            <h4>What happens if I reach the 100 GB limit?</h4>
-            <p>
-              Normal routing nodes consume 5–25 GB per month. If 100 GB is
-              reached, your tunnel safely pauses until the calendar reset to
-              protect against surprise overages.
-            </p>
-            <a
-              href="https://tunnelsats.com/faq#what-happens-if-i-reach-the-100gb-limit"
-              target="_blank"
-              rel="noopener"
-              class="bandwidth-faq-link"
-            >
-              Learn what happens if you reach the 100 GB limit →
-            </a>
-          </div>
-        </div>
-      </div>
-    </dialog>
-
-    <!-- ════════════════════════════════════════════ -->
-    <!-- Payment / Checkout Modal                     -->
-    <!-- ════════════════════════════════════════════ -->
-    <dialog
-      id="payment-modal"
-      class="app-modal"
-      aria-labelledby="payment-modal-title"
-      aria-modal="true"
-    >
-      <div class="modal-dialog-inner modal-sm">
-        <div class="modal-header">
-          <div class="modal-title-row">
-            <button
-              type="button"
-              class="modal-brand-btn"
-              onclick="goToHomepage()"
-              title="Return to Dashboard"
-              aria-label="TunnelSats Dashboard"
-            >
-              <img
-                src="ts_logo_rectangle.svg"
-                alt="TunnelSats"
-                class="modal-brand-logo"
-              />
-            </button>
-            <span class="modal-title-sep">/</span>
-            <h2 id="payment-modal-title">Pay with Lightning</h2>
-          </div>
-          <button
-            class="modal-close-btn"
-            onclick="closePaymentModal()"
-            aria-label="Close modal"
-          >
-            ✕
-          </button>
-        </div>
-        <div class="modal-body payment-body">
-          <div class="payment-amount-box">
-            <span class="payment-amount-val" id="payment-sats-amount">--</span>
-            <span class="payment-amount-unit">sats</span>
-            <span class="payment-plan-label" id="payment-plan-desc"
-              >Subscription Plan</span
-            >
-          </div>
-
-          <div class="qr-container" id="payment-qr-container">
-            <div class="qr-loading">Generating Lightning Invoice...</div>
-          </div>
-
-          <div class="invoice-box">
-            <div class="invoice-input-wrapper">
-              <input
-                type="text"
-                id="invoice-text"
-                readonly
-                class="invoice-input"
-              />
-              <button class="btn-copy-invoice" onclick="copyInvoice(this)">
-                Copy
-              </button>
-            </div>
-          </div>
-
-          <div class="payment-status-box">
-            <div
-              class="status-indicator-dot pulse-amber"
-              id="payment-status-dot"
-            ></div>
-            <span id="payment-status-text">Awaiting payment settlement...</span>
-          </div>
-
-          <div class="payment-actions">
-            <a
-              id="btn-open-wallet"
-              href="#"
-              class="btn-primary-glow w-100 text-center"
-            >
-              ⚡ Open in Wallet
-            </a>
-          </div>
-        </div>
-      </div>
-    </dialog>
-
-    <!-- ════════════════════════════════════════════ -->
-    <!-- Renewal Modal                                -->
-    <!-- ════════════════════════════════════════════ -->
-    <dialog
-      id="renewal-modal"
-      class="app-modal"
-      aria-labelledby="renewal-modal-title"
-      aria-modal="true"
-    >
-      <div class="modal-dialog-inner">
-        <div class="modal-header">
-          <div class="modal-title-row">
-            <button
-              type="button"
-              class="modal-brand-btn"
-              onclick="goToHomepage()"
-              title="Return to Dashboard"
-              aria-label="TunnelSats Dashboard"
-            >
-              <img
-                src="ts_logo_rectangle.svg"
-                alt="TunnelSats"
-                class="modal-brand-logo"
-              />
-            </button>
-            <span class="modal-title-sep">/</span>
-            <h2 id="renewal-modal-title">Renew Tunnel Subscription</h2>
-          </div>
-          <button
-            class="modal-close-btn"
-            onclick="closeRenewalModal()"
-            aria-label="Close modal"
-          >
-            ✕
-          </button>
-        </div>
-        <div class="modal-body">
-          <div class="renewal-info-card">
-            <div class="renewal-info-row">
-              <label class="r-label" for="renewal-server-select"
-                >Server Region:</label
+              <span class="stat-big-num" id="modal-bandwidth-used">…</span>
+              <span class="stat-unit" id="modal-bandwidth-limit"
+                >GB / 100 GB</span
               >
-              <select
-                id="renewal-server-select"
-                class="select-input r-val"
-                style="padding: 4px 8px; font-size: 0.85rem"
-              >
-                <option value="" disabled selected>
-                  Select server region...
-                </option>
-                <option value="eu-de">
-                  Frankfurt / Nuremberg, Germany 🇩🇪 (eu-de)
-                </option>
-                <option value="eu-ch">
-                  Zurich / Geneva, Switzerland 🇨🇭 (eu-ch)
-                </option>
-                <option value="us-east">
-                  Ashburn / New York, USA 🇺🇸 (us-east)
-                </option>
-                <option value="us-west">
-                  Hillsboro, Oregon, USA 🇺🇸 (us-west)
-                </option>
-                <option value="asia-sg">Singapore 🇸🇬 (asia-sg)</option>
-                <option value="sa-br">Sao Paulo, Brazil 🇧🇷 (sa-br)</option>
-                <option value="oc-au">Sydney, Australia 🇦🇺 (oc-au)</option>
-              </select>
             </div>
-            <div class="renewal-info-row">
-              <span class="r-label">WireGuard PubKey:</span>
-              <span class="r-val truncated" id="renewal-pubkey">...</span>
-            </div>
-            <div class="renewal-info-row">
-              <span class="r-label">Current Expiry:</span>
-              <span class="r-val" id="renewal-current-expiry">...</span>
+            <div class="modal-progress-track" aria-hidden="true">
+              <div class="modal-progress-fill" id="modal-bandwidth-fill"></div>
             </div>
           </div>
-
-          <div class="storefront-step" style="margin-top: 16px">
-            <label class="step-label">Select Extension Duration</label>
-            <div class="plan-cards-grid">
-              <div
-                class="plan-card"
-                data-duration="1"
-                onclick="selectRenewalPlan(1, this)"
-              >
-                <div class="plan-duration">1 Month</div>
-                <div class="plan-price">
-                  <span id="renewal-plan-price-1">25,000</span>
-                  <span class="price-unit">sats</span>
-                </div>
-              </div>
-              <div
-                class="plan-card active"
-                data-duration="3"
-                onclick="selectRenewalPlan(3, this)"
-              >
-                <div class="plan-badge">Popular</div>
-                <div class="plan-duration">3 Months</div>
-                <div class="plan-price">
-                  <span id="renewal-plan-price-3">70,000</span>
-                  <span class="price-unit">sats</span>
-                </div>
-              </div>
-              <div
-                class="plan-card"
-                data-duration="6"
-                onclick="selectRenewalPlan(6, this)"
-              >
-                <div class="plan-duration">6 Months</div>
-                <div class="plan-price">
-                  <span id="renewal-plan-price-6">135,000</span>
-                  <span class="price-unit">sats</span>
-                </div>
-              </div>
-              <div
-                class="plan-card"
-                data-duration="12"
-                onclick="selectRenewalPlan(12, this)"
-              >
-                <div class="plan-badge best-value">Best Value</div>
-                <div class="plan-duration">12 Months</div>
-                <div class="plan-price">
-                  <span id="renewal-plan-price-12">250,000</span>
-                  <span class="price-unit">sats</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="modal-footer-actions">
-            <button
-              class="btn-primary-glow w-100"
-              onclick="startRenewalCheckout()"
-            >
-              <svg
-                class="btn-zap-svg"
-                viewBox="0 0 24 24"
-                width="18"
-                height="18"
-                fill="currentColor"
-              >
-                <polygon
-                  points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"
-                ></polygon>
-              </svg>
-              <span>Generate Renewal Invoice</span>
-            </button>
-          </div>
-        </div>
-      </div>
-    </dialog>
-
-    <!-- ════════════════════════════════════════════ -->
-    <!-- Export Configuration Modal                   -->
-    <!-- ════════════════════════════════════════════ -->
-    <dialog
-      id="export-modal"
-      class="app-modal"
-      aria-labelledby="export-modal-title"
-      aria-modal="true"
-    >
-      <div class="modal-dialog-inner modal-sm">
-        <div class="modal-header">
-          <div class="modal-title-row">
-            <button
-              type="button"
-              class="modal-brand-btn"
-              onclick="goToHomepage()"
-              title="Return to Dashboard"
-              aria-label="TunnelSats Dashboard"
-            >
-              <img
-                src="ts_logo_rectangle.svg"
-                alt="TunnelSats"
-                class="modal-brand-logo"
-              />
-            </button>
-            <span class="modal-title-sep">/</span>
-            <h2 id="export-modal-title">Export WireGuard Config</h2>
-          </div>
-          <button
-            class="modal-close-btn"
-            onclick="closeExportModal()"
-            aria-label="Close modal"
-          >
-            ✕
-          </button>
-        </div>
-        <div class="modal-body">
-          <div class="info-box" style="margin-bottom: 16px">
-            <p
-              style="
-                margin: 0;
-                line-height: 1.5;
-                font-size: 13.5px;
-                color: var(--text-primary);
-              "
-            >
-              To protect your private WireGuard cryptographic key from
-              unauthenticated disclosure, full configuration export is managed
-              securely through the authenticated StartOS interface.
-            </p>
-          </div>
-          <ol
-            style="
-              margin: 0 0 16px 20px;
-              padding: 0;
-              font-size: 13px;
-              line-height: 1.6;
-              color: var(--text-secondary);
-            "
-          >
+          <ul class="bandwidth-facts">
             <li>
-              Go to <strong>Services → TunnelSats → Actions</strong> in StartOS.
+              <strong>100 GB per calendar month</strong> for your node's traffic
+              through the tunnel (peer connections, gossip, payments).
             </li>
-            <li>Select <strong>Export WireGuard Configuration</strong>.</li>
-            <li>Copy or download your complete configuration.</li>
-          </ol>
-          <div class="modal-footer-actions">
-            <button class="btn-primary-glow w-100" onclick="closeExportModal()">
-              Understood
-            </button>
-          </div>
+            <li>
+              <strong>Automatic reset</strong> to 0 GB on the 1st of every month
+              (00:00 UTC).
+            </li>
+            <li>
+              <strong>Above 100 GB</strong> TunnelSats restricts the VPN
+              connection until the monthly reset.
+            </li>
+            <li>
+              <strong>Reset early:</strong> from 70% usage, the
+              <strong>Reset Bandwidth</strong> action buys a reset of the
+              counter for a small fee, paid through a Pay Invoice task on your
+              node. Resets per month are limited.
+            </li>
+          </ul>
+          <a
+            href="https://tunnelsats.com/faq"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="bandwidth-faq-link"
+          >
+            TunnelSats FAQ →
+          </a>
         </div>
       </div>
     </dialog>
 
-    <!-- ════════════════════════════════════════════ -->
-    <!-- FAQ Modal                                    -->
-    <!-- ════════════════════════════════════════════ -->
+    <!-- ══════════ FAQ dialog ══════════ -->
     <dialog
       id="faq-modal"
       class="app-modal"
       aria-labelledby="faq-modal-title"
-      aria-modal="true"
+      closedby="any"
     >
       <div class="modal-dialog-inner faq-dialog-inner">
         <div class="modal-header">
-          <div class="modal-title-row">
-            <button
-              type="button"
-              class="modal-brand-btn"
-              onclick="goToHomepage()"
-              title="Return to Dashboard"
-              aria-label="TunnelSats Dashboard"
-            >
-              <img
-                src="ts_logo_rectangle.svg"
-                alt="TunnelSats"
-                class="modal-brand-logo"
-              />
-            </button>
-            <span class="modal-title-sep">/</span>
-            <h2 id="faq-modal-title">Frequently Asked Questions</h2>
-          </div>
+          <h2 id="faq-modal-title">Frequently asked questions</h2>
           <button
+            type="button"
             class="modal-close-btn"
-            id="btn-close-faq"
-            onclick="closeFaqModal()"
+            data-close-dialog
             aria-label="Close FAQ"
           >
             ✕
@@ -1166,190 +575,140 @@
         </div>
 
         <div class="faq-body">
-          <!-- Q1: Architecture & In-Container VPN -->
           <details class="faq-item" open>
             <summary class="faq-question">
-              How does TunnelSats keep my home IP hidden?
+              How does TunnelSats hide my home IP?
             </summary>
             <div class="faq-answer">
               <p>
-                TunnelSats runs directly inside your target Lightning node
-                container (<strong>LND</strong> or
-                <strong>Core Lightning</strong>) via native in-container
-                WireGuard:
+                The WireGuard tunnel runs inside your Lightning node's own
+                container (<strong>LND</strong>,
+                <strong>Core Lightning</strong> or <strong>Eclair</strong>),
+                brought up by the node's clearnet VPN action:
               </p>
               <ul>
                 <li>
-                  <strong>In-Container Tunnel (wg0):</strong> WireGuard operates
-                  inside your node's own container. Incoming peer packets arrive
-                  directly at <code>&lt;tunnel-ip&gt;:9735</code> where the
-                  daemon is already listening—eliminating host-level port
-                  forwarding and multi-node port conflicts.
+                  <strong>Inbound:</strong> peers connect to the TunnelSats
+                  server address and forwarded port; the traffic arrives at your
+                  node through <code>wg0</code>.
                 </li>
                 <li>
-                  <strong>Egress Routing:</strong> Container-level policy
-                  routing (table 51820) directs all clearnet traffic
-                  (handshakes, channel gossip, ping/pong acknowledgments)
-                  through the encrypted tunnel while it is up.
+                  <strong>Outbound:</strong> policy routing (table 51820) sends
+                  the node's clearnet traffic (handshakes, gossip, ping/pong)
+                  through the tunnel while it is up.
                 </li>
                 <li>
-                  <strong>Kill Switch Caveat:</strong> The tunnel and its
+                  <strong>Kill switch caveat:</strong> the tunnel and its
                   routing belong to your Lightning node package. With current
                   node builds, clearnet traffic can fall back to your home
                   connection if <code>wg0</code> goes down; a fix in the node
                   packages is pending.
                 </li>
                 <li>
-                  <strong>Tor Hybrid Coexistence:</strong> Tor traffic continues
-                  uninterrupted across the container bridge network
-                  (<code>eth0</code>), maintaining seamless hybrid routing.
+                  <strong>Tor keeps working:</strong> onion connections continue
+                  over the container network as before.
                 </li>
               </ul>
               <p class="faq-note">
-                <strong>Zero System Gateways:</strong> You never need to
-                configure anything under StartOS <em>System → Gateways</em>,
-                toggle interface firewalls, or manage outbound gateway rules.
+                Nothing is configured box-wide: no StartOS gateways, no
+                interface firewall changes. Only the target node uses the
+                tunnel.
               </p>
             </div>
           </details>
 
-          <!-- Q2: Ordering in Storefront -->
           <details class="faq-item">
-            <summary class="faq-question">
-              How do I order a new subscription directly on StartOS?
-            </summary>
+            <summary class="faq-question">How do I buy a subscription?</summary>
             <div class="faq-answer">
-              <p>
-                Our native in-container storefront makes ordering instant,
-                private, and frictionless:
-              </p>
               <ol>
                 <li>
-                  Select your target Lightning node (<strong>LND</strong> or
-                  <strong>CLN</strong>), server region, and plan duration.
+                  Run
+                  <strong
+                    >Services → TunnelSats → Actions → Buy Subscription</strong
+                  >
+                  and pick your node (LND, Core Lightning or Eclair), a server
+                  region and a plan.
                 </li>
                 <li>
-                  Your device generates sovereign cryptographic WireGuard keys
-                  locally in-process with zero KYC and zero server key custody.
+                  The action generates the WireGuard keys on your server; the
+                  private key never leaves it.
                 </li>
                 <li>
-                  Pay the Lightning invoice via QR code or WebLN / "Open in
-                  Wallet".
+                  Accept the <strong>Pay Invoice</strong> task on your node, or
+                  pay the invoice from the action result with any wallet.
                 </li>
                 <li>
-                  Once paid, TunnelSats automatically passes the configuration
-                  to your selected Lightning node. Accept the 1-click prompt on
-                  your node:
-                  <strong>"Route [Node] through the TunnelSats tunnel"</strong>.
-                  Your node brings up its internal WireGuard interface,
-                  announces its external address, and routes peer traffic
-                  securely.
+                  Once paid, TunnelSats saves the configuration and asks your
+                  node to route through the tunnel. Accept that task on the
+                  node.
                 </li>
               </ol>
+              <p>
+                This dashboard does not take payments: every purchase runs
+                through the action, is paid with your node's Pay Invoice task
+                and is finished by TunnelSats itself.
+              </p>
             </div>
           </details>
 
-          <!-- Q3: Renewals & Expiration -->
           <details class="faq-item">
             <summary class="faq-question">
-              How do renewals work? What happens if my subscription expires?
+              How do renewals work? What happens when it expires?
             </summary>
             <div class="faq-answer">
-              <p>
-                You can click <strong>Renew Subscription</strong> on this
-                dashboard at any time before or after expiration:
-              </p>
               <ul>
                 <li>
-                  <strong>Zero Reconfiguration:</strong> Renewals seamlessly
-                  extend your existing cryptographic keys, assigned public IP,
-                  and port bindings. You never need to reconfigure your node,
-                  change network settings, or restart your Lightning daemon.
+                  Run the <strong>Renew Subscription</strong> action at any
+                  time; the invoice is paid through a Pay Invoice task on your
+                  node. The WireGuard key and your node's configuration stay as
+                  they are.
                 </li>
                 <li>
-                  <strong>If Expired:</strong> Inbound routing pauses safely
-                  until renewed. Your keys are preserved for convenient
-                  reactivation.
+                  TunnelSats raises a Renew Subscription task 7 days before
+                  expiry, updates it at 3 days and again once it has expired,
+                  and posts StartOS notifications at the same points.
+                </li>
+                <li>
+                  <strong>If it expires:</strong> TunnelSats disables the tunnel
+                  on its server, so your node's clearnet peer connections
+                  through TunnelSats stop until you renew or turn off the
+                  clearnet VPN on your node.
                 </li>
               </ul>
             </div>
           </details>
 
-          <!-- Q4: Hands-Free NWC Auto-Renewals -->
           <details class="faq-item">
             <summary class="faq-question">
-              Can I set up automatic, hands-free subscription renewals?
+              Can renewals happen automatically?
             </summary>
             <div class="faq-answer">
               <p>
-                <strong
-                  >Yes, native on-box Nostr Wallet Connect (NWC) auto-renewals
-                  are supported:</strong
-                >
+                <strong>Not yet.</strong> Automatic renewals through Nostr
+                Wallet Connect (NWC) are planned. Until then, renew with the
+                <strong>Renew Subscription</strong> action when the reminder
+                task appears.
               </p>
-              <ul>
-                <li>
-                  <strong>Sovereign On-Box Automation:</strong> You can connect
-                  a <strong>Nostr Wallet Connect (NIP-47)</strong> pairing
-                  string from your local <strong>Alby Hub</strong>,
-                  <strong>LNbits</strong>, or mobile wallet directly within
-                  StartOS. Zero accounts or signups on third-party websites
-                  required.
-                </li>
-                <li>
-                  <strong>Capped Allowance &amp; Budget:</strong> Your wallet
-                  hub enforces a strict monthly sat budget (e.g. 20,000 sats).
-                  TunnelSats never holds your node keys, macaroons, or
-                  passwords.
-                </li>
-                <li>
-                  <strong>Automatic Renewal Flow:</strong> When your
-                  subscription reaches 7 days before expiration, the on-box
-                  companion requests a renewal invoice and pays it unprompted
-                  via your NWC connection.
-                </li>
-                <li>
-                  <strong>Fail-Safe Prompt Fallback:</strong> If your NWC wallet
-                  is disconnected, out of budget, or unconfigured, TunnelSats
-                  raises a 1-click <em>Pay Invoice</em> task on your Lightning
-                  node so you can manually approve the renewal with one click
-                  before the tunnel expires.
-                </li>
-              </ul>
             </div>
           </details>
 
-          <!-- Q5: Bandwidth Allowance -->
           <details class="faq-item">
             <summary class="faq-question">
-              How does the 100 GB monthly bandwidth allowance work?
+              How does the 100 GB monthly allowance work?
             </summary>
             <div class="faq-answer">
               <p>
-                Each subscription includes
-                <strong>100 GB of monthly bandwidth</strong> for WireGuard peer
-                transit (channel gossip, routing packets, and keepalive pings):
+                Each subscription includes 100 GB of transfer per calendar
+                month, reset on the 1st (00:00 UTC). Above 100 GB, TunnelSats
+                restricts the VPN connection. From 70% usage, the
+                <strong>Reset Bandwidth</strong> action resets the counter for a
+                small fee; resets per month are limited.
               </p>
-              <ul>
-                <li>
-                  <strong>Automatic Calendar Reset:</strong> Bandwidth usage
-                  resets to 0 GB at 00:00 UTC on the 1st of every calendar
-                  month.
-                </li>
-                <li>
-                  <strong>Zero Surprise Overages:</strong> Most routing nodes
-                  consume 5–25 GB per month. If 100 GB is reached, the tunnel
-                  safely pauses until month-end—no surprise charges or fees.
-                </li>
-              </ul>
             </div>
           </details>
 
-          <!-- Q6: IPv6 Warning -->
           <details class="faq-item">
-            <summary class="faq-question">
-              How is IPv6 handled?
-            </summary>
+            <summary class="faq-question">How is IPv6 handled?</summary>
             <div class="faq-answer">
               <p>
                 Your Lightning node package decides how IPv6 is routed. Current
@@ -1364,36 +723,15 @@
             </div>
           </details>
 
-          <!-- Q7: Backup & Privacy Audit -->
           <details class="faq-item">
             <summary class="faq-question">
-              How do I backup my configuration and audit egress privacy via CLI?
+              How do I back up my configuration?
             </summary>
             <div class="faq-answer">
               <p>
-                <strong>Config Export:</strong> Use
-                <strong
-                  >Services → TunnelSats → Actions → Export WireGuard
-                  Configuration</strong
-                >
-                in StartOS to securely copy your full configuration.
-              </p>
-              <p>
-                <strong>CLI Route Audit:</strong> Verify that your node's
-                outbound IPv4 traffic is fully encapsulated through TunnelSats
-                from your StartOS terminal:
-              </p>
-              <pre><code>start-cli package attach lnd -- curl -s https://api.ipify.org</code></pre>
-              <p
-                style="
-                  font-size: 12px;
-                  color: var(--text-secondary);
-                  margin-top: 4px;
-                "
-              >
-                Expected output: your assigned TunnelSats server IP, not your
-                home IP. This checks the tunnel while it is up; it does not
-                test what happens when it goes down.
+                Run <strong>Export WireGuard Configuration</strong> in StartOS
+                to copy the full configuration. It is also part of StartOS
+                backups. The dashboard never shows the private key.
               </p>
             </div>
           </details>
@@ -1401,7 +739,6 @@
       </div>
     </dialog>
 
-    <script src="qrcode.js"></script>
     <script src="script.js"></script>
   </body>
 </html>

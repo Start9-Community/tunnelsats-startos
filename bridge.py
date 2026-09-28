@@ -21,6 +21,10 @@ DATA_DIR = os.getenv("DATA_DIR", "/data")
 CONFIG_PATH = os.path.join(DATA_DIR, "tunnelsatsv3.conf")
 APP_CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 META_FILE_PATH = os.path.join(DATA_DIR, "tunnelsats-meta.json")
+# Written by the TypeScript side (startos/fileModels); only read here, by the
+# dashboard read model (get_dashboard).
+HANDOFF_FILE_PATH = os.path.join(DATA_DIR, "vpn-handoff.json")
+NOTICES_FILE_PATH = os.path.join(DATA_DIR, "subscription-notices.json")
 TUNNELSATS_API_URL = "https://tunnelsats.com/api/public/v1"
 # Fields that only hold for the key they were confirmed for (see lazy_sync).
 CONFIRMED_META_FIELDS = ("expiresAt", "expirySource", "lastSync", "syncSuccess", "bandwidth_used_gb")
@@ -164,35 +168,6 @@ def validate_config(wg_conf):
         raise ValueError("Missing 'Endpoint' routing property.")
     if not re.search(r'#\s*(?:VPNPort|Port Forwarding):\s*\d+', wg_conf, re.IGNORECASE):
         raise ValueError("Missing port-forwarding metadata (e.g., # Port Forwarding: XXXXX).")
-
-def generate_wg_keypair():
-    try:
-        proc_priv = subprocess.run(["wg", "genkey"], capture_output=True, check=True)
-        priv = proc_priv.stdout.decode().strip()
-        proc_pub = subprocess.run(["wg", "pubkey"], input=priv.encode(), capture_output=True, check=True)
-        pub = proc_pub.stdout.decode().strip()
-        if priv and pub:
-            return priv, pub
-    except Exception:
-        pass
-
-    try:
-        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-        from cryptography.hazmat.primitives import serialization
-        import base64
-        key = X25519PrivateKey.generate()
-        raw_priv = key.private_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PrivateFormat.Raw,
-            encryption_algorithm=serialization.NoEncryption()
-        )
-        raw_pub = key.public_key().public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw
-        )
-        return base64.b64encode(raw_priv).decode(), base64.b64encode(raw_pub).decode()
-    except Exception as e:
-        raise RuntimeError(f"Unable to generate WireGuard keypair: {e}")
 
 TARGET_NODES = ("lnd", "cln", "eclair")
 
@@ -1023,9 +998,21 @@ def _unpaid(kind, key, pending, state, now):
     return _outcome(kind, "waiting", "Waiting for the invoice to be paid.", pending["paymentHash"])
 
 
+def _mark_payment_received(key, pending, payment_hash):
+    """Records that payment_hash was paid or is processing. Keyed by
+    payment_hash so a replacement Buy/Renew/Reset that deep-merges over
+    meta[key] without clearing extra keys never inherits the old payment's
+    received state."""
+    if pending.get("paymentReceivedFor") != payment_hash:
+        pending["paymentReceivedFor"] = payment_hash
+        _update_pending(key, payment_hash, {"paymentReceivedFor": payment_hash})
+
+
 def _settle_order(pending, now):
     payment_hash = pending["paymentHash"]
     state = _payment_state(payment_hash)
+    if state in ("processing", "paid"):
+        _mark_payment_received("pendingOrder", pending, payment_hash)
     if state == "processing":
         return _outcome("order", "waiting", "Payment received; the tunnel is being provisioned.", payment_hash)
     if state != "paid":
@@ -1049,6 +1036,8 @@ def _settle_order(pending, now):
 def _settle_renewal(pending, now):
     payment_hash = pending["paymentHash"]
     state = _payment_state(payment_hash)
+    if state in ("processing", "paid"):
+        _mark_payment_received("pendingRenewal", pending, payment_hash)
     if state == "processing":
         return _outcome("renewal", "waiting", "Payment received; the renewal is being applied.", payment_hash)
     if state != "paid":
@@ -1110,6 +1099,8 @@ def _settle_reset(pending, now):
     created = _parse_iso(pending.get("createdAt"))
     stale = created is not None and now - created >= PENDING_TTL
 
+    if state in ("processing", "paid", "failed"):
+        _mark_payment_received("pendingReset", pending, payment_hash)
     if state == "processing":
         return _outcome("reset", "waiting", "Payment received; the bandwidth reset is being applied.", payment_hash)
     if state in ("unpaid", "unknown"):
@@ -1166,8 +1157,15 @@ def _settle_one(kind, key, pending, now):
         _update_pending(key, payment_hash, {"lastError": message,
                                             "nextAttemptAt": _iso(now + SETTLE_RETRY_DELAY)})
         return _outcome(kind, "failed", message, payment_hash)
-    if outcome["result"] == "waiting" and ("lastError" in pending or "nextAttemptAt" in pending):
-        _update_pending(key, payment_hash, {"lastError": None, "nextAttemptAt": None})
+    if outcome["result"] == "waiting":
+        stale_fields = {}
+        if "lastError" in pending or "nextAttemptAt" in pending:
+            stale_fields["lastError"] = None
+            stale_fields["nextAttemptAt"] = None
+        if "paymentReceivedFor" in pending and pending.get("paymentReceivedFor") != payment_hash:
+            stale_fields["paymentReceivedFor"] = None
+        if stale_fields:
+            _update_pending(key, payment_hash, stale_fields)
     return outcome
 
 
@@ -1242,9 +1240,28 @@ def get_package_version():
     _package_version_cache = "0.4.0"
     return _package_version_cache
 
+DASHBOARD_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self'; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "font-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'none'; "
+    "form-action 'none'"
+)
+
+
 class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
+
+    def end_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", DASHBOARD_CSP)
+        self.send_header("Referrer-Policy", "no-referrer")
+        super().end_headers()
 
     def is_trusted_request(self):
         client_ip = self.client_address[0]
@@ -1337,11 +1354,11 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self):
+        if not self.is_trusted_request():
+            return
+
         path_only = self.path.partition('?')[0].partition('#')[0]
         if path_only == "/api/status":
-            if not self.is_trusted_request():
-                return
-
             from urllib.parse import urlparse, parse_qs
             query_params = parse_qs(urlparse(self.path).query)
             force_sync = query_params.get("force", ["0"])[0] in ("1", "true", "yes")
@@ -1389,20 +1406,33 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             return
 
         if path_only == "/api/csrf":
-            if not self.is_trusted_request():
-                return
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"csrf_token": get_csrf_token()}).encode("utf-8"))
             return
 
-        web_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "web"))
+        if path_only == "/api/dashboard":
+            # Read-only: never triggers a sync or any other outbound call.
+            try:
+                body = json.dumps(get_dashboard()).encode("utf-8")
+            except Exception as e:
+                print(f"Dashboard read model failed: {e}", file=sys.stderr)
+                self.send_error(500, "Dashboard state unavailable")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        web_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "web"))
         target_path = path_only.lstrip("/")
         if not target_path or target_path == "":
             target_path = "index.html"
 
-        safe_path = os.path.abspath(os.path.join(web_dir, target_path))
+        safe_path = os.path.realpath(os.path.join(web_dir, target_path))
         if os.path.commonpath([web_dir, safe_path]) != web_dir:
             self.send_error(403, "Access denied")
             return
@@ -1445,62 +1475,8 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_error(404, "File not found")
 
     def do_POST(self):
-        path_only = self.path.partition('?')[0].partition('#')[0]
         if not self.is_trusted_request():
             return
-
-        if path_only == "/api/keys/generate":
-            try:
-                priv, pub = generate_wg_keypair()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"private_key": priv, "public_key": pub}).encode("utf-8"))
-            except Exception as e:
-                self.send_error(500, f"Key generation failed: {e}")
-            return
-
-        if path_only == "/api/config/save":
-            try:
-                # Protect active configuration from unauthenticated replacement
-                if os.path.exists(CONFIG_PATH):
-                    # Fail closed: from the unauthenticated web UI, only a
-                    # subscription positively known to be expired may be replaced.
-                    sub_info = get_subscription_info(get_wg_pubkey())
-                    if not sub_info.get("isExpired"):
-                        self.send_response(403)
-                        self.send_header("Content-Type", "application/json")
-                        self.end_headers()
-                        self.wfile.write(json.dumps({
-                            "error": "Active configuration already present. Replacing an active configuration requires operator authentication in StartOS (Services → TunnelSats → Configure)."
-                        }).encode("utf-8"))
-                        return
-
-                content_length = int(self.headers.get('Content-Length', 0))
-                body = self.rfile.read(content_length).decode('utf-8')
-                data = json.loads(body)
-                conf = data.get("config", "").strip()
-                target_node = data.get("target_node", "lnd")
-                if not conf:
-                    self.send_response(400)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"error": "No configuration provided"}).encode("utf-8"))
-                    return
-
-                save_configuration(conf, target_node)
-
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"success": True, "message": "Configuration saved. Accept the routing prompt on your Lightning node."}).encode("utf-8"))
-            except Exception as e:
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
-            return
-
         self.send_error(404, "Not found")
 
 def web_server_thread():
@@ -1581,6 +1557,8 @@ def get_target_details():
     # Map to StartOS service ID and default port
     if target in ("cln", "c-lightning"):
         hostname = "c-lightning.embassy"
+    elif target == "eclair":
+        hostname = "eclair.embassy"
     else:
         hostname = "lnd.embassy"
     return hostname, 9735
@@ -1718,6 +1696,44 @@ def get_subscription_info(current_pubkey=None):
             "syncSuccess": False
         }
 
+def _strip_endpoint_port(endpoint):
+    endpoint = endpoint.strip()
+    if endpoint.startswith("["):
+        closing = endpoint.find("]")
+        if closing != -1:
+            return endpoint[1:closing].strip()
+        return endpoint.lstrip("[")
+    last_colon = endpoint.rfind(":")
+    if last_colon != -1:
+        host_part = endpoint[:last_colon]
+        try:
+            ipaddress.IPv6Address(host_part)
+            return host_part
+        except ValueError:
+            pass
+    try:
+        ipaddress.IPv6Address(endpoint)
+        return endpoint
+    except ValueError:
+        pass
+    return endpoint.partition(":")[0]
+
+
+def extract_server_host(config_content):
+    server_match = re.search(r"^#\s*Server:\s*([^\s#]+)", config_content, re.IGNORECASE | re.MULTILINE)
+    if server_match:
+        server = server_match.group(1).strip()
+        if server.startswith("[") and server.endswith("]"):
+            return server[1:-1]
+        return server
+    endpoint_match = re.search(r"^\s*(?!#|;)\s*Endpoint\s*=\s*([^\s#;]+)", config_content, re.IGNORECASE | re.MULTILINE)
+    if endpoint_match:
+        host = _strip_endpoint_port(endpoint_match.group(1))
+        if host:
+            return host
+    return "Unknown"
+
+
 def get_status():
     enabled = is_enabled()
     has_config = os.path.exists(CONFIG_PATH)
@@ -1732,13 +1748,7 @@ def get_status():
             with open(CONFIG_PATH, "r") as f:
                 content = f.read()
             vpn_port = extract_vpn_port(content)
-            server_match = re.search(r"^#\s*Server:\s*([^\s#]+)", content, re.IGNORECASE | re.MULTILINE)
-            if server_match:
-                server_domain = server_match.group(1).strip()
-            else:
-                endpoint_match = re.search(r"^\s*(?!#|;)\s*Endpoint\s*=\s*([^\s#:]+)", content, re.IGNORECASE | re.MULTILINE)
-                if endpoint_match:
-                    server_domain = endpoint_match.group(1).strip()
+            server_domain = extract_server_host(content)
         except Exception:
             pass
 
@@ -1786,6 +1796,231 @@ def get_status():
         "bandwidth_limit_gb": 100,
         "version": get_package_version(),
         "allow_ipv6": is_allow_ipv6(),
+    }
+
+# ─── Dashboard read model ────────────────────────────────────────────────────
+# GET /api/dashboard. The dashboard is reachable from the LAN without operator
+# authentication, so it only ever sees what this allow-list copies out of the
+# state files: never a private key, an invoice, the WireGuard configuration or
+# any field not named here. Every value is type-checked and bounded, so a
+# malformed or tampered file cannot pass other data through an allowed name.
+# Money and state changes stay with the StartOS actions; this is read-only.
+
+DASHBOARD_TEXT_LIMIT = 300
+BANDWIDTH_LIMIT_GB = 100
+BASE_PRICE_USD = 3.0
+PLAN_DISCOUNTS_PCT = ((1, 0), (3, 5), (6, 10), (12, 20))
+PLAN_PRICES_USD = [
+    {
+        "months": months,
+        "usd": round(BASE_PRICE_USD * months * (100 - discount_pct) / 100, 2),
+        "discountPct": discount_pct,
+    }
+    for months, discount_pct in PLAN_DISCOUNTS_PCT
+]
+HANDOFF_PACKAGE_IDS = ("lnd", "c-lightning", "eclair")
+NOTICE_KINDS = ("7d", "3d", "lapsed")
+_HEX64_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
+_PAID_ERROR_RE = re.compile(
+    r"payment was received|renewal is paid|bandwidth reset was applied|"
+    r"bandwidth reset failed|claim|Provisioning failed|stored private key",
+    re.IGNORECASE,
+)
+
+
+def _dashboard_text(value, limit=DASHBOARD_TEXT_LIMIT):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
+def _dashboard_error_text(value, pending=None):
+    text = _dashboard_text(value, limit=1024)
+    if text is None:
+        return None
+    text = re.sub(
+        r"with payment hash\s+[0-9a-fA-F]{64}",
+        "with the payment hash from the Reset Bandwidth action",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if isinstance(pending, dict):
+        for field in ("paymentHash", "orderId", "renewalId", "resetId", "privateKey", "invoice"):
+            secret = pending.get(field)
+            if isinstance(secret, str) and len(secret) >= 4:
+                text = text.replace(secret, "[redacted]")
+    text = _HEX64_RE.sub("[redacted]", text)
+    return _dashboard_text(text)
+
+
+def _dashboard_short_text(value):
+    return _dashboard_text(value, 64)
+
+
+def _dashboard_time(value):
+    dt = _parse_iso(value)
+    return _iso(dt) if dt is not None else None
+
+
+def _dashboard_amount(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value if math.isfinite(value) and value >= 0 else None
+
+
+def _dashboard_node(value):
+    return value if value in TARGET_NODES else None
+
+
+def _read_json_object(path):
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def get_target_node():
+    """The configured target node; "lnd" when config.json is missing or holds
+    anything else (the same default as the TypeScript file model)."""
+    data = _read_json_object(APP_CONFIG_PATH) or {}
+    node = data.get("target-node")
+    return node if node in TARGET_NODES else "lnd"
+
+
+# Per pending payment: the fields the dashboard may see, each with its
+# sanitizer. paymentHash, privateKey, publicKey, invoice and the order,
+# renewal and reset IDs are deliberately absent.
+_PENDING_SUMMARY_FIELDS = {
+    "pendingOrder": {
+        "targetNode": _dashboard_node,
+        "serverId": _dashboard_short_text,
+        "createdAt": _dashboard_time,
+        "lastError": _dashboard_text,
+        "nextAttemptAt": _dashboard_time,
+    },
+    "pendingRenewal": {
+        "targetNode": _dashboard_node,
+        "createdAt": _dashboard_time,
+        "oldExpiry": _dashboard_time,
+        "newExpiry": _dashboard_time,
+        "lastError": _dashboard_text,
+        "nextAttemptAt": _dashboard_time,
+    },
+    "pendingReset": {
+        "targetNode": _dashboard_node,
+        "createdAt": _dashboard_time,
+        "expiresAt": _dashboard_time,
+        "amountSats": _dashboard_amount,
+        "lastError": _dashboard_text,
+        "nextAttemptAt": _dashboard_time,
+    },
+}
+
+
+def _pending_summary(meta, key, public_key=None):
+    """A summary of meta[key], or None when no payment is pending there for
+    the current key."""
+    pending = meta.get(key)
+    if not isinstance(pending, dict) or not isinstance(pending.get("paymentHash"), str) \
+            or not pending["paymentHash"]:
+        return None
+    if key in ("pendingRenewal", "pendingReset"):
+        if public_key is None or pending.get("publicKey") != public_key:
+            return None
+    elif key == "pendingOrder" and public_key is not None and pending.get("publicKey") == public_key:
+        return None
+    summary = {name: clean(pending.get(name)) for name, clean in _PENDING_SUMMARY_FIELDS[key].items()}
+    summary["lastError"] = _dashboard_error_text(pending.get("lastError"), pending)
+    summary["paymentReceived"] = bool(
+        pending.get("paymentReceivedFor") == pending["paymentHash"]
+        or (isinstance(pending.get("lastError"), str) and _PAID_ERROR_RE.search(pending["lastError"]))
+    )
+    return summary
+
+
+def _package_ids(value):
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(p for p in value if p in HANDOFF_PACKAGE_IDS))
+
+
+def _handoff_summary():
+    """Which node holds the tunnel and which still owe an off, from
+    vpn-handoff.json (written by setDependencies); None without a record."""
+    data = _read_json_object(HANDOFF_FILE_PATH)
+    if data is None:
+        return None
+    active = data.get("activeTarget")
+    return {
+        "activeTarget": active if active in HANDOFF_PACKAGE_IDS else None,
+        "pendingOff": _package_ids(data.get("pendingOff")),
+        "unraised": _package_ids(data.get("unraised")),
+    }
+
+
+def _notices_summary(public_key):
+    """The subscription notices already posted for public_key (written by the
+    Subscription health check); None without a record or a key."""
+    data = _read_json_object(NOTICES_FILE_PATH)
+    if data is None or not public_key:
+        return None
+    sent = data.get("sent") if data.get("publicKey") == public_key else None
+    return {
+        "sent": [kind for kind in NOTICE_KINDS if isinstance(sent, list) and kind in sent],
+        "unknownKey": data.get("unknownKey") == public_key,
+    }
+
+
+def get_dashboard():
+    """The dashboard read model. See the section comment above: an explicit
+    allow-list, never a secret."""
+    status = get_status()
+    configured = bool(status.get("configured"))
+    public_key = status.get("pubkey") if configured else None
+    if public_key in ("Unknown", "None", "Not available") or not isinstance(public_key, str):
+        public_key = None
+    meta = read_meta()
+    same_key = public_key is not None and meta.get("publicKey") == public_key
+    server = status.get("server")
+    vpn_ip = status.get("vpn_ip")
+    days = status.get("days_remaining")
+    return {
+        "version": _dashboard_short_text(status.get("version")),
+        "enabled": bool(status.get("enabled")),
+        "configured": configured,
+        "status": _dashboard_short_text(status.get("status")),
+        "targetNode": get_target_node(),
+        "plans": PLAN_PRICES_USD,
+        "subscription": {
+            "active": bool(status.get("subscription_active")),
+            "linked": bool(status.get("subscription_linked")),
+            "expiresAt": _dashboard_time(status.get("expires_at")),
+            "daysRemaining": days if type(days) is int else None,
+            "keyUnknown": bool(status.get("key_unknown")),
+            "lastSync": _dashboard_time(status.get("last_sync")),
+            "syncError": _dashboard_error_text(status.get("sync_error")),
+        },
+        "connection": {
+            "server": _dashboard_text(server, 253) if server != "Unknown" else None,
+            "vpnPort": valid_vpn_port(status.get("vpn_port")) if configured else None,
+            "vpnIp": _dashboard_short_text(vpn_ip) if vpn_ip != "None" else None,
+            "publicKey": public_key,
+            "allowIpv6": bool(status.get("allow_ipv6")),
+        },
+        "bandwidth": {
+            "usedGb": _dashboard_amount(meta.get("bandwidth_used_gb")) if same_key else None,
+            "limitGb": BANDWIDTH_LIMIT_GB,
+        },
+        "pending": {
+            "order": _pending_summary(meta, "pendingOrder", public_key),
+            "renewal": _pending_summary(meta, "pendingRenewal", public_key),
+            "reset": _pending_summary(meta, "pendingReset", public_key),
+        },
+        "handoff": _handoff_summary(),
+        "notices": _notices_summary(public_key),
     }
 
 def main():

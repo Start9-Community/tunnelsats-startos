@@ -13,6 +13,9 @@ export const subscriptionNotices = FileHelper.json(
     /** Unknown entries are ignored by the planner, never read as sent. */
     sent: z.array(z.string()).optional().catch(undefined),
     sentFor: z.string().optional().catch(undefined),
+    /** Earlier expiries of the current period (notifications.ts, #100). */
+    seen: z.array(z.string()).optional().catch(undefined),
+    announcedFor: z.array(z.string()).optional().catch(undefined),
     unknownKey: z.string().optional().catch(undefined),
   }),
 )

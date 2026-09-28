@@ -8,7 +8,7 @@ import { tunnelsatsMeta } from './fileModels/tunnelsatsMeta'
 import { subscriptionNotices } from './fileModels/subscriptionNotices'
 import { dashboardIntents } from './fileModels/dashboardIntents'
 import { processDashboardIntents } from './intentRunner'
-import { createNoticeRunner } from './notifications'
+import { createNoticeRunner, noticeStateRecord } from './notifications'
 import { noticeInputsFor } from './dependencies'
 
 export const main = sdk.setupMain(async ({ effects }) => {
@@ -64,10 +64,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
         .once()
         .catch(() => null)) ?? null,
     writeState: async (state) => {
-      await subscriptionNotices.write(effects, {
-        ...state,
-        sent: state.sent ? [...state.sent] : undefined,
-      })
+      await subscriptionNotices.write(effects, noticeStateRecord(state))
     },
     notify: async (notice) => {
       await sdk.notification.create(effects, {

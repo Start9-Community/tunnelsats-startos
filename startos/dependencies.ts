@@ -77,6 +77,9 @@ export interface SubscriptionMeta {
   serverDomain?: string
   vpnPort?: number
   bandwidth_used_gb?: number
+  bandwidth_limit_gb?: number
+  bandwidth_resets_this_month?: number
+  max_resets_per_month?: number
   keyUnknown?: boolean
 }
 

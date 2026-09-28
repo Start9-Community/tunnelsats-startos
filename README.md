@@ -28,7 +28,8 @@ TunnelSats provides dedicated WireGuard VPN infrastructure specifically designed
 > - **Native Storefront**: Browse plans, generate BOLT11 invoices, and pay directly through StartOS Actions and a Pay Invoice task on your Lightning node (or with any external Lightning wallet).
 > - **In-Container Egress Privacy**: The Lightning node owns the WireGuard tunnel directly inside its own container (`wg0` with routing table 51820). Egress policy routing sends outgoing clearnet peer traffic (gossip, handshakes, ping/pong acks) through the tunnel, while hybrid Tor traffic continues across the bridge network. See the kill switch caveat under [Network & Privacy Disclosure](#network--privacy-disclosure).
 > - **No Box-Wide Changes**: Nothing is configured in the StartOS system settings, no config markers, no firewall toggles, and no multi-node port 9735 race. Only the target node's own traffic uses the tunnel.
-> - **Bandwidth Telemetry**: 100GB monthly bandwidth limit per calendar month, synced by the background daemon and shown in the read-only Web Dashboard.
+> - **Bandwidth Telemetry**: Monthly bandwidth allowance per calendar month (the limit TunnelSats reports for your key), synced by the background daemon. The Web Dashboard shows usage, the pace to the end of the month, paid resets and whether a reset looks available.
+> - **Web Dashboard**: Renewal timeline with the reminder dates and an estimated renewal preview, progress steps for pending payments and the node handoff, TunnelSats server regions, and an inbound reachability check. Buy, Renew and Reset Bandwidth can be started from the dashboard; every payment is still accepted on the node as a Pay Invoice task.
 > - **Sovereign Config Export**: Export your raw `.conf` anytime via the **Export WireGuard Configuration** action.
 > - **Renewal Reminders**: A Renew Subscription task is raised when the subscription expires in 7 days or less, updated at 3 days or less, and again once it has expired.
 
@@ -43,7 +44,7 @@ architecture:
   ui_port: 80
   telemetry_daemon: python3 bridge.py
   external_services:
-    - https://tunnelsats.com (server discovery, subscription orders, and status sync)
+    - https://tunnelsats.com/api/public/v1 (servers, subscription orders and claims, status sync, user-initiated inbound ping test)
 volumes:
   - name: main
     path: /data
@@ -71,7 +72,7 @@ tasks:
 
 ## Architecture & How It Works
 
-1. **Native Storefront**: Users purchase or renew subscriptions via StartOS Actions (**Buy Subscription** / **Renew Subscription**). The action generates a fresh Curve25519 WireGuard keypair locally, submits an order to `api.tunnelsats.com`, raises a **Pay Invoice** task on the target Lightning node, and displays the BOLT11 invoice. Once settled, the active `.conf` is provisioned automatically.
+1. **Native Storefront**: Users purchase or renew subscriptions via StartOS Actions (**Buy Subscription** / **Renew Subscription**) or from the Web Dashboard. The Buy action lists the server regions TunnelSats currently offers (with a built-in fallback list if the lookup fails), generates a fresh Curve25519 WireGuard keypair locally, submits an order to `https://tunnelsats.com/api/public/v1`, raises a **Pay Invoice** task on the target Lightning node, and displays the BOLT11 invoice. Once settled, the active `.conf` is provisioned automatically.
 2. **Bring Your Own Config**: Users with an existing TunnelSats subscription can paste their `.conf` via the **Import Subscription** action.
 3. **In-Container Clearnet VPN & Egress**: The WireGuard tunnel runs directly inside the target Lightning node container (`lnd`, `c-lightning` or `eclair`). Inbound peer connections arrive directly on `<tunnel-ip>:9735` where the daemon is already listening—eliminating host-level port forwards and port 9735 multi-node conflicts. The container's policy routing (`table 51820`) sends all outbound clearnet peer traffic (handshakes, gossip, ping/pong acknowledgments) through the tunnel while it is up (see the kill switch caveat below), while Tor traffic continues across the bridge network (`eth0`). The operator simply accepts a 1-click prompt on their node: **"Route [Node] through the TunnelSats tunnel"**.
 4. **Subscription Lifecycle & Renewal**: The background daemon monitors subscription expiration, updating the local dashboard, raising StartOS tasks when renewal is required, and posting StartOS notifications 7 and 3 days before expiry, on lapse, and when the configured key has no subscription.
@@ -92,7 +93,7 @@ tasks:
 
 - **`config.json`**: Primary service configuration (`enabled`, `target-node`, `tunnelsats-conf`, `allow-ipv6`).
 - **`tunnelsatsv3.conf`**: WireGuard configuration file written to disk when enabled.
-- **`tunnelsats-meta.json`**: Cached subscription metadata (`expiresAt`, `lastSync`, `syncSuccess`, `serverDomain`, `vpnPort`, `bandwidth_used_gb`).
+- **`tunnelsats-meta.json`**: Cached subscription metadata (`expiresAt`, `lastSync`, `syncSuccess`, `serverDomain`, `vpnPort`, `bandwidth_used_gb`, `bandwidth_limit_gb`, `bandwidth_resets_this_month`, `max_resets_per_month`). The quota fields are only kept while TunnelSats confirms them for the configured key.
 
 ## Actions & Tasks
 
@@ -108,7 +109,11 @@ tasks:
 
 ## Network & Privacy Disclosure
 
-- **Subscription API & Status**: This package queries `https://api.tunnelsats.com` for server discovery, order generation, and on-demand subscription status / bandwidth usage using your WireGuard public key.
+- **TunnelSats API**: All calls go to `https://tunnelsats.com/api/public/v1`:
+  - `subscription/status` (background sync): sends your WireGuard public key and receives expiry, bandwidth usage, the monthly limit and the paid reset count.
+  - `subscription/create`, `subscription/renew`, `subscription/bandwidth-reset`, `subscription/{paymentHash}`, `subscription/claim` (Buy / Renew / Reset Bandwidth): order creation, payment status and provisioning.
+  - `servers` (public server list, no node data sent): queried when the Buy action opens, and by the dashboard's region cards through the bridge, which caches the list for 60 seconds; a failed lookup keeps showing the last list and is retried after 15 seconds. The listed status is not a live health check; see the TunnelSats status page.
+  - `ping/test` (only when you press **Check inbound reachability** on the dashboard; at most 2 checks per 60 seconds): sends your node public key and the server address and port from your configuration, and TunnelSats tries to open a Lightning connection to your node through that address. It only shows that inbound connections reach your node; it does not verify outbound VPN egress. The node public key is kept only in your browser's local storage, never on the node.
 - **Routing**: The tunnel runs inside the node container, and outbound clearnet peer traffic is sent through it while `wg0` is up. IPv6 routing is decided by the node package: current builds send IPv6 through the tunnel when `AllowedIPs` include `::/0`, and block it otherwise. **Allow IPv6 Endpoint** only lets TunnelSats hand the node an IPv6 server endpoint to announce.
 - **Kill Switch Caveat**: The tunnel and its routing belong to your Lightning node package, not to TunnelSats. With current node builds, clearnet traffic can fall back to your home connection if `wg0` goes down or is removed; a fix in the node packages is pending. While `wg0` is up, clearnet peer traffic uses the tunnel.
 

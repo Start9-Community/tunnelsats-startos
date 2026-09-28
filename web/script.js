@@ -6,10 +6,20 @@
 // single-writer intent file picked up by the StartOS service) or run as
 // StartOS actions. Every payment raises a Pay Invoice task on the target
 // Lightning node and shows the same payable BOLT11 invoice here as a pure-DOM
-// offline SVG QR code. It makes no request to any other host.
+// offline SVG QR code. It makes no request to any other host: the server
+// list (GET /api/servers) and the inbound reachability check
+// (POST /api/reachability) are fetched by bridge.py on its behalf.
 
 const DASHBOARD_URL = '/api/dashboard'
 const INTENTS_URL = '/api/intents'
+const SERVERS_URL = '/api/servers'
+const REACHABILITY_URL = '/api/reachability'
+const SERVERS_REFRESH_MS = 10 * 60 * 1000
+const NODE_PUBKEY_RE = /^0[23][0-9a-fA-F]{64}$/
+// The operator's node public key for the reachability check; kept in this
+// browser only.
+const NODE_PUBKEY_STORAGE_KEY = 'tunnelsats.nodePubkey'
+const DEFAULT_SERVER_ID = 'eu-de'
 const POLL_MS = 30000
 const FAST_POLL_MS = 3000
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -17,6 +27,13 @@ const DAY_MS = 24 * 60 * 60 * 1000
 const PROGRESS_TERM_MS = 30 * DAY_MS
 const BANDWIDTH_WARN_PCT = 70
 const BANDWIDTH_CRITICAL_PCT = 90
+// The renewal timeline spans at least the last 30 days before the expiry.
+const TIMELINE_MIN_WINDOW_MS = 30 * DAY_MS
+// The Subscription health check posts reminders 7 and 3 days before expiry.
+const REMINDER_MARKERS = Object.freeze([
+  Object.freeze({ kind: '7d', days: 7, label: '7-day reminder' }),
+  Object.freeze({ kind: '3d', days: 3, label: '3-day reminder' }),
+])
 const SVG_NS = 'http://www.w3.org/2000/svg'
 const BOLT11_RE = /^ln(?:bcrt|bc|tbs|tb|sb)[0-9a-z]{20,4000}$/i
 
@@ -66,6 +83,17 @@ let localIntentFeedback = null
 let lastRenderedInvoice = null
 let selectedInvoiceKind = null
 let selectedBuyDuration = '3m'
+let selectedServerId = DEFAULT_SERVER_ID
+// Whether the operator picked selectedServerId. A picked region that drops
+// out of a refreshed list is never swapped for another: the selection is
+// cleared (withdrawnServerId) and Buy waits for a new pick.
+let serverPickedByOperator = false
+let withdrawnServerId = null
+let serverList = null
+let serversFailed = false
+let serversLoadedAt = 0
+let reachabilityInFlight = false
+let reachabilityResult = null
 
 // ─────────────────────────────────────────────
 // Pure-DOM ISO/IEC 18004 QR Code Generator (Byte mode, Level L, V1–V40)
@@ -875,6 +903,352 @@ function badgeState(m, failed) {
   }
 }
 
+/**
+ * Linear projection of this month's usage to the end of the UTC month.
+ * null without a usage figure; projectedGb is null during the first day of
+ * the month, when a projection says little, and after a paid reset this
+ * month: the counter restarted at a time the dashboard does not know, so
+ * dividing by the time since the 1st would understate the pace.
+ */
+function monthPace(m, nowMs = Date.now()) {
+  const bw = (m && m.bandwidth) || {}
+  const used = bw.usedGb
+  const limit = bw.limitGb
+  if (typeof used !== 'number' || !Number.isFinite(used) || used < 0) {
+    return null
+  }
+  if (typeof limit !== 'number' || !Number.isFinite(limit) || limit <= 0) {
+    return null
+  }
+  const now = new Date(nowMs)
+  const start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
+  const end = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)
+  const elapsed = nowMs - start
+  const afterReset =
+    Number.isInteger(bw.resetsThisMonth) && bw.resetsThisMonth > 0
+  const projectedGb =
+    !afterReset && elapsed >= DAY_MS ? (used * (end - start)) / elapsed : null
+  return {
+    usedGb: used,
+    limitGb: limit,
+    projectedGb,
+    afterReset,
+    exceedsLimit: projectedGb !== null && projectedGb > limit,
+    resetsAt: new Date(end).toISOString(),
+  }
+}
+
+function paceText(pace) {
+  if (!pace) return 'Usage for this month is not known yet.'
+  const resets = new Date(pace.resetsAt).toLocaleDateString(undefined, {
+    timeZone: 'UTC',
+  })
+  if (pace.afterReset) {
+    return `${pace.usedGb.toFixed(2)} GB since this month's paid reset. No projection: the reset time is not known. The counter resets on ${resets} (UTC).`
+  }
+  if (pace.projectedGb === null) {
+    return `Too early in the month for a projection (${pace.usedGb.toFixed(2)} GB so far). The counter resets on ${resets} (UTC).`
+  }
+  const projected = Math.round(pace.projectedGb)
+  return pace.exceedsLimit
+    ? `At this pace: about ${projected} GB by the end of the month, above the ${pace.limitGb} GB allowance. The counter resets on ${resets} (UTC).`
+    : `At this pace: about ${projected} GB of ${pace.limitGb} GB by the end of the month. The counter resets on ${resets} (UTC).`
+}
+
+/** Resets used this month as text, from the confirmed quota. */
+function resetsText(m) {
+  const bw = (m && m.bandwidth) || {}
+  const max = Number.isInteger(bw.maxResetsPerMonth)
+    ? bw.maxResetsPerMonth
+    : null
+  const used = Number.isInteger(bw.resetsThisMonth) ? bw.resetsThisMonth : null
+  if (max === null) return 'Unknown'
+  return `${used === null ? '?' : used} of ${max}`
+}
+
+/**
+ * Whether a paid bandwidth reset looks possible from the confirmed numbers.
+ * Only a hint: TunnelSats decides when the reset is requested (its usage
+ * threshold is configurable; resetThresholdPct is its default).
+ */
+function resetEligibility(m) {
+  if (!m || !m.configured || (m.subscription && m.subscription.keyUnknown)) {
+    return {
+      state: 'unavailable',
+      text: 'Needs a subscription confirmed for this configuration.',
+    }
+  }
+  if (m.pending && m.pending.reset) {
+    return { state: 'pending', text: 'A bandwidth reset is in progress.' }
+  }
+  const bw = m.bandwidth || {}
+  const max = Number.isInteger(bw.maxResetsPerMonth)
+    ? bw.maxResetsPerMonth
+    : null
+  const used = Number.isInteger(bw.resetsThisMonth) ? bw.resetsThisMonth : null
+  if (max !== null && used !== null && used >= max) {
+    return {
+      state: 'quota-used',
+      text:
+        max === 0
+          ? 'Paid resets are not offered for this subscription.'
+          : `All ${max} resets for this month are used; usage resets on the 1st (UTC).`,
+    }
+  }
+  const pct = bandwidthPercent(m)
+  if (pct === null) {
+    return { state: 'unknown', text: 'Usage for this month is not known yet.' }
+  }
+  const threshold =
+    typeof bw.resetThresholdPct === 'number'
+      ? bw.resetThresholdPct
+      : BANDWIDTH_WARN_PCT
+  if (pct < threshold) {
+    return {
+      state: 'below-threshold',
+      text: `Available from about ${threshold}% usage (${Math.floor(pct)}% used). TunnelSats decides when you request it.`,
+    }
+  }
+  if (max !== null && used !== null) {
+    return {
+      state: 'eligible',
+      text: `Looks eligible: ${max - used} of ${max} resets left this month. TunnelSats confirms when you request it.`,
+    }
+  }
+  return {
+    state: 'likely',
+    text: `Looks eligible (${Math.floor(pct)}% used). TunnelSats confirms when you request it.`,
+  }
+}
+
+/**
+ * The expiry TunnelSats confirmed for this configuration, in ms; null
+ * otherwise. An unlinked subscription can still carry the configuration's
+ * "# Valid Until" hint as expiresAt, but that date is not confirmed, so the
+ * timeline and the renewal preview never build on it.
+ */
+function expiryMs(m) {
+  const sub = m && m.subscription
+  if (!sub || sub.linked !== true || sub.keyUnknown) return null
+  const ms = sub.expiresAt ? Date.parse(sub.expiresAt) : NaN
+  return Number.isFinite(ms) ? ms : null
+}
+
+/**
+ * The renewal timeline: a window ending at the confirmed expiry (at least 30
+ * days, longer when more time is left), with the reminder markers 7 and 3
+ * days before it. Positions are percentages of the window. null without a
+ * confirmed expiry.
+ */
+function subscriptionTimeline(m, nowMs = Date.now()) {
+  const end = expiryMs(m)
+  if (end === null) return null
+  const remainingMs = end - nowMs
+  const windowMs = Math.max(TIMELINE_MIN_WINDOW_MS, remainingMs)
+  const start = end - windowMs
+  const pct = (ms) =>
+    Math.min(100, Math.max(0, ((ms - start) / windowMs) * 100))
+  const markers = REMINDER_MARKERS.map((marker) => {
+    const at = end - marker.days * DAY_MS
+    return {
+      kind: marker.kind,
+      label: marker.label,
+      at: new Date(at).toISOString(),
+      pct: pct(at),
+      passed: nowMs >= at,
+    }
+  })
+  let phase = 'ok'
+  if (remainingMs <= 0) phase = 'expired'
+  else if (remainingMs <= 3 * DAY_MS) phase = '3d'
+  else if (remainingMs <= 7 * DAY_MS) phase = '7d'
+  return {
+    startAt: new Date(start).toISOString(),
+    expiresAt: new Date(end).toISOString(),
+    nowPct: pct(nowMs),
+    remainingMs,
+    phase,
+    markers,
+  }
+}
+
+const TIMELINE_PHASE_TEXT = Object.freeze({
+  ok: 'On track',
+  '7d': 'Renew soon',
+  '3d': 'Renew now',
+  expired: 'Expired',
+})
+
+/**
+ * The expiry each plan would give: TunnelSats adds calendar months to the
+ * later of the current expiry and the time of the renewal. An estimate; the
+ * renewal invoice carries the exact date.
+ *
+ * Deliberately the same arithmetic as TunnelSats (JavaScript setMonth),
+ * including its month-end rollover: January 31 plus one month is March 3
+ * (March 2 in leap years), not the end of February. Clamping here would
+ * show a date TunnelSats does not grant.
+ */
+function renewPreview(m, nowMs = Date.now()) {
+  const end = expiryMs(m)
+  if (end === null) return []
+  const base = Math.max(end, nowMs)
+  const plans =
+    m && Array.isArray(m.plans) && m.plans.length ? m.plans : PLAN_PRICES_USD
+  return plans.map((plan) => {
+    const next = new Date(base)
+    next.setUTCMonth(next.getUTCMonth() + plan.months)
+    return {
+      duration: `${plan.months}m`,
+      months: plan.months,
+      usd: plan.usd,
+      newExpiry: next.toISOString(),
+    }
+  })
+}
+
+const FLOW_KINDS = Object.freeze([
+  Object.freeze({
+    kind: 'buy',
+    pendingKey: 'order',
+    title: 'New subscription',
+    done: 'Tunnel configured',
+    working: 'Payment received; TunnelSats is provisioning the tunnel.',
+  }),
+  Object.freeze({
+    kind: 'renew',
+    pendingKey: 'renewal',
+    title: 'Renewal',
+    done: 'Expiry extended',
+    working:
+      'Payment received; waiting for TunnelSats to confirm the new expiry.',
+  }),
+  Object.freeze({
+    kind: 'reset',
+    pendingKey: 'reset',
+    title: 'Bandwidth reset',
+    done: 'Counter reset',
+    working: 'Payment received; waiting for TunnelSats to apply the reset.',
+  }),
+])
+
+function flowStepList(labels, current) {
+  return labels.map((label, i) => ({
+    label,
+    state: i < current ? 'done' : i === current ? 'current' : 'todo',
+  }))
+}
+
+/**
+ * The in-flight flows as steps (requested → invoice → paid → done), plus the
+ * node handoff while a node still has to turn its tunnel off. Built only
+ * from what the read model shows; a flow whose last step completed is gone
+ * from the model and therefore from this list.
+ */
+function flowSteps(m) {
+  const flows = []
+  if (!m) return flows
+  const intents = m.intents || {}
+  const pending = m.pending || {}
+  for (const def of FLOW_KINDS) {
+    const intent = intents[def.kind]
+    const intentActive = Boolean(
+      intent && (intent.status === 'pending' || intent.status === 'processing'),
+    )
+    const entry = pending[def.pendingKey]
+    if (!entry && !intentActive) continue
+    const node = nodeLabel((entry && entry.targetNode) || m.targetNode)
+    let current
+    let detail
+    if (!entry) {
+      current = 1
+      detail = `Requesting the invoice from TunnelSats and raising the Pay Invoice task on ${node}…`
+    } else if (!isPaymentReceived(entry)) {
+      current = 2
+      detail = `Accept the Pay Invoice task on ${node}, or pay the same invoice shown here.`
+    } else {
+      current = 3
+      detail = def.working
+    }
+    flows.push({
+      kind: def.kind,
+      title: def.title,
+      detail,
+      steps: flowStepList(
+        ['Request sent', 'Invoice', 'Payment', def.done],
+        current,
+      ),
+    })
+  }
+  const handoff = m.handoff
+  if (
+    handoff &&
+    Array.isArray(handoff.pendingOff) &&
+    handoff.pendingOff.length
+  ) {
+    const old = listNodes(handoff.pendingOff)
+    const target = nodeLabel(m.targetNode)
+    flows.push({
+      kind: 'handoff',
+      title: 'Node handoff',
+      detail: `Accept the TunnelSats task on ${old} that turns its clearnet VPN off; ${target} is asked to take over afterwards.`,
+      steps: flowStepList(
+        [
+          'Configuration saved',
+          `Waiting for ${old} to turn off`,
+          `${target} takes over`,
+        ],
+        1,
+      ),
+    })
+  }
+  return flows
+}
+
+/** Server ids the bridge accepts (bridge.py _SERVER_ID_RE). */
+const SERVER_ID_RE = /^[A-Za-z0-9_-]{2,32}$/
+
+function serverLabel(server) {
+  const parts = [server.city, server.country].filter(
+    (part) => typeof part === 'string' && part.trim(),
+  )
+  return parts.length ? parts.join(', ') : server.id
+}
+
+/** The usable entries of a GET /api/servers answer. */
+function usableServers(data) {
+  const list = data && Array.isArray(data.servers) ? data.servers : []
+  const seen = new Set()
+  return list.filter((server) => {
+    if (!server || typeof server.id !== 'string') return false
+    if (!SERVER_ID_RE.test(server.id) || seen.has(server.id)) return false
+    seen.add(server.id)
+    return true
+  })
+}
+
+function isValidNodePubkey(value) {
+  return typeof value === 'string' && NODE_PUBKEY_RE.test(value.trim())
+}
+
+/** The reachability answer in words; never claims more than inbound. */
+function reachabilityText(result) {
+  if (!result) return ''
+  if (result.kind === 'error') return result.text
+  const where =
+    result.host && result.port
+      ? `${result.host}:${result.port}`
+      : 'the forwarded port'
+  if (result.success) {
+    const ms =
+      typeof result.latencyMs === 'number'
+        ? ` in ${Math.round(result.latencyMs)} ms`
+        : ''
+    return `Inbound OK: TunnelSats reached your node through ${where}${ms}. This does not show that outbound traffic uses the tunnel.`
+  }
+  return `Inbound check failed through ${where}: ${result.error || 'no answer'}.`
+}
+
 // ─────────────────────────────────────────────
 // Rendering (textContent / createElementNS only: values from the read model
 // are never parsed as HTML)
@@ -888,16 +1262,28 @@ function setText(id, text) {
   if (el) el.textContent = text
 }
 
-function setWidth(id, pct) {
+/**
+ * Sets a native <progress> or <meter>: max first, so the value is never
+ * clamped to a previous max. Attributes, not inline styles (strict CSP).
+ */
+function setGauge(id, value, max, levels) {
   const el = byId(id)
-  if (el) el.style.width = `${pct}%`
+  if (!el) return
+  el.max = max
+  if (levels) {
+    el.low = levels.low
+    el.high = levels.high
+    el.optimum = 0
+  }
+  el.value = Math.min(max, Math.max(0, value))
 }
 
-function setLevel(el, pct) {
-  if (!el) return
-  el.classList.remove('warning', 'critical')
-  if (pct >= BANDWIDTH_CRITICAL_PCT) el.classList.add('critical')
-  else if (pct >= BANDWIDTH_WARN_PCT) el.classList.add('warning')
+function svgEl(tag, attrs) {
+  const el = document.createElementNS(SVG_NS, tag)
+  for (const [name, value] of Object.entries(attrs)) {
+    el.setAttribute(name, String(value))
+  }
+  return el
 }
 
 function renderPlans(m) {
@@ -1162,16 +1548,17 @@ function renderCountdown() {
     setText('expiry-date', 'Not confirmed')
     setText('countdown', 'Unknown')
     if (timer) timer.classList.remove('expired')
-    setWidth('subscription-progress', 0)
+    setGauge('subscription-progress', 0, 100)
     return
   }
   const remaining = expiry.getTime() - Date.now()
   setText('expiry-date', `Expires ${expiry.toLocaleString()}`)
   setText('countdown', formatRemaining(remaining))
   if (timer) timer.classList.toggle('expired', remaining <= 0)
-  setWidth(
+  setGauge(
     'subscription-progress',
     Math.min(100, Math.max(0, (remaining / PROGRESS_TERM_MS) * 100)),
+    100,
   )
 }
 
@@ -1198,9 +1585,11 @@ function renderOverview(m) {
     formatTime(m.subscription && m.subscription.lastSync) || 'Not yet',
   )
 
-  const pct = bandwidthPercent(m)
   const used = m.bandwidth ? m.bandwidth.usedGb : null
-  const limit = m.bandwidth ? m.bandwidth.limitGb : 100
+  const limit =
+    m.bandwidth && typeof m.bandwidth.limitGb === 'number'
+      ? m.bandwidth.limitGb
+      : 100
   setText(
     'bandwidth-used',
     typeof used === 'number' ? `${used.toFixed(2)} GB` : 'Unknown',
@@ -1211,11 +1600,317 @@ function renderOverview(m) {
     typeof used === 'number' ? used.toFixed(2) : '–',
   )
   setText('modal-bandwidth-limit', `GB / ${limit} GB`)
-  setWidth('bandwidth-progress', pct || 0)
-  setWidth('modal-bandwidth-fill', pct || 0)
-  setLevel(byId('bandwidth-progress'), pct || 0)
-  setLevel(byId('modal-bandwidth-fill'), pct || 0)
+  const levels = {
+    low: (limit * BANDWIDTH_WARN_PCT) / 100,
+    high: (limit * BANDWIDTH_CRITICAL_PCT) / 100,
+  }
+  const usedValue = typeof used === 'number' ? used : 0
+  setGauge('bandwidth-meter', usedValue, limit, levels)
+  setGauge('modal-bandwidth-meter', usedValue, limit, levels)
   renderCountdown()
+  renderTimeline(m)
+  renderQuota(m)
+  renderReachability(m)
+}
+
+function renderTimeline(m) {
+  const chart = byId('timeline-chart')
+  const legend = byId('timeline-legend')
+  const timeline = subscriptionTimeline(m)
+  setText(
+    'timeline-phase',
+    timeline ? TIMELINE_PHASE_TEXT[timeline.phase] : 'Not confirmed',
+  )
+  if (chart) {
+    if (!timeline) {
+      chart.replaceChildren()
+    } else {
+      const svg = svgEl('svg', {
+        viewBox: '0 0 100 10',
+        preserveAspectRatio: 'none',
+        class: `timeline-svg phase-${timeline.phase}`,
+        'aria-hidden': 'true',
+        focusable: 'false',
+      })
+      const [seven, three] = timeline.markers
+      svg.append(
+        svgEl('rect', { x: 0, y: 3, width: 100, height: 4, class: 'tl-track' }),
+        svgEl('rect', {
+          x: seven.pct,
+          y: 3,
+          width: Math.max(0, three.pct - seven.pct),
+          height: 4,
+          class: 'tl-zone-7d',
+        }),
+        svgEl('rect', {
+          x: three.pct,
+          y: 3,
+          width: Math.max(0, 100 - three.pct),
+          height: 4,
+          class: 'tl-zone-3d',
+        }),
+        svgEl('rect', {
+          x: 0,
+          y: 3,
+          width: timeline.nowPct,
+          height: 4,
+          class: 'tl-elapsed',
+        }),
+      )
+      for (const marker of timeline.markers) {
+        svg.append(
+          svgEl('rect', {
+            x: Math.max(0, marker.pct - 0.3),
+            y: 1,
+            width: 0.6,
+            height: 8,
+            class: `tl-marker${marker.passed ? ' is-passed' : ''}`,
+          }),
+        )
+      }
+      svg.append(
+        svgEl('rect', {
+          x: Math.min(99, Math.max(0, timeline.nowPct - 0.5)),
+          y: 0,
+          width: 1,
+          height: 10,
+          class: 'tl-now',
+        }),
+      )
+      chart.replaceChildren(svg)
+    }
+  }
+  if (legend) {
+    const items = timeline
+      ? [
+          ...timeline.markers.map(
+            (marker) =>
+              `${marker.label}: ${formatTime(marker.at)}${marker.passed ? ' (passed)' : ''}`,
+          ),
+          `Expires: ${formatTime(timeline.expiresAt)}`,
+        ]
+      : ['The expiry is shown once TunnelSats confirms it.']
+    legend.replaceChildren(
+      ...items.map((text) => {
+        const li = document.createElement('li')
+        li.textContent = text
+        return li
+      }),
+    )
+  }
+  const preview = byId('renew-preview-list')
+  if (preview) {
+    preview.replaceChildren(
+      ...renewPreview(m).map((item) => {
+        const li = document.createElement('li')
+        li.className = 'renew-preview-item'
+        const plan = document.createElement('span')
+        plan.className = 'renew-preview-plan'
+        plan.textContent = `+${item.months} month${item.months > 1 ? 's' : ''} · ${formatUsd(item.usd)}`
+        const date = document.createElement('span')
+        date.className = 'renew-preview-date'
+        date.textContent = `until about ${new Date(item.newExpiry).toLocaleDateString()}`
+        li.append(plan, date)
+        return li
+      }),
+    )
+  }
+}
+
+function renderQuota(m) {
+  setText('pace-text', paceText(monthPace(m)))
+  setText('val-resets', resetsText(m))
+  const eligibility = resetEligibility(m)
+  const el = byId('val-reset-eligibility')
+  if (el) {
+    el.textContent = eligibility.text
+    el.setAttribute('data-state', eligibility.state)
+  }
+}
+
+function renderReachability(m) {
+  const conn = (m && m.connection) || {}
+  setText('reach-target', formatPublicAddress(conn.server, conn.vpnPort))
+  const button = byId('btn-reachability')
+  if (button) button.disabled = reachabilityInFlight
+  const out = byId('reach-result')
+  if (!out) return
+  const text = reachabilityInFlight
+    ? 'Asking TunnelSats to connect to your node… this can take up to 30 seconds.'
+    : reachabilityText(reachabilityResult)
+  out.hidden = !text
+  out.textContent = text
+  out.classList.toggle(
+    'is-error',
+    Boolean(
+      reachabilityResult &&
+      !reachabilityInFlight &&
+      (reachabilityResult.kind === 'error' || !reachabilityResult.success),
+    ),
+  )
+  out.classList.toggle(
+    'is-success',
+    Boolean(
+      reachabilityResult &&
+      !reachabilityInFlight &&
+      reachabilityResult.kind !== 'error' &&
+      reachabilityResult.success,
+    ),
+  )
+}
+
+function renderFlows(m) {
+  const section = byId('flow')
+  const list = byId('flow-list')
+  if (!section || !list) return
+  const flows = flowSteps(m)
+  list.replaceChildren(
+    ...flows.map((flow) => {
+      const wrap = document.createElement('div')
+      wrap.className = 'flow'
+      wrap.setAttribute('data-flow', flow.kind)
+      const title = document.createElement('h3')
+      title.className = 'flow-title'
+      title.textContent = flow.title
+      const steps = document.createElement('ol')
+      steps.className = 'flow-steps'
+      steps.setAttribute('aria-label', `${flow.title} progress`)
+      for (const step of flow.steps) {
+        const li = document.createElement('li')
+        li.className = `flow-step is-${step.state}`
+        if (step.state === 'current') li.setAttribute('aria-current', 'step')
+        li.textContent = step.label
+        steps.append(li)
+      }
+      const detail = document.createElement('p')
+      detail.className = 'flow-detail'
+      detail.textContent = flow.detail
+      wrap.append(title, steps, detail)
+      return wrap
+    }),
+  )
+  section.hidden = flows.length === 0
+}
+
+function renderServers() {
+  const cards = byId('server-cards')
+  const note = byId('server-cards-note')
+  const statusNote = byId('server-status-note')
+  const list = usableServers(serverList)
+  if (!list.length) {
+    if (cards) {
+      cards.hidden = true
+      cards.replaceChildren()
+    }
+    if (note) {
+      note.textContent = serversFailed
+        ? 'TunnelSats did not answer; the region list below is built in.'
+        : ''
+      note.hidden = !serversFailed
+    }
+    if (statusNote) statusNote.hidden = true
+    return
+  }
+  const offered = (id) => list.some((server) => server.id === id)
+  if (selectedServerId && !offered(selectedServerId)) {
+    if (serverPickedByOperator) {
+      withdrawnServerId = selectedServerId
+      selectedServerId = ''
+    } else {
+      selectedServerId = offered(DEFAULT_SERVER_ID)
+        ? DEFAULT_SERVER_ID
+        : list[0].id
+    }
+  }
+  if (cards) {
+    cards.replaceChildren(
+      ...list.map((server) => {
+        const li = document.createElement('li')
+        const button = document.createElement('button')
+        button.setAttribute('type', 'button')
+        button.className = 'server-card'
+        button.setAttribute('data-server-id', server.id)
+        button.setAttribute(
+          'aria-pressed',
+          server.id === selectedServerId ? 'true' : 'false',
+        )
+        const flag = document.createElement('span')
+        flag.className = 'server-flag'
+        flag.setAttribute('aria-hidden', 'true')
+        flag.textContent = server.flag || ''
+        const city = document.createElement('span')
+        city.className = 'server-city'
+        city.textContent = server.city || server.id
+        const country = document.createElement('span')
+        country.className = 'server-country'
+        country.textContent = server.country || ''
+        button.append(flag, city, country)
+        li.append(button)
+        return li
+      }),
+    )
+    cards.hidden = false
+  }
+  const needsPick = !selectedServerId
+  for (const id of ['buy-server-select', 'manage-buy-server-select']) {
+    const select = byId(id)
+    if (!select) continue
+    const key =
+      (needsPick ? '!,' : '') + list.map((server) => server.id).join(',')
+    if (select.getAttribute('data-key') !== key) {
+      const options = list.map((server) => {
+        const option = document.createElement('option')
+        option.value = server.id
+        option.textContent = serverLabel(server)
+        return option
+      })
+      if (needsPick) {
+        const placeholder = document.createElement('option')
+        placeholder.value = ''
+        placeholder.textContent = 'Choose a region'
+        placeholder.disabled = true
+        options.unshift(placeholder)
+      }
+      select.replaceChildren(...options)
+      select.setAttribute('data-key', key)
+    }
+    select.value = selectedServerId
+  }
+  if (note) {
+    const asOf = formatTime(serverList.fetchedAt)
+    const lines = []
+    if (needsPick && withdrawnServerId) {
+      lines.push(
+        `The region you picked (${withdrawnServerId}) is no longer offered. Choose another region before buying.`,
+      )
+    }
+    lines.push(
+      serverList.stale
+        ? `TunnelSats did not answer; regions as of ${asOf || 'the last answer'}.`
+        : 'Regions offered by TunnelSats.',
+    )
+    note.textContent = lines.join(' ')
+    note.hidden = false
+  }
+  if (statusNote) statusNote.hidden = false
+}
+
+/** The operator picks a server region in the cards or a region select. */
+function selectServer(id) {
+  if (typeof id !== 'string' || !SERVER_ID_RE.test(id)) return
+  const list = usableServers(serverList)
+  if (list.length && !list.some((server) => server.id === id)) return
+  selectedServerId = id
+  serverPickedByOperator = true
+  withdrawnServerId = null
+  if (list.length) {
+    renderServers()
+    return
+  }
+  for (const selectId of ['buy-server-select', 'manage-buy-server-select']) {
+    const select = byId(selectId)
+    if (select) select.value = id
+  }
 }
 
 function render() {
@@ -1240,6 +1935,7 @@ function render() {
   )
   if (model.version) setText('footer-version', `v${model.version}`)
   renderPlans(model)
+  renderFlows(model)
   renderInvoicePanel(model)
   renderNotices(model)
   renderActions(model)
@@ -1290,25 +1986,128 @@ async function refresh() {
   render()
 }
 
+async function loadServers() {
+  serversLoadedAt = Date.now()
+  try {
+    const response = await fetch(SERVERS_URL, {
+      cache: 'no-store',
+      credentials: 'same-origin',
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const data = await response.json()
+    if (!usableServers(data).length) throw new Error('empty server list')
+    serverList = data
+    serversFailed = false
+  } catch (error) {
+    console.error('Failed to load the server list:', error)
+    serversFailed = true
+  }
+  renderServers()
+}
+
+function readStoredNodePubkey() {
+  try {
+    const value = localStorage.getItem(NODE_PUBKEY_STORAGE_KEY)
+    return isValidNodePubkey(value) ? value.trim() : ''
+  } catch {
+    return ''
+  }
+}
+
+function storeNodePubkey(value) {
+  try {
+    localStorage.setItem(NODE_PUBKEY_STORAGE_KEY, value)
+  } catch {
+    // Storage may be unavailable (private mode); the check still runs.
+  }
+}
+
+async function checkReachability() {
+  if (reachabilityInFlight) return
+  const input = byId('reach-pubkey')
+  const pubkey = input ? String(input.value || '').trim() : ''
+  if (!isValidNodePubkey(pubkey)) {
+    reachabilityResult = {
+      kind: 'error',
+      text: 'Enter your node public key: 66 hex characters starting with 02 or 03.',
+    }
+    renderReachability(model)
+    return
+  }
+  storeNodePubkey(pubkey)
+  reachabilityInFlight = true
+  reachabilityResult = null
+  renderReachability(model)
+  try {
+    const response = await fetch(REACHABILITY_URL, {
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': getCsrfToken(),
+      },
+      body: JSON.stringify({ nodePubkey: pubkey }),
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      reachabilityResult = {
+        kind: 'error',
+        text:
+          data.error || `The check could not run (HTTP ${response.status}).`,
+      }
+    } else {
+      reachabilityResult = {
+        kind: 'result',
+        success: data.success === true,
+        latencyMs: typeof data.latencyMs === 'number' ? data.latencyMs : null,
+        error: typeof data.error === 'string' ? data.error : null,
+        host: typeof data.host === 'string' ? data.host : null,
+        port: typeof data.port === 'number' ? data.port : null,
+      }
+    }
+  } catch (error) {
+    console.error('Reachability check failed:', error)
+    reachabilityResult = {
+      kind: 'error',
+      text: 'Could not reach the TunnelSats service to run the check.',
+    }
+  } finally {
+    reachabilityInFlight = false
+  }
+  renderReachability(model)
+}
+
 async function submitIntent(actionKey) {
   if (submittingIntent) return
   let payload = null
-  if (actionKey === 'buy') {
-    const serverSelect = byId('buy-server-select')
-    const durationSelect = byId('buy-duration-select')
-    payload = {
-      kind: 'buy',
-      serverId: (serverSelect && serverSelect.value) || 'eu-de',
-      duration:
-        (durationSelect && durationSelect.value) || selectedBuyDuration || '3m',
+  if (actionKey === 'buy' || actionKey === 'buy-manage') {
+    const manage = actionKey === 'buy-manage'
+    const serverSelect = byId(
+      manage ? 'manage-buy-server-select' : 'buy-server-select',
+    )
+    const durationSelect = byId(
+      manage ? 'manage-buy-duration-select' : 'buy-duration-select',
+    )
+    // selectedServerId is '' while the operator's pick is withdrawn: Buy
+    // then waits for a new pick instead of buying some other region.
+    const serverId = selectedServerId
+      ? (serverSelect && serverSelect.value) || selectedServerId
+      : ''
+    if (!serverId) {
+      localIntentFeedback = {
+        level: 'error',
+        text: 'Choose a server region first.',
+      }
+      render()
+      return
     }
-  } else if (actionKey === 'buy-manage') {
-    const serverSelect = byId('manage-buy-server-select')
-    const durationSelect = byId('manage-buy-duration-select')
     payload = {
       kind: 'buy',
-      serverId: (serverSelect && serverSelect.value) || 'eu-de',
-      duration: (durationSelect && durationSelect.value) || '3m',
+      serverId,
+      duration:
+        (durationSelect && durationSelect.value) ||
+        (manage ? '3m' : selectedBuyDuration || '3m'),
     }
   } else if (actionKey === 'renew') {
     const durationSelect = byId('renew-duration-select')
@@ -1427,6 +2226,15 @@ function bindEvents() {
       submitIntent(intentBtn.getAttribute('data-submit-intent'))
       return
     }
+    const serverCard = target.closest('[data-server-id]')
+    if (serverCard) {
+      selectServer(serverCard.getAttribute('data-server-id'))
+      return
+    }
+    if (target.closest('[data-reachability]')) {
+      checkReachability()
+      return
+    }
     const invoiceSwitch = target.closest('[data-invoice-kind]')
     if (invoiceSwitch) {
       selectInvoice(invoiceSwitch.getAttribute('data-invoice-kind'))
@@ -1450,26 +2258,48 @@ function bindEvents() {
     }
   })
 
+  document.addEventListener('change', (event) => {
+    const target = event.target
+    if (
+      target &&
+      (target.id === 'buy-server-select' ||
+        target.id === 'manage-buy-server-select')
+    ) {
+      selectServer(target.value)
+    }
+  })
+
   const refreshButton = byId('btn-refresh')
   if (refreshButton) refreshButton.addEventListener('click', () => refresh())
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) refresh()
+    if (document.hidden) return
+    refresh()
+    if (serversStale()) loadServers()
   })
+}
+
+function serversStale(nowMs = Date.now()) {
+  return nowMs - serversLoadedAt >= SERVERS_REFRESH_MS
+}
+
+/** One tick of the poll loop: the dashboard state, and the server list once it is stale. */
+function pollTick(nowMs = Date.now()) {
+  if (document.hidden) return
+  const interval = hasActiveAsyncWork(model) ? FAST_POLL_MS : POLL_MS
+  if (nowMs - lastPollAt >= interval) refresh()
+  if (serversStale(nowMs)) loadServers()
 }
 
 function init() {
   renderPlans()
   bindEvents()
+  const pubkeyInput = byId('reach-pubkey')
+  if (pubkeyInput) pubkeyInput.value = readStoredNodePubkey()
   render()
   refresh()
-  setInterval(() => {
-    if (document.hidden) return
-    const interval = hasActiveAsyncWork(model) ? FAST_POLL_MS : POLL_MS
-    if (Date.now() - lastPollAt >= interval) {
-      refresh()
-    }
-  }, FAST_POLL_MS)
+  loadServers()
+  setInterval(() => pollTick(), FAST_POLL_MS)
   if (!countdownTimer) countdownTimer = setInterval(renderCountdown, 30000)
 }
 

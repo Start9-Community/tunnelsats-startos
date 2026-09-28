@@ -72,6 +72,17 @@
         hidden
       ></p>
 
+      <!-- In-flight buy/renew/reset and the node handoff, step by step. -->
+      <section
+        id="flow"
+        class="flow-panel"
+        aria-labelledby="flow-heading"
+        hidden
+      >
+        <h2 id="flow-heading" class="visually-hidden">Progress</h2>
+        <div id="flow-list" class="flow-list"></div>
+      </section>
+
       <!-- Live state from GET /api/dashboard: pending payments, handoff, key and expiry. -->
       <section
         id="notices"
@@ -178,6 +189,27 @@
               role="group"
               aria-label="Buy a subscription from the dashboard"
             >
+              <div class="server-picker">
+                <span class="intent-field-label" id="server-cards-title"
+                  >Server regions</span
+                >
+                <ul
+                  id="server-cards"
+                  class="server-cards"
+                  aria-labelledby="server-cards-title"
+                  hidden
+                ></ul>
+                <p id="server-cards-note" class="note" hidden></p>
+                <p id="server-status-note" class="note" hidden>
+                  The list does not show live server health; see
+                  <a
+                    href="https://tunnelsats.com/status"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    >tunnelsats.com/status</a
+                  >.
+                </p>
+              </div>
               <label class="intent-field">
                 <span class="intent-field-label">Server region</span>
                 <select id="buy-server-select" class="intent-select">
@@ -273,9 +305,13 @@
                     >…</span
                   >
                 </div>
-                <div class="progress-bar-container" aria-hidden="true">
-                  <div class="progress-bar" id="subscription-progress"></div>
-                </div>
+                <progress
+                  id="subscription-progress"
+                  class="gauge gauge-time"
+                  max="100"
+                  value="0"
+                  aria-label="Time left of a one-month term"
+                ></progress>
                 <div class="metric-footer">
                   <span class="metric-footer-text"
                     >Extend it with the
@@ -307,12 +343,17 @@
                   <span class="metric-value" id="bandwidth-used">…</span>
                   <span class="metric-unit" id="bandwidth-limit">/ 100 GB</span>
                 </div>
-                <div class="progress-bar-container" aria-hidden="true">
-                  <div
-                    class="progress-bar bandwidth-bar"
-                    id="bandwidth-progress"
-                  ></div>
-                </div>
+                <meter
+                  id="bandwidth-meter"
+                  class="gauge gauge-bandwidth"
+                  min="0"
+                  max="100"
+                  low="70"
+                  high="90"
+                  optimum="0"
+                  value="0"
+                  aria-label="Bandwidth used this month"
+                ></meter>
                 <div class="metric-footer">
                   <span class="metric-footer-text"
                     >Resets on the 1st of each month (UTC).</span
@@ -322,7 +363,104 @@
             </section>
           </div>
 
-          <!-- W3: renewal timeline, bandwidth projection and server discovery slot in here. -->
+          <div class="telemetry-top-cards">
+            <section
+              class="card glass-card timeline-card"
+              aria-labelledby="timeline-title"
+            >
+              <div class="card-header">
+                <h2 id="timeline-title">Renewal timeline</h2>
+                <span class="info-label" id="timeline-phase">…</span>
+              </div>
+              <div id="timeline-chart" class="timeline-chart"></div>
+              <ul id="timeline-legend" class="timeline-legend"></ul>
+              <h3 class="subhead">Renewal preview</h3>
+              <ul id="renew-preview-list" class="renew-preview-list"></ul>
+              <p class="note">
+                Estimated: TunnelSats adds calendar months to the later of the
+                current expiry and the time you renew. The renewal invoice
+                carries the exact date.
+              </p>
+            </section>
+
+            <section
+              class="card glass-card quota-card"
+              aria-labelledby="quota-title"
+            >
+              <div class="card-header">
+                <h2 id="quota-title">Bandwidth outlook</h2>
+              </div>
+              <p id="pace-text" class="pace-text">…</p>
+              <dl class="quota-facts">
+                <div class="quota-fact">
+                  <dt>Paid resets this month</dt>
+                  <dd id="val-resets">…</dd>
+                </div>
+                <div class="quota-fact">
+                  <dt>Reset Bandwidth</dt>
+                  <dd id="val-reset-eligibility">…</dd>
+                </div>
+              </dl>
+            </section>
+          </div>
+
+          <section
+            class="card glass-card reachability-card"
+            aria-labelledby="reachability-title"
+          >
+            <div class="card-header">
+              <h2 id="reachability-title">Connection check</h2>
+            </div>
+            <p class="caveat">
+              <strong
+                >Inbound TCP port check only; does not verify outbound VPN
+                egress.</strong
+              >
+              TunnelSats opens a Lightning connection to your node through
+              <code id="reach-target">…</code>. The check sends your node public
+              key and that address to TunnelSats; the key is stored only in this
+              browser.
+            </p>
+            <div class="reach-form">
+              <label class="intent-field reach-field">
+                <span class="intent-field-label">Node public key</span>
+                <input
+                  id="reach-pubkey"
+                  class="reach-input"
+                  type="text"
+                  inputmode="text"
+                  autocomplete="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  maxlength="66"
+                  pattern="0[23][0-9a-fA-F]{64}"
+                  placeholder="02… or 03… (66 hex characters)"
+                />
+              </label>
+              <button
+                type="button"
+                id="btn-reachability"
+                class="btn-intent"
+                data-reachability
+              >
+                Check inbound reachability
+              </button>
+            </div>
+            <p
+              id="reach-result"
+              class="reach-result"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></p>
+            <p class="note">
+              Outbound privacy has to be checked on the node: run the commands
+              under <a href="#privacy">Check your privacy on the node</a> (<code
+                >wg show</code
+              >, <code>ip rule</code>, <code>ip route</code> and an external
+              egress probe).
+            </p>
+          </section>
 
           <section
             class="card glass-card properties-card"
@@ -688,9 +826,17 @@
                 >GB / 100 GB</span
               >
             </div>
-            <div class="modal-progress-track" aria-hidden="true">
-              <div class="modal-progress-fill" id="modal-bandwidth-fill"></div>
-            </div>
+            <meter
+              id="modal-bandwidth-meter"
+              class="gauge gauge-bandwidth gauge-lg"
+              min="0"
+              max="100"
+              low="70"
+              high="90"
+              optimum="0"
+              value="0"
+              aria-label="Bandwidth used this month"
+            ></meter>
           </div>
           <ul class="bandwidth-facts">
             <li>

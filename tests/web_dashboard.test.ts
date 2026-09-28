@@ -65,6 +65,7 @@ class FakeElement {
 
 interface Harness {
   context: vm.Context
+  storage: Map<string, string>
   requests: { url: string; init: Json | undefined }[]
   elements: Map<string, FakeElement>
   el: (id: string) => FakeElement
@@ -79,8 +80,11 @@ function load(
     status: 202,
     body: { status: 'accepted' },
   },
+  routes: Record<string, { status: number; body: Json }> = {},
+  stored: Record<string, string> = {},
 ): Harness {
   const requests: { url: string; init: Json | undefined }[] = []
+  const storage = new Map<string, string>(Object.entries(stored))
   const elements = new Map<string, FakeElement>()
   const el = (id: string) => {
     let element = elements.get(id)
@@ -107,6 +111,12 @@ function load(
     },
     window: { isSecureContext: false },
     navigator: {},
+    localStorage: {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        storage.set(key, String(value))
+      },
+    },
     HTMLDialogElement: { prototype: { closedBy: '' } },
     Date,
     setInterval: () => 0,
@@ -114,6 +124,17 @@ function load(
     setTimeout: () => 0,
     fetch: async (url: string, init?: Json) => {
       requests.push({ url: String(url), init })
+      const route = routes[String(url)]
+      if (route) {
+        return {
+          ok: route.status >= 200 && route.status < 300,
+          status: route.status,
+          json: async () => route.body,
+        }
+      }
+      if (String(url) === '/api/servers') {
+        return { ok: false, status: 503, json: async () => ({}) }
+      }
       if (String(url) === '/api/intents') {
         return {
           ok: intentResponse.status >= 200 && intentResponse.status < 300,
@@ -131,6 +152,7 @@ function load(
   vm.runInContext(SCRIPT, context, { filename: 'script.js' })
   return {
     context,
+    storage,
     requests,
     elements,
     el,
@@ -179,15 +201,18 @@ function model(overrides: Json = {}): Json {
 const titles = (notices: Json[]) => notices.map((n) => n.title)
 const texts = (notices: Json[]) => notices.map((n) => n.text).join('\n')
 
-test('the dashboard only GETs /api/dashboard on initial load on its own origin', async () => {
+test('the dashboard only GETs /api/dashboard and /api/servers on initial load on its own origin', async () => {
   const h = load(model())
   await h.settle()
-  assert.equal(h.requests.length, 1)
-  const [request] = h.requests
-  assert.equal(request.url, '/api/dashboard')
-  assert.equal(request.init?.method ?? 'GET', 'GET')
-  assert.equal(request.init?.body, undefined)
-  assert.equal(request.init?.credentials, 'same-origin')
+  assert.deepEqual(
+    h.requests.map((r) => r.url),
+    ['/api/dashboard', '/api/servers'],
+  )
+  for (const request of h.requests) {
+    assert.equal(request.init?.method ?? 'GET', 'GET')
+    assert.equal(request.init?.body, undefined)
+    assert.equal(request.init?.credentials, 'same-origin')
+  }
 })
 
 test('the shipped script has no legacy write paths, third-party calls or HTML sinks', () => {
@@ -204,13 +229,28 @@ test('the shipped script has no legacy write paths, third-party calls or HTML si
     '/api/keys/generate',
     '/api/config/save',
     'privateKey',
-    'localStorage',
+    'sessionStorage',
+    'indexedDB',
+    'document.cookie',
   ]) {
     assert.ok(!SCRIPT.includes(banned), `script.js must not contain ${banned}`)
   }
-  // Every fetch in the script is either GET /api/dashboard or POST /api/intents.
+  // Browser storage holds only the node public key for the reachability check.
+  const storageUses = SCRIPT.match(/localStorage\.[a-zA-Z]+\([^)]*\)?/g) ?? []
+  assert.deepEqual(storageUses, [
+    'localStorage.getItem(NODE_PUBKEY_STORAGE_KEY)',
+    'localStorage.setItem(NODE_PUBKEY_STORAGE_KEY, value)',
+  ])
+  // Every fetch in the script goes to the bridge on the same origin.
   const fetches = SCRIPT.match(/fetch\(([^,)]+)/g) ?? []
-  assert.deepEqual(fetches, ['fetch(DASHBOARD_URL', 'fetch(INTENTS_URL'])
+  assert.deepEqual(fetches, [
+    'fetch(DASHBOARD_URL',
+    'fetch(SERVERS_URL',
+    'fetch(REACHABILITY_URL',
+    'fetch(INTENTS_URL',
+  ])
+  assert.match(SCRIPT, /const SERVERS_URL = '\/api\/servers'/)
+  assert.match(SCRIPT, /const REACHABILITY_URL = '\/api\/reachability'/)
 })
 
 test('a configured model shows the overview and fills it with textContent', async () => {
@@ -956,4 +996,645 @@ test('an invoice of another kind never hides a failed request', async () => {
   assert.equal(h.el('invoice-panel').hidden, false)
   assert.equal(h.el('intent-feedback').hidden, false)
   assert.equal(h.el('intent-feedback').textContent, resetError)
+})
+
+// ─── W3: visuals and discovery ───────────────────────────────────────────────
+
+const settleAll = async (h: Harness, rounds = 5) => {
+  for (let i = 0; i < rounds; i++) await h.settle()
+}
+
+const NODE_PUBKEY = '02' + 'ab'.repeat(32)
+const SEPT_16 = Date.UTC(2026, 8, 16)
+
+test('monthPace projects usage to the end of the UTC month', () => {
+  const h = load(model())
+  const pace = (usedGb: number | null, now: number, limitGb = 100) =>
+    h.run(
+      `monthPace(${JSON.stringify({ bandwidth: { usedGb, limitGb } })}, ${now})`,
+    )
+  // 15 of 30 September days elapsed: usage doubles by the end of the month.
+  assert.deepEqual(pace(50, SEPT_16), {
+    usedGb: 50,
+    limitGb: 100,
+    projectedGb: 100,
+    afterReset: false,
+    exceedsLimit: false,
+    resetsAt: '2026-10-01T00:00:00.000Z',
+  })
+  assert.equal(pace(60, SEPT_16).exceedsLimit, true)
+  assert.equal(pace(60, SEPT_16).projectedGb, 120)
+  // The first day says too little for a projection.
+  assert.equal(pace(5, Date.UTC(2026, 8, 1, 12)).projectedGb, null)
+  assert.equal(pace(null, SEPT_16), null)
+  assert.equal(pace(5, SEPT_16, 0), null)
+  const text = h.run(
+    `paceText(monthPace(${JSON.stringify({ bandwidth: { usedGb: 60, limitGb: 100 } })}, ${SEPT_16}))`,
+  )
+  assert.match(
+    text,
+    /about 120 GB by the end of the month, above the 100 GB allowance/,
+  )
+  assert.match(h.run('paceText(null)'), /not known yet/)
+  assert.match(
+    h.run(
+      `paceText(monthPace(${JSON.stringify({ bandwidth: { usedGb: 5, limitGb: 100 } })}, ${Date.UTC(2026, 8, 1, 12)}))`,
+    ),
+    /Too early in the month/,
+  )
+  // After a paid reset the counter restarted at an unknown time: dividing by
+  // the time since the 1st would understate the pace, so no projection.
+  const reset = { usedGb: 40, limitGb: 100, resetsThisMonth: 1 }
+  const afterReset = h.run(
+    `monthPace(${JSON.stringify({ bandwidth: reset })}, ${Date.UTC(2026, 8, 28)})`,
+  )
+  assert.equal(afterReset.afterReset, true)
+  assert.equal(afterReset.projectedGb, null)
+  assert.equal(afterReset.exceedsLimit, false)
+  assert.match(
+    h.run(
+      `paceText(monthPace(${JSON.stringify({ bandwidth: reset })}, ${Date.UTC(2026, 8, 28)}))`,
+    ),
+    /40\.00 GB since this month's paid reset\. No projection/,
+  )
+  // No reset this month (0) still projects.
+  assert.equal(
+    h.run(
+      `monthPace(${JSON.stringify({ bandwidth: { ...reset, resetsThisMonth: 0 } })}, ${SEPT_16})`,
+    ).afterReset,
+    false,
+  )
+})
+
+test('resetEligibility and resetsText follow the confirmed quota, as hints only', () => {
+  const h = load(model())
+  const state = (bandwidth: Json, extra: Json = {}) =>
+    h.run(`resetEligibility(${JSON.stringify(model({ bandwidth, ...extra }))})`)
+  const bw = (
+    usedGb: number | null,
+    resetsThisMonth: number | null,
+    maxResetsPerMonth: number | null,
+  ) => ({
+    usedGb,
+    limitGb: 100,
+    resetsThisMonth,
+    maxResetsPerMonth,
+    resetThresholdPct: 70,
+  })
+  assert.equal(state(bw(40, 0, 2)).state, 'below-threshold')
+  assert.match(state(bw(40, 0, 2)).text, /TunnelSats decides/)
+  assert.equal(state(bw(80, 1, 2)).state, 'eligible')
+  assert.match(state(bw(80, 1, 2)).text, /1 of 2 resets left/)
+  assert.equal(state(bw(80, 2, 2)).state, 'quota-used')
+  assert.match(state(bw(80, 0, 0)).text, /not offered/)
+  assert.equal(state(bw(80, null, null)).state, 'likely')
+  assert.equal(state(bw(null, 0, 2)).state, 'unknown')
+  assert.equal(
+    state(bw(80, 0, 2), {
+      pending: { order: null, renewal: null, reset: { targetNode: 'lnd' } },
+    }).state,
+    'pending',
+  )
+  assert.equal(
+    state(bw(80, 0, 2), {
+      subscription: { ...model().subscription, keyUnknown: true },
+    }).state,
+    'unavailable',
+  )
+  assert.equal(state(bw(80, 0, 2), { configured: false }).state, 'unavailable')
+  for (const s of [state(bw(80, 1, 2)), state(bw(80, null, null))]) {
+    assert.match(s.text, /TunnelSats confirms/)
+  }
+  const resets = (b: Json) =>
+    h.run(`resetsText(${JSON.stringify({ bandwidth: b })})`)
+  assert.equal(resets(bw(1, 1, 2)), '1 of 2')
+  assert.equal(resets(bw(1, null, 2)), '? of 2')
+  assert.equal(resets(bw(1, 1, null)), 'Unknown')
+})
+
+test('subscriptionTimeline places the 7-day and 3-day reminders before the expiry', () => {
+  const h = load(model())
+  const now = Date.UTC(2026, 8, 1)
+  const at = (days: number) => new Date(now + days * 86400000).toISOString()
+  const timeline = (expiresAt: string | null, linked = true) =>
+    h.run(
+      `subscriptionTimeline(${JSON.stringify({ subscription: { expiresAt, linked } })}, ${now})`,
+    )
+  const t = timeline(at(20))
+  assert.equal(t.phase, 'ok')
+  assert.equal(t.startAt, at(-10))
+  assert.ok(Math.abs(t.nowPct - 100 / 3) < 1e-9)
+  assert.deepEqual(
+    t.markers.map((m: Json) => [
+      m.kind,
+      m.at,
+      Math.round(m.pct * 100) / 100,
+      m.passed,
+    ]),
+    [
+      ['7d', at(13), 76.67, false],
+      ['3d', at(17), 90, false],
+    ],
+  )
+  const soon = timeline(at(5))
+  assert.equal(soon.phase, '7d')
+  assert.deepEqual(
+    soon.markers.map((m: Json) => m.passed),
+    [true, false],
+  )
+  assert.equal(timeline(at(2)).phase, '3d')
+  const long = timeline(at(60))
+  assert.equal(long.nowPct, 0)
+  assert.equal(long.startAt, at(0))
+  const expired = timeline(at(-1))
+  assert.equal(expired.phase, 'expired')
+  assert.equal(expired.nowPct, 100)
+  assert.equal(timeline(null), null)
+  assert.equal(timeline('not a date'), null)
+  // A "# Valid Until" hint on an unlinked subscription is not confirmed.
+  assert.equal(timeline(at(20), false), null)
+  assert.equal(
+    h.run(
+      `subscriptionTimeline(${JSON.stringify({ subscription: { expiresAt: at(20), linked: true, keyUnknown: true } })}, ${now})`,
+    ),
+    null,
+  )
+})
+
+test('renewPreview adds calendar months to the later of expiry and now', () => {
+  const h = load(model())
+  const now = Date.UTC(2026, 8, 1)
+  const preview = (expiresAt: string, linked = true) =>
+    h.run(
+      `renewPreview(${JSON.stringify({ subscription: { expiresAt, linked }, plans: model().plans })}, ${now})`,
+    )
+  assert.deepEqual(
+    preview('2026-10-15T00:00:00.000Z').map((p: Json) => [
+      p.duration,
+      p.newExpiry,
+    ]),
+    [
+      ['1m', '2026-11-15T00:00:00.000Z'],
+      ['3m', '2027-01-15T00:00:00.000Z'],
+      ['6m', '2027-04-15T00:00:00.000Z'],
+      ['12m', '2027-10-15T00:00:00.000Z'],
+    ],
+  )
+  // Expired: counted from now.
+  assert.equal(
+    preview('2026-08-01T00:00:00.000Z')[0].newExpiry,
+    '2026-10-01T00:00:00.000Z',
+  )
+  assert.deepEqual(
+    h.run(
+      `renewPreview({ subscription: { expiresAt: null, linked: true } }, ${now})`,
+    ),
+    [],
+  )
+  // An unconfirmed "# Valid Until" hint never feeds the preview.
+  assert.deepEqual(preview('2026-10-15T00:00:00.000Z', false), [])
+  // Month ends roll over exactly like TunnelSats' setMonth: never clamped
+  // to the end of February, which TunnelSats would not grant.
+  assert.equal(
+    preview('2027-01-31T12:00:00.000Z')[0].newExpiry,
+    '2027-03-03T12:00:00.000Z',
+  )
+  assert.equal(
+    preview('2028-01-31T12:00:00.000Z')[0].newExpiry,
+    '2028-03-02T12:00:00.000Z',
+  )
+})
+
+test('the poll loop refreshes a stale server list while the tab stays visible', async () => {
+  const h = load(model(), 200, undefined, {
+    '/api/servers': { status: 200, body: SERVERS },
+  })
+  await settleAll(h)
+  const serverRequests = () =>
+    h.requests.filter((r) => r.url === '/api/servers').length
+  assert.equal(serverRequests(), 1)
+  // A tick before the refresh interval leaves the list alone.
+  h.run(`pollTick(Date.now() + 60 * 1000)`)
+  assert.equal(serverRequests(), 1)
+  h.run(`pollTick(Date.now() + SERVERS_REFRESH_MS)`)
+  assert.equal(serverRequests(), 2)
+  await settleAll(h)
+  // The reload restarts the interval, so the next tick does not reload again.
+  h.run(`pollTick(Date.now() + 60 * 1000)`)
+  assert.equal(serverRequests(), 2)
+  // A hidden tab does not poll at all.
+  h.context.document.hidden = true
+  h.run(`pollTick(Date.now() + 2 * SERVERS_REFRESH_MS)`)
+  assert.equal(serverRequests(), 2)
+})
+
+test('flowSteps shows each in-flight flow and the node handoff step by step', () => {
+  const h = load(model())
+  const flows = (overrides: Json) =>
+    h.run(`flowSteps(${JSON.stringify(model(overrides))})`)
+  const current = (flow: Json) =>
+    flow.steps.findIndex((s: Json) => s.state === 'current')
+  assert.deepEqual(flows({}), [])
+
+  const requested = flows({
+    intents: { buy: { status: 'processing' }, renew: null, reset: null },
+  })
+  assert.equal(requested.length, 1)
+  assert.equal(requested[0].kind, 'buy')
+  assert.equal(current(requested[0]), 1)
+  assert.deepEqual(
+    requested[0].steps.map((s: Json) => s.label),
+    ['Request sent', 'Invoice', 'Payment', 'Tunnel configured'],
+  )
+
+  const unpaid = flows({
+    pending: {
+      order: null,
+      renewal: { targetNode: 'cln', invoice: 'lnbc1x' },
+      reset: null,
+    },
+  })
+  assert.equal(unpaid[0].kind, 'renew')
+  assert.equal(current(unpaid[0]), 2)
+  assert.match(unpaid[0].detail, /Pay Invoice task on Core Lightning/)
+
+  const paid = flows({
+    pending: {
+      order: null,
+      renewal: null,
+      reset: { targetNode: 'lnd', paymentReceived: true },
+    },
+  })
+  assert.equal(current(paid[0]), 3)
+  assert.deepEqual(
+    paid[0].steps.map((s: Json) => s.state),
+    ['done', 'done', 'done', 'current'],
+  )
+
+  const handoff = flows({
+    targetNode: 'eclair',
+    handoff: { activeTarget: 'eclair', pendingOff: ['lnd'], unraised: [] },
+  })
+  assert.equal(handoff[0].kind, 'handoff')
+  assert.equal(handoff[0].steps[1].label, 'Waiting for LND to turn off')
+  assert.equal(handoff[0].steps[1].state, 'current')
+  assert.equal(handoff[0].steps[2].label, 'Eclair takes over')
+})
+
+test('renderFlows marks the current step for assistive technology', async () => {
+  const h = load(
+    model({
+      intents: { buy: null, renew: { status: 'pending' }, reset: null },
+    }),
+  )
+  await settleAll(h)
+  assert.equal(h.el('flow').hidden, false)
+  const [flow] = h.el('flow-list').children
+  const steps = flow.children[1]
+  assert.equal(steps.tagName, 'OL')
+  const currentSteps = steps.children.filter(
+    (li) => li.attributes['aria-current'] === 'step',
+  )
+  assert.equal(currentSteps.length, 1)
+  assert.equal(currentSteps[0].textContent, 'Invoice')
+
+  const idle = load(model())
+  await settleAll(idle)
+  assert.equal(idle.el('flow').hidden, true)
+})
+
+const SERVERS = {
+  servers: [
+    {
+      id: 'eu-de',
+      country: 'Germany',
+      city: 'Nuremberg',
+      flag: '🇩🇪',
+      status: 'online',
+    },
+    {
+      id: 'us-east',
+      country: 'USA',
+      city: 'Ashburn',
+      flag: '🇺🇸',
+      status: 'online',
+    },
+    { id: '../x', country: 'X', city: 'Y', flag: '', status: 'online' },
+  ],
+  stale: false,
+  fetchedAt: '2026-09-01T10:00:00Z',
+}
+
+test('server cards drive both Buy region pickers', async () => {
+  const h = load(model({ configured: false }), 200, undefined, {
+    '/api/servers': { status: 200, body: SERVERS },
+  })
+  await settleAll(h)
+  const cards = h.el('server-cards')
+  assert.equal(cards.hidden, false)
+  const buttons = cards.children.map((li) => li.children[0])
+  assert.deepEqual(
+    buttons.map((b) => b.attributes['data-server-id']),
+    ['eu-de', 'us-east'],
+  )
+  assert.deepEqual(
+    buttons.map((b) => b.attributes['aria-pressed']),
+    ['true', 'false'],
+  )
+  for (const id of ['buy-server-select', 'manage-buy-server-select']) {
+    const select = h.el(id)
+    assert.deepEqual(
+      select.children.map((o) => [o.value, o.textContent]),
+      [
+        ['eu-de', 'Nuremberg, Germany'],
+        ['us-east', 'Ashburn, USA'],
+      ],
+    )
+    assert.equal(select.value, 'eu-de')
+  }
+  assert.equal(h.el('server-status-note').hidden, false)
+  assert.match(
+    readFileSync(join(__dirname, '..', 'web', 'index.html'), 'utf8'),
+    /<p id="server-status-note"[^>]*>[\s\S]*?<a\s+href="https:\/\/tunnelsats\.com\/status"\s+target="_blank"\s+rel="noopener noreferrer"\s*>tunnelsats\.com\/status<\/a/,
+  )
+  assert.doesNotMatch(
+    h.el('server-cards-note').textContent,
+    /online|healthy|up\b/i,
+  )
+
+  h.run(`selectServer('us-east')`)
+  assert.equal(h.el('buy-server-select').value, 'us-east')
+  assert.equal(h.el('manage-buy-server-select').value, 'us-east')
+  assert.deepEqual(
+    h
+      .el('server-cards')
+      .children.map((li) => li.children[0].attributes['aria-pressed']),
+    ['false', 'true'],
+  )
+  // Ids that are not offered or not valid are ignored.
+  h.run(`selectServer('sa-br')`)
+  h.run(`selectServer('../x')`)
+  assert.equal(h.el('buy-server-select').value, 'us-east')
+
+  // The chosen region is what a dashboard Buy request carries.
+  h.run(`submitIntent('buy')`)
+  await settleAll(h)
+  const buy = h.requests.find((r) => r.url === '/api/intents')
+  assert.equal(JSON.parse(buy!.init!.body).serverId, 'us-east')
+})
+
+test('a refresh never swaps the region the operator picked for another', async () => {
+  const routes: Record<string, { status: number; body: Json }> = {
+    '/api/servers': { status: 200, body: SERVERS },
+  }
+  const h = load(model({ configured: false }), 200, undefined, routes)
+  await settleAll(h)
+  h.run(`selectServer('us-east')`)
+  // TunnelSats withdraws us-east before the operator presses Buy.
+  routes['/api/servers'] = {
+    status: 200,
+    body: { servers: [SERVERS.servers[0]] },
+  }
+  h.run('loadServers()')
+  await settleAll(h)
+  for (const id of ['buy-server-select', 'manage-buy-server-select']) {
+    const select = h.el(id)
+    assert.equal(select.value, '')
+    assert.deepEqual(
+      select.children.map((o) => [o.value, o.disabled]),
+      [
+        ['', true],
+        ['eu-de', false],
+      ],
+    )
+  }
+  assert.deepEqual(
+    h
+      .el('server-cards')
+      .children.map((li) => li.children[0].attributes['aria-pressed']),
+    ['false'],
+  )
+  assert.match(
+    h.el('server-cards-note').textContent,
+    /The region you picked \(us-east\) is no longer offered\. Choose another region before buying\./,
+  )
+  h.run(`submitIntent('buy')`)
+  h.run(`submitIntent('buy-manage')`)
+  await settleAll(h)
+  assert.equal(
+    h.requests.filter((r) => r.url === '/api/intents').length,
+    0,
+    'Buy must not substitute a region',
+  )
+  assert.match(h.el('intent-feedback').textContent, /Choose a server region/)
+
+  // A new pick clears the notice and Buy carries it.
+  h.run(`selectServer('eu-de')`)
+  assert.equal(h.el('buy-server-select').value, 'eu-de')
+  assert.doesNotMatch(h.el('server-cards-note').textContent, /no longer/)
+  h.run(`submitIntent('buy')`)
+  await settleAll(h)
+  const buy = h.requests.find((r) => r.url === '/api/intents')
+  assert.equal(JSON.parse(buy!.init!.body).serverId, 'eu-de')
+})
+
+test('an unpicked default region follows the live list', async () => {
+  const h = load(model({ configured: false }), 200, undefined, {
+    '/api/servers': {
+      status: 200,
+      body: { servers: [SERVERS.servers[1]] },
+    },
+  })
+  await settleAll(h)
+  assert.equal(h.el('buy-server-select').value, 'us-east')
+  assert.doesNotMatch(h.el('server-cards-note').textContent, /no longer/)
+})
+
+test('a stale or missing server list says so', async () => {
+  const stale = load(model(), 200, undefined, {
+    '/api/servers': { status: 200, body: { ...SERVERS, stale: true } },
+  })
+  await settleAll(stale)
+  assert.match(
+    stale.el('server-cards-note').textContent,
+    /did not answer; regions as of/,
+  )
+
+  const failed = load(model())
+  await settleAll(failed)
+  assert.equal(failed.el('server-cards').hidden, true)
+  assert.match(failed.el('server-cards-note').textContent, /built in/)
+  assert.equal(failed.el('server-cards-note').hidden, false)
+})
+
+test('the reachability check sends only the node key and says it is inbound only', async () => {
+  const h = load(model(), 200, undefined, {
+    '/api/reachability': {
+      status: 200,
+      body: {
+        success: true,
+        latencyMs: 412,
+        error: null,
+        host: 'de2.tunnelsats.com',
+        port: 24556,
+      },
+    },
+  })
+  await settleAll(h)
+  assert.equal(h.el('reach-target').textContent, 'de2.tunnelsats.com:24556')
+
+  h.el('reach-pubkey').value = 'not-a-key'
+  h.run('checkReachability()')
+  await settleAll(h)
+  assert.equal(
+    h.requests.some((r) => r.url === '/api/reachability'),
+    false,
+  )
+  assert.match(h.el('reach-result').textContent, /66 hex characters/)
+  assert.equal(h.storage.size, 0)
+
+  h.el('reach-pubkey').value = ` ${NODE_PUBKEY} `
+  h.run('checkReachability()')
+  await settleAll(h)
+  const request = h.requests.find((r) => r.url === '/api/reachability')!
+  assert.equal(request.init!.method, 'POST')
+  assert.equal(request.init!.headers['X-CSRF-Token'], 'csrf-test-token-123')
+  assert.deepEqual(JSON.parse(request.init!.body), { nodePubkey: NODE_PUBKEY })
+  assert.equal(h.storage.get('tunnelsats.nodePubkey'), NODE_PUBKEY)
+  const text = h.el('reach-result').textContent
+  assert.match(
+    text,
+    /Inbound OK: TunnelSats reached your node through de2\.tunnelsats\.com:24556 in 412 ms/,
+  )
+  assert.match(text, /does not show that outbound traffic uses the tunnel/)
+  assert.ok(h.el('reach-result').classList.contains('is-success'))
+  assert.equal(h.el('btn-reachability').disabled, false)
+})
+
+test('reachability failures and rate limits are reported, never as success', async () => {
+  const limited = load(model(), 200, undefined, {
+    '/api/reachability': {
+      status: 429,
+      body: {
+        error: 'Please wait 42s before checking again.',
+        retryAfterSeconds: 42,
+      },
+    },
+  })
+  await settleAll(limited)
+  limited.el('reach-pubkey').value = NODE_PUBKEY
+  limited.run('checkReachability()')
+  await settleAll(limited)
+  assert.equal(
+    limited.el('reach-result').textContent,
+    'Please wait 42s before checking again.',
+  )
+  assert.ok(limited.el('reach-result').classList.contains('is-error'))
+
+  const refused = load(model(), 200, undefined, {
+    '/api/reachability': {
+      status: 200,
+      body: {
+        success: false,
+        latencyMs: null,
+        error: 'Connection refused',
+        host: 'de2.tunnelsats.com',
+        port: 24556,
+      },
+    },
+  })
+  await settleAll(refused)
+  refused.el('reach-pubkey').value = NODE_PUBKEY
+  refused.run('checkReachability()')
+  await settleAll(refused)
+  assert.equal(
+    refused.el('reach-result').textContent,
+    'Inbound check failed through de2.tunnelsats.com:24556: Connection refused.',
+  )
+  for (const result of [
+    { kind: 'result', success: true, latencyMs: 1, host: 'h', port: 1 },
+    { kind: 'result', success: false, error: 'x' },
+  ]) {
+    assert.doesNotMatch(
+      refused.run(`reachabilityText(${JSON.stringify(result)})`),
+      /verified|protected|private|secure|leak/i,
+    )
+  }
+})
+
+test('a stored node key is restored into the reachability form', async () => {
+  const h = load(
+    model(),
+    200,
+    undefined,
+    {},
+    { 'tunnelsats.nodePubkey': NODE_PUBKEY },
+  )
+  await settleAll(h)
+  assert.equal(h.el('reach-pubkey').value, NODE_PUBKEY)
+  const junk = load(
+    model(),
+    200,
+    undefined,
+    {},
+    { 'tunnelsats.nodePubkey': '<img>' },
+  )
+  await settleAll(junk)
+  assert.equal(junk.el('reach-pubkey').value, '')
+})
+
+test('the overview renders native gauges, the timeline and the quota', async () => {
+  const h = load(
+    model({
+      bandwidth: {
+        usedGb: 120,
+        limitGb: 150,
+        resetsThisMonth: 1,
+        maxResetsPerMonth: 2,
+        resetThresholdPct: 70,
+      },
+    }),
+  )
+  await settleAll(h)
+  const meter = h.el('bandwidth-meter') as unknown as Json
+  assert.equal(meter.max, 150)
+  assert.equal(meter.value, 120)
+  assert.equal(meter.low, 105)
+  assert.equal(meter.high, 135)
+  assert.equal(meter.optimum, 0)
+  assert.equal(h.el('bandwidth-limit').textContent, '/ 150 GB')
+  const progress = h.el('subscription-progress') as unknown as Json
+  assert.equal(progress.max, 100)
+  assert.ok(progress.value > 60 && progress.value <= 67)
+  assert.equal(h.el('val-resets').textContent, '1 of 2')
+  assert.equal(
+    h.el('val-reset-eligibility').attributes['data-state'],
+    'eligible',
+  )
+  assert.match(h.el('pace-text').textContent, /GB/)
+  assert.equal(h.el('timeline-phase').textContent, 'On track')
+  const svg = h.el('timeline-chart').children[0]
+  assert.equal(svg.tagName, 'SVG')
+  assert.equal(svg.attributes['aria-hidden'], 'true')
+  assert.ok(
+    svg.children.every((child) => !('style' in child.attributes)),
+    'the timeline uses SVG attributes, not inline styles',
+  )
+  assert.equal(h.el('timeline-legend').children.length, 3)
+  assert.equal(h.el('renew-preview-list').children.length, 4)
+})
+
+test('index.html labels the reachability check as inbound only and uses native gauges', () => {
+  const html = readFileSync(join(__dirname, '..', 'web', 'index.html'), 'utf8')
+  assert.match(
+    html,
+    /Inbound TCP port check only; does not verify outbound VPN\s+egress\./,
+  )
+  assert.match(html, /<meter\s+id="bandwidth-meter"/)
+  assert.match(html, /<meter\s+id="modal-bandwidth-meter"/)
+  assert.match(html, /<progress\s+id="subscription-progress"/)
+  for (const command of ['wg show', 'ip rule', 'ip route', 'ifconfig.me']) {
+    assert.ok(html.includes(command), `privacy commands include ${command}`)
+  }
+  assert.doesNotMatch(html, /\sstyle\s*=/i)
 })

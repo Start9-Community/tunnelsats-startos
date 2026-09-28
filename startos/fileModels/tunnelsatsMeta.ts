@@ -16,6 +16,13 @@ export const metaShape = z.object({
   vpnPort: z.number().optional(),
   bandwidth_used_gb: z.number().optional(),
   /**
+   * The monthly quota from `subscription/status` for `publicKey`, written by
+   * bridge.py lazy_sync only; dropped with the other confirmed fields.
+   */
+  bandwidth_limit_gb: z.number().optional().catch(undefined),
+  bandwidth_resets_this_month: z.number().optional().catch(undefined),
+  max_resets_per_month: z.number().optional().catch(undefined),
+  /**
    * Set by bridge.py when the API has no subscription for `publicKey`
    * (see _record_not_found); only meaningful for that key.
    */

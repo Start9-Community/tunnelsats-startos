@@ -614,38 +614,74 @@ code {
   color: var(--text-secondary);
 }
 
-.progress-bar-container {
+/* Native <progress> and <meter> gauges: the value lives in attributes, so
+   no inline style is needed (strict CSP). <meter> colours itself from its
+   low/high/optimum attributes. */
+.gauge {
+  appearance: none;
+  display: block;
   width: 100%;
   height: 8px;
-  background: rgba(255, 255, 255, 0.06);
+  border: 0;
   border-radius: 8px;
   overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
 }
 
-.progress-bar {
-  width: 0;
-  height: 100%;
+.gauge-lg {
+  height: 10px;
+  border-radius: 10px;
+}
+
+.gauge::-webkit-progress-bar,
+.gauge::-webkit-meter-bar {
+  background: rgba(255, 255, 255, 0.06);
+  border: 0;
+  border-radius: inherit;
+}
+
+.gauge-time::-webkit-progress-value {
   background: linear-gradient(
     90deg,
     var(--accent-bitcoin-deep) 0%,
     var(--accent-bitcoin) 100%
   );
-  border-radius: 8px;
-  transition: width 0.6s ease;
+  border-radius: inherit;
 }
 
-.bandwidth-bar,
-.modal-progress-fill {
+.gauge-time::-moz-progress-bar {
+  background: linear-gradient(
+    90deg,
+    var(--accent-bitcoin-deep) 0%,
+    var(--accent-bitcoin) 100%
+  );
+  border-radius: inherit;
+}
+
+.gauge-bandwidth::-webkit-meter-optimum-value {
+  background: linear-gradient(90deg, #16a34a 0%, var(--accent-signal) 100%);
+  border-radius: inherit;
+}
+
+.gauge-bandwidth::-webkit-meter-suboptimum-value {
+  background: linear-gradient(90deg, #ca8a04 0%, var(--accent-bitcoin) 100%);
+  border-radius: inherit;
+}
+
+.gauge-bandwidth::-webkit-meter-even-less-good-value {
+  background: linear-gradient(90deg, #dc2626 0%, var(--accent-alert) 100%);
+  border-radius: inherit;
+}
+
+.gauge-bandwidth:-moz-meter-optimum::-moz-meter-bar {
   background: linear-gradient(90deg, #16a34a 0%, var(--accent-signal) 100%);
 }
 
-.bandwidth-bar.warning,
-.modal-progress-fill.warning {
+.gauge-bandwidth:-moz-meter-sub-optimum::-moz-meter-bar {
   background: linear-gradient(90deg, #ca8a04 0%, var(--accent-bitcoin) 100%);
 }
 
-.bandwidth-bar.critical,
-.modal-progress-fill.critical {
+.gauge-bandwidth:-moz-meter-sub-sub-optimum::-moz-meter-bar {
   background: linear-gradient(90deg, #dc2626 0%, var(--accent-alert) 100%);
 }
 
@@ -955,6 +991,314 @@ code {
 .plan-card.is-selected {
   border-color: var(--accent-bitcoin);
   box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.35);
+}
+
+/* ── Flow stepper ── */
+.flow-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.flow-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.flow {
+  padding: 12px 16px;
+  border-radius: var(--radius-inner);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+}
+
+.flow-title {
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.flow-steps {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 6px;
+  counter-reset: flow-step;
+}
+
+.flow-step {
+  counter-increment: flow-step;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  background: var(--surface-sunken);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.flow-step::before {
+  content: counter(flow-step);
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid currentColor;
+}
+
+.flow-step.is-done {
+  color: var(--accent-signal);
+}
+
+.flow-step.is-done::before {
+  content: '✓';
+}
+
+.flow-step.is-current {
+  color: var(--text-primary);
+  border-color: rgba(250, 204, 21, 0.45);
+}
+
+.flow-step.is-current::before {
+  color: var(--accent-bitcoin);
+}
+
+.flow-detail {
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+/* ── Server cards ── */
+.server-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 100%;
+}
+
+.server-cards {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 8px;
+}
+
+.server-card {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-areas:
+    'flag city'
+    'flag country';
+  align-items: center;
+  column-gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(15, 17, 21, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text-primary);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.server-card:hover {
+  border-color: rgba(250, 204, 21, 0.45);
+}
+
+.server-card[aria-pressed='true'] {
+  border-color: var(--accent-bitcoin);
+  box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.35);
+}
+
+.server-flag {
+  grid-area: flag;
+  font-size: 20px;
+}
+
+.server-city {
+  grid-area: city;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.server-country {
+  grid-area: country;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+/* ── Renewal timeline & bandwidth outlook ── */
+.timeline-card,
+.quota-card,
+.reachability-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.timeline-chart {
+  height: 26px;
+}
+
+.timeline-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.tl-track {
+  fill: rgba(255, 255, 255, 0.06);
+}
+
+.tl-zone-7d {
+  fill: rgba(250, 204, 21, 0.22);
+}
+
+.tl-zone-3d {
+  fill: rgba(248, 113, 113, 0.28);
+}
+
+.tl-elapsed {
+  fill: rgba(255, 255, 255, 0.18);
+}
+
+.tl-marker {
+  fill: var(--accent-bitcoin);
+}
+
+.tl-marker.is-passed {
+  fill: var(--text-muted);
+}
+
+.tl-now {
+  fill: var(--text-primary);
+}
+
+.timeline-legend,
+.renew-preview-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.subhead {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.renew-preview-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--surface-sunken);
+}
+
+.renew-preview-plan {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.pace-text {
+  font-size: 13.5px;
+  color: var(--text-primary);
+}
+
+.quota-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quota-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: var(--radius-inner);
+  background: var(--surface-sunken);
+}
+
+.quota-fact dt {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.quota-fact dd {
+  font-size: 13px;
+}
+
+#val-reset-eligibility[data-state='eligible'],
+#val-reset-eligibility[data-state='likely'] {
+  color: var(--accent-signal);
+}
+
+#val-reset-eligibility[data-state='quota-used'] {
+  color: var(--accent-alert);
+}
+
+/* ── Connection check ── */
+.reach-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.reach-field {
+  flex: 1 1 320px;
+}
+
+.reach-input {
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: rgba(15, 17, 21, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  min-width: 0;
+}
+
+.reach-input:user-invalid {
+  border-color: var(--accent-alert);
+}
+
+.reach-result {
+  padding: 10px 14px;
+  border-radius: var(--radius-inner);
+  background: rgba(96, 165, 250, 0.08);
+  border: 1px solid rgba(96, 165, 250, 0.28);
+  font-size: 13px;
+}
+
+.reach-result.is-error {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.28);
+}
+
+.reach-result.is-success {
+  background: rgba(34, 197, 94, 0.08);
+  border-color: rgba(34, 197, 94, 0.28);
 }
 
 /* ── Payable invoice panel (D1) ── */
@@ -1321,21 +1665,6 @@ code {
   font-size: 16px;
   font-weight: 600;
   color: var(--text-secondary);
-}
-
-.modal-progress-track {
-  width: 100%;
-  height: 10px;
-  background: rgba(255, 255, 255, 0.06);
-  border-radius: 10px;
-  overflow: hidden;
-}
-
-.modal-progress-fill {
-  width: 0;
-  height: 100%;
-  border-radius: 10px;
-  transition: width 0.6s ease;
 }
 
 .bandwidth-facts {

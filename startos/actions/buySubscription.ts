@@ -16,6 +16,7 @@ import {
   type TargetNode,
 } from '../settlement'
 import { resolvePayInvoice } from './resolvePayInvoice'
+import { defaultServerRegion, loadServerRegions } from '../serverRegions'
 
 export const INVOICE_TTL_MS = 60 * 60 * 1000
 export const VALID_DURATIONS = [1, 3, 6, 12] as const
@@ -384,7 +385,7 @@ export function startPurchase(
 
 const { InputSpec, Value } = sdk
 
-const inputSpec = InputSpec.of({
+export const inputSpec = InputSpec.of({
   'target-node': Value.select({
     name: i18n('Target Lightning Node'),
     description: i18n(
@@ -397,17 +398,18 @@ const inputSpec = InputSpec.of({
       eclair: 'Eclair',
     },
   }),
-  'server-region': Value.select({
-    name: i18n('Server Region'),
-    description: i18n(
-      'Select the geographic region for your VPN tunnel endpoint.',
-    ),
-    default: 'eu-de',
-    values: {
-      'eu-de': 'Europe — Frankfurt, DE',
-      'eu-de2': 'Europe — Nuremberg, DE',
-      'us-west': 'North America — Hillsboro, US',
-    },
+  // The regions TunnelSats offers right now, or the static list when the
+  // API cannot be reached (see serverRegions.ts).
+  'server-region': Value.dynamicSelect(async () => {
+    const values = await loadServerRegions()
+    return {
+      name: i18n('Server Region'),
+      description: i18n(
+        'Select the geographic region for your VPN tunnel endpoint.',
+      ),
+      default: defaultServerRegion(values),
+      values,
+    }
   }),
   duration: Value.select({
     name: i18n('Subscription Duration'),

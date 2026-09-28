@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileHelper } from '@start9labs/start-sdk'
@@ -372,6 +372,38 @@ test('replacedPayTaskPatch: the real metadata merge keeps tasks already queued',
       QUEUED,
       payTaskReplayId('renewal', 'cln', 'b'.repeat(64)),
     ])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('metaShape: a TypeScript merge keeps the quota fields bridge.py wrote', async () => {
+  // bridge.py lazy_sync writes the monthly quota; the Buy, Renew and Reset
+  // actions merge their pending state into the same file with the SDK.
+  const dir = mkdtempSync(join(tmpdir(), 'meta-'))
+  try {
+    const path = join(dir, 'meta.json')
+    writeFileSync(
+      path,
+      JSON.stringify({
+        publicKey: 'pk',
+        bandwidth_used_gb: 71.5,
+        bandwidth_limit_gb: 150,
+        bandwidth_resets_this_month: 1,
+        max_resets_per_month: 'tampered',
+      }),
+    )
+    const meta = FileHelper.json(path, metaShape)
+    await meta.merge({} as never, { syncSuccess: true })
+    const stored = JSON.parse(readFileSync(path, 'utf8'))
+    assert.equal(stored.bandwidth_limit_gb, 150)
+    assert.equal(stored.bandwidth_resets_this_month, 1)
+    assert.equal(stored.bandwidth_used_gb, 71.5)
+    assert.equal(stored.syncSuccess, true)
+    // A malformed value parses as absent instead of failing the whole file.
+    const read = await meta.read().once()
+    assert.equal(read?.max_resets_per_month, undefined)
+    assert.equal(read?.bandwidth_limit_gb, 150)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

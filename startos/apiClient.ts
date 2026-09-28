@@ -138,11 +138,14 @@ async function fetchJson<T>(
  */
 export async function fetchServers(
   baseUrl = DEFAULT_API_BASE,
+  timeoutMs = 15000,
 ): Promise<ServerInfo[]> {
   const url = `${baseUrl.replace(/\/$/, '')}/api/public/v1/servers`
-  const data = await fetchJson<{ servers: ServerInfo[] }>(url, {
-    method: 'GET',
-  })
+  const data = await fetchJson<{ servers: ServerInfo[] }>(
+    url,
+    { method: 'GET' },
+    timeoutMs,
+  )
   return data.servers || []
 }
 

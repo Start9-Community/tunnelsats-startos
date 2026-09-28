@@ -1,3 +1,4 @@
+import { T } from '@start9labs/start-sdk'
 import { sdk } from '../sdk'
 import { configJson } from '../fileModels/config.json'
 import { tunnelsatsMeta } from '../fileModels/tunnelsatsMeta'
@@ -13,6 +14,7 @@ import {
   ResetFailedError,
   resetAvailability,
   runBandwidthReset,
+  type ResetOps,
   type ResetRunResult,
 } from '../bandwidthReset'
 import { payTaskReplayId, type TargetNode } from '../settlement'
@@ -31,6 +33,162 @@ function configuredKey(
     return null
   }
 }
+
+export interface BandwidthResetActionOps extends Partial<ResetOps> {
+  readConfig?(): Promise<{
+    enabled?: boolean
+    'target-node'?: TargetNode
+    'tunnelsats-conf'?: string | null
+  } | null>
+  readServerMeta?(): Promise<{
+    publicKey?: string
+    serverDomain?: string
+  } | null>
+}
+
+export async function startBandwidthReset(
+  effects: T.Effects,
+  opsOverride?: BandwidthResetActionOps,
+  options: { reuseOnly?: boolean } = {},
+): Promise<{
+  outcome: ResetRunResult
+  targetNode: TargetNode
+  publicKey: string
+}> {
+  const readConfig =
+    opsOverride?.readConfig ??
+    (() =>
+      configJson
+        .read()
+        .once()
+        .catch(() => null))
+  const readServerMeta =
+    opsOverride?.readServerMeta ??
+    (() =>
+      tunnelsatsMeta
+        .read()
+        .once()
+        .catch(() => null))
+
+  const config = await readConfig()
+  const publicKey = configuredKey(config)
+  if (!config || !publicKey || !config['tunnelsats-conf']) {
+    throw new Error(
+      i18n(
+        'No active subscription found. Import or purchase a subscription first.',
+      ),
+    )
+  }
+  const tunnelInfo = parseWireguardTunnelInfo(config['tunnelsats-conf'])
+  const targetNode: TargetNode =
+    opsOverride?.targetNode ?? config['target-node'] ?? 'lnd'
+  // Not payment state: read outside the payment queue, like Renew.
+  const serverMeta = await readServerMeta()
+  const metaServerDomain =
+    serverMeta?.publicKey === publicKey ? serverMeta.serverDomain : undefined
+  const serverId = tunnelInfo.serverDomain || metaServerDomain || 'eu-de'
+
+  const defaultOps: ResetOps = {
+    now: () => new Date(),
+    targetNode,
+    // A read error fails the action: taking it for "nothing pending"
+    // would reserve another reset while an invoice is still payable.
+    // A missing file reads as null.
+    readCurrent: async () => {
+      const current = await tunnelsatsMeta.read().once()
+      return (
+        current && {
+          pending: current.pendingReset,
+          payTasksToClear: current.payTasksToClear,
+        }
+      )
+    },
+    fetchStatus: (hash) => fetchBandwidthResetStatus(hash),
+    requestReset: () =>
+      requestBandwidthReset({ wgPublicKey: publicKey, serverId }),
+    record: (order, patch) =>
+      tunnelsatsMeta.merge(effects, {
+        pendingReset: {
+          paymentHash: order.paymentHash,
+          resetId: order.resetId,
+          invoice: order.invoice,
+          expiresAt: order.expiresAt,
+          createdAt: new Date().toISOString(),
+          publicKey,
+          serverId,
+          targetNode,
+          amountSats: order.amountSats,
+          // merge() is a deep merge: without these, a backoff or received
+          // marker left by an earlier reset would carry over to this one.
+          paymentReceivedFor: undefined,
+          lastError: undefined,
+          nextAttemptAt: undefined,
+        },
+        ...patch,
+      }),
+    raiseTask: ({ invoice, paymentHash, targetNode: node }) => {
+      const { packageId, payInvoiceAction } = resolvePayInvoice(node)
+      return sdk.action.createTask(
+        effects,
+        packageId,
+        payInvoiceAction,
+        'important',
+        {
+          replayId: payTaskReplayId('reset', node, paymentHash),
+          input: {
+            kind: 'partial',
+            accept: [],
+            set: {
+              invoice,
+              amount: { selection: 'invoice', value: {} },
+              'max-fee-percent': 1,
+              confirmed: false,
+            },
+          },
+          reason: i18n('Pay TunnelSats bandwidth reset invoice'),
+        },
+      )
+    },
+  }
+
+  let outcome: ResetRunResult
+  try {
+    outcome = await runBandwidthReset(
+      publicKey,
+      {
+        ...defaultOps,
+        ...opsOverride,
+        targetNode,
+      },
+      options,
+    )
+  } catch (e) {
+    if (e instanceof ResetFailedError) {
+      throw new Error(
+        i18n(
+          'The payment was received, but the bandwidth reset failed. Contact TunnelSats support with payment hash ${paymentHash}.',
+          { paymentHash: e.paymentHash },
+        ),
+      )
+    }
+    if (e instanceof ApiHttpError && e.status === 400) {
+      throw new Error(e.apiMessage)
+    }
+    if (e instanceof ApiHttpError && e.status === 429) {
+      throw new Error(
+        i18n(
+          'The monthly bandwidth reset limit is reached (${message}). An unpaid reset invoice keeps its reset reserved until it expires.',
+          { message: e.apiMessage },
+        ),
+      )
+    }
+    throw e
+  }
+
+  return { outcome, targetNode, publicKey }
+}
+
+export const startReset = startBandwidthReset
 
 const sameJson = (a: unknown, b: unknown) =>
   JSON.stringify(a) === JSON.stringify(b)
@@ -61,114 +219,7 @@ export const resetBandwidth = sdk.Action.withoutInput(
     }
   },
   async ({ effects }) => {
-    const config = await configJson
-      .read()
-      .once()
-      .catch(() => null)
-    const publicKey = configuredKey(config)
-    if (!config || !publicKey) {
-      throw new Error(
-        i18n(
-          'No active subscription found. Import or purchase a subscription first.',
-        ),
-      )
-    }
-    const tunnelInfo = parseWireguardTunnelInfo(config['tunnelsats-conf'])
-    const targetNode: TargetNode = config['target-node'] || 'lnd'
-    // Not payment state: read outside the payment queue, like Renew.
-    const serverMeta = await tunnelsatsMeta
-      .read()
-      .once()
-      .catch(() => null)
-    const metaServerDomain =
-      serverMeta?.publicKey === publicKey ? serverMeta.serverDomain : undefined
-    const serverId = tunnelInfo.serverDomain || metaServerDomain || 'eu-de'
-
-    let outcome: ResetRunResult
-    try {
-      outcome = await runBandwidthReset(publicKey, {
-        now: () => new Date(),
-        targetNode,
-        // A read error fails the action: taking it for "nothing pending"
-        // would reserve another reset while an invoice is still payable.
-        // A missing file reads as null.
-        readCurrent: async () => {
-          const current = await tunnelsatsMeta.read().once()
-          return (
-            current && {
-              pending: current.pendingReset,
-              payTasksToClear: current.payTasksToClear,
-            }
-          )
-        },
-        fetchStatus: (hash) => fetchBandwidthResetStatus(hash),
-        requestReset: () =>
-          requestBandwidthReset({ wgPublicKey: publicKey, serverId }),
-        record: (order, patch) =>
-          tunnelsatsMeta.merge(effects, {
-            pendingReset: {
-              paymentHash: order.paymentHash,
-              resetId: order.resetId,
-              invoice: order.invoice,
-              expiresAt: order.expiresAt,
-              createdAt: new Date().toISOString(),
-              publicKey,
-              serverId,
-              targetNode,
-              amountSats: order.amountSats,
-              // merge() is a deep merge: without these, a backoff left by an
-              // earlier reset would delay settling this one.
-              lastError: undefined,
-              nextAttemptAt: undefined,
-            },
-            ...patch,
-          }),
-        raiseTask: ({ invoice, paymentHash, targetNode: node }) => {
-          const { packageId, payInvoiceAction } = resolvePayInvoice(node)
-          return sdk.action.createTask(
-            effects,
-            packageId,
-            payInvoiceAction,
-            'important',
-            {
-              replayId: payTaskReplayId('reset', node, paymentHash),
-              input: {
-                kind: 'partial',
-                accept: [],
-                set: {
-                  invoice,
-                  amount: { selection: 'invoice', value: {} },
-                  'max-fee-percent': 1,
-                  confirmed: false,
-                },
-              },
-              reason: i18n('Pay TunnelSats bandwidth reset invoice'),
-            },
-          )
-        },
-      })
-    } catch (e) {
-      if (e instanceof ResetFailedError) {
-        throw new Error(
-          i18n(
-            'The payment was received, but the bandwidth reset failed. Contact TunnelSats support with payment hash ${paymentHash}.',
-            { paymentHash: e.paymentHash },
-          ),
-        )
-      }
-      if (e instanceof ApiHttpError && e.status === 400) {
-        throw new Error(e.apiMessage)
-      }
-      if (e instanceof ApiHttpError && e.status === 429) {
-        throw new Error(
-          i18n(
-            'The monthly bandwidth reset limit is reached (${message}). An unpaid reset invoice keeps its reset reserved until it expires.',
-            { message: e.apiMessage },
-          ),
-        )
-      }
-      throw e
-    }
+    const { outcome } = await startBandwidthReset(effects)
 
     const field = (name: string, value: string, qr = false) => ({
       name,

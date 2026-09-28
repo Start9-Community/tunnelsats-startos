@@ -33,6 +33,11 @@ export const metaShape = z.object({
       targetNode: z.enum(['lnd', 'cln', 'eclair']),
       serverId: z.string(),
       createdAt: z.string(),
+      duration: z.number().optional().catch(undefined),
+      invoice: z.string().optional().catch(undefined),
+      amountSats: z.number().optional().catch(undefined),
+      expiresAt: z.string().optional().catch(undefined),
+      paymentReceivedFor: z.string().optional().catch(undefined),
       /** Set by the settlement tick (bridge.py) after a failed attempt. */
       lastError: z.string().optional().catch(undefined),
       nextAttemptAt: z.string().optional().catch(undefined),
@@ -46,6 +51,11 @@ export const metaShape = z.object({
       oldExpiry: z.string(),
       newExpiry: z.string(),
       createdAt: z.string(),
+      duration: z.number().optional().catch(undefined),
+      invoice: z.string().optional().catch(undefined),
+      amountSats: z.number().optional().catch(undefined),
+      expiresAt: z.string().optional().catch(undefined),
+      paymentReceivedFor: z.string().optional().catch(undefined),
       /** The key the renewal was paid for; absent on older renewals. */
       publicKey: z.string().optional().catch(undefined),
       /** The node its pay task was raised on; absent on older renewals. */
@@ -74,6 +84,7 @@ export const metaShape = z.object({
       serverId: z.string(),
       targetNode: z.enum(['lnd', 'cln', 'eclair']),
       amountSats: z.number().optional().catch(undefined),
+      paymentReceivedFor: z.string().optional().catch(undefined),
       lastError: z.string().optional().catch(undefined),
       nextAttemptAt: z.string().optional().catch(undefined),
     })

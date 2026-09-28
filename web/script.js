@@ -1,19 +1,24 @@
-// TunnelSats dashboard: read-only.
+// TunnelSats dashboard: read model + intent bridge.
 //
-// Everything shown here comes from GET /api/dashboard, an allow-listed read
-// model without secrets (bridge.py get_dashboard). Buying, renewing,
-// resetting, importing, configuring and exporting run as StartOS actions,
-// which need the operator's StartOS login and pay through the node's Pay
-// Invoice task; this page only explains where to find them. It makes no
-// request to any other host.
+// State comes from GET /api/dashboard, an allow-listed read model without
+// secrets (bridge.py get_dashboard). Buying, renewing and resetting can be
+// requested from this dashboard via POST /api/intents (CSRF-protected,
+// single-writer intent file picked up by the StartOS service) or run as
+// StartOS actions. Every payment raises a Pay Invoice task on the target
+// Lightning node and shows the same payable BOLT11 invoice here as a pure-DOM
+// offline SVG QR code. It makes no request to any other host.
 
 const DASHBOARD_URL = '/api/dashboard'
+const INTENTS_URL = '/api/intents'
 const POLL_MS = 30000
+const FAST_POLL_MS = 3000
 const DAY_MS = 24 * 60 * 60 * 1000
 // The expiry progress bar is scaled to a one-month plan.
 const PROGRESS_TERM_MS = 30 * DAY_MS
 const BANDWIDTH_WARN_PCT = 70
 const BANDWIDTH_CRITICAL_PCT = 90
+const SVG_NS = 'http://www.w3.org/2000/svg'
+const BOLT11_RE = /^ln(?:bcrt|bc|tbs|tb|sb)[0-9a-z]{20,4000}$/i
 
 // Reference USD plan pricing from the TunnelSats backend's pricing module
 // (Tunnelsats/tunnelsats-v2-web, src/lib/pricing.ts: BASE_PRICE_USD = 3 per
@@ -55,6 +60,471 @@ const NODE_PACKAGE_IDS = Object.freeze({
 let model = null
 let loadFailed = false
 let countdownTimer = null
+let lastPollAt = 0
+let submittingIntent = false
+let localIntentFeedback = null
+let lastRenderedInvoice = null
+let selectedInvoiceKind = null
+let selectedBuyDuration = '3m'
+
+// ─────────────────────────────────────────────
+// Pure-DOM ISO/IEC 18004 QR Code Generator (Byte mode, Level L, V1–V40)
+// ─────────────────────────────────────────────
+// Byte mode encodes the invoice exactly as displayed and copied (lowercase),
+// so scanning and copying always yield the same string.
+
+// Error correction level L, indexed by version (index 0 unused).
+const QR_ECC_CODEWORDS_PER_BLOCK_L = Object.freeze([
+  -1, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28,
+  28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30,
+  30, 30,
+])
+const QR_NUM_ECC_BLOCKS_L = Object.freeze([
+  -1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8, 9, 9, 10,
+  12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25,
+])
+const QR_MAX_VERSION = 40
+
+// Modules available for data and ECC in a version (ISO/IEC 18004 §7.1).
+function qrRawDataModules(version) {
+  let result = (16 * version + 128) * version + 64
+  if (version >= 2) {
+    const numAlign = Math.floor(version / 7) + 2
+    result -= (25 * numAlign - 10) * numAlign - 55
+    if (version >= 7) result -= 36
+  }
+  return result
+}
+
+function qrAlignmentCenters(version) {
+  if (version === 1) return []
+  const size = 17 + version * 4
+  const numAlign = Math.floor(version / 7) + 2
+  const step =
+    Math.floor((version * 8 + numAlign * 3 + 5) / (numAlign * 4 - 4)) * 2
+  const result = [6]
+  for (let pos = size - 7; result.length < numAlign; pos -= step) {
+    result.splice(1, 0, pos)
+  }
+  return result
+}
+
+// Block layout of a version at level L: short blocks first, long blocks
+// carry one more data codeword.
+function qrBlockLayout(version) {
+  const rawCodewords = Math.floor(qrRawDataModules(version) / 8)
+  const numBlocks = QR_NUM_ECC_BLOCKS_L[version]
+  const ecPerBlock = QR_ECC_CODEWORDS_PER_BLOCK_L[version]
+  const numShortBlocks = numBlocks - (rawCodewords % numBlocks)
+  const shortDataCw = Math.floor(rawCodewords / numBlocks) - ecPerBlock
+  return {
+    ecPerBlock,
+    numBlocks,
+    numShortBlocks,
+    shortDataCw,
+    totalDataCw: rawCodewords - ecPerBlock * numBlocks,
+  }
+}
+
+const GF_EXP = new Uint8Array(512)
+const GF_LOG = new Uint8Array(256)
+;(function initGaloisField() {
+  let x = 1
+  for (let i = 0; i < 255; i++) {
+    GF_EXP[i] = x
+    GF_LOG[x] = i
+    x <<= 1
+    if (x & 0x100) x ^= 0x11d
+  }
+  for (let i = 255; i < 512; i++) {
+    GF_EXP[i] = GF_EXP[i - 255]
+  }
+})()
+
+function gfMul(a, b) {
+  if (a === 0 || b === 0) return 0
+  return GF_EXP[GF_LOG[a] + GF_LOG[b]]
+}
+
+function rsGeneratorPoly(degree) {
+  let poly = new Uint8Array([1])
+  for (let i = 0; i < degree; i++) {
+    const next = new Uint8Array(poly.length + 1)
+    const root = GF_EXP[i]
+    for (let j = 0; j < poly.length; j++) {
+      next[j] ^= poly[j]
+      next[j + 1] ^= gfMul(poly[j], root)
+    }
+    poly = next
+  }
+  return poly
+}
+
+function rsRemainder(data, ecLen) {
+  const gen = rsGeneratorPoly(ecLen)
+  const rem = new Uint8Array(ecLen)
+  for (let i = 0; i < data.length; i++) {
+    const factor = data[i] ^ rem[0]
+    rem.copyWithin(0, 1)
+    rem[ecLen - 1] = 0
+    if (factor !== 0) {
+      for (let j = 0; j < ecLen; j++) {
+        rem[j] ^= gfMul(gen[j + 1], factor)
+      }
+    }
+  }
+  return rem
+}
+
+function pushBits(bits, value, length) {
+  for (let i = length - 1; i >= 0; i--) {
+    bits.push((value >>> i) & 1)
+  }
+}
+
+function bchFormatBits(ecLevelBits, mask) {
+  const data = (ecLevelBits << 3) | mask
+  let rem = data << 10
+  for (let i = 14; i >= 10; i--) {
+    if ((rem >>> i) & 1) rem ^= 0x537 << (i - 10)
+  }
+  return ((data << 10) | rem) ^ 0x5412
+}
+
+function bchVersionBits(version) {
+  let rem = version << 12
+  for (let i = 17; i >= 12; i--) {
+    if ((rem >>> i) & 1) rem ^= 0x1f25 << (i - 12)
+  }
+  return (version << 12) | rem
+}
+
+function maskBit(mask, r, c) {
+  switch (mask) {
+    case 0:
+      return (r + c) % 2 === 0
+    case 1:
+      return r % 2 === 0
+    case 2:
+      return c % 3 === 0
+    case 3:
+      return (r + c) % 3 === 0
+    case 4:
+      return (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0
+    case 5:
+      return ((r * c) % 2) + ((r * c) % 3) === 0
+    case 6:
+      return (((r * c) % 2) + ((r * c) % 3)) % 2 === 0
+    default:
+      return (((r + c) % 2) + ((r * c) % 3)) % 2 === 0
+  }
+}
+
+function placeFormatBits(modules, isFunc, size, mask) {
+  // Error Correction Level L = 01
+  const bits = bchFormatBits(1, mask)
+  for (let i = 0; i < 15; i++) {
+    const bit = ((bits >>> i) & 1) === 1
+    // Around top-left finder
+    if (i < 6) modules[i][8] = bit
+    else if (i < 8) modules[i + 1][8] = bit
+    else if (i === 8) modules[8][7] = bit
+    else modules[8][14 - i] = bit
+
+    // Split between bottom-left and top-right finders
+    if (i < 8) modules[8][size - 1 - i] = bit
+    else modules[size - 15 + i][8] = bit
+  }
+  if (isFunc) {
+    for (let i = 0; i < 9; i++) {
+      if (i !== 6) {
+        isFunc[8][i] = true
+        isFunc[i][8] = true
+      }
+    }
+    for (let i = 0; i < 8; i++) {
+      isFunc[8][size - 1 - i] = true
+      isFunc[size - 1 - i][8] = true
+    }
+  }
+}
+
+function qrPenaltyScore(modules, size) {
+  let score = 0
+  for (let r = 0; r < size; r++) {
+    let runColor = modules[r][0]
+    let runLen = 1
+    for (let c = 1; c < size; c++) {
+      if (modules[r][c] === runColor) {
+        runLen++
+        if (runLen === 5) score += 3
+        else if (runLen > 5) score += 1
+      } else {
+        runColor = modules[r][c]
+        runLen = 1
+      }
+    }
+  }
+  for (let c = 0; c < size; c++) {
+    let runColor = modules[0][c]
+    let runLen = 1
+    for (let r = 1; r < size; r++) {
+      if (modules[r][c] === runColor) {
+        runLen++
+        if (runLen === 5) score += 3
+        else if (runLen > 5) score += 1
+      } else {
+        runColor = modules[r][c]
+        runLen = 1
+      }
+    }
+  }
+  for (let r = 0; r < size - 1; r++) {
+    for (let c = 0; c < size - 1; c++) {
+      const color = modules[r][c]
+      if (
+        modules[r][c + 1] === color &&
+        modules[r + 1][c] === color &&
+        modules[r + 1][c + 1] === color
+      ) {
+        score += 3
+      }
+    }
+  }
+  return score
+}
+
+/**
+ * Encodes an uppercased alphanumeric string (such as a BOLT11 invoice) into a
+ * 2D boolean QR matrix using ISO/IEC 18004 Alphanumeric mode (Level L).
+ */
+function encodeQrMatrix(rawText) {
+  const text = String(rawText || '').trim()
+  if (!text) return null
+  // ASCII only (BOLT11 is): one byte per character.
+  const bytes = []
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i)
+    if (code > 0x7e || code < 0x20) return null
+    bytes.push(code)
+  }
+
+  let version = 0
+  let layout = null
+  for (let v = 1; v <= QR_MAX_VERSION; v++) {
+    const candidate = qrBlockLayout(v)
+    const countBits = v <= 9 ? 8 : 16
+    if (4 + countBits + bytes.length * 8 <= candidate.totalDataCw * 8) {
+      version = v
+      layout = candidate
+      break
+    }
+  }
+  if (!layout) return null
+
+  const { ecPerBlock, numBlocks, numShortBlocks, shortDataCw, totalDataCw } =
+    layout
+  const alignCoords = qrAlignmentCenters(version)
+  const countBits = version <= 9 ? 8 : 16
+
+  const bits = []
+  pushBits(bits, 0b0100, 4)
+  pushBits(bits, bytes.length, countBits)
+  for (const byte of bytes) pushBits(bits, byte, 8)
+  const maxDataBits = totalDataCw * 8
+  const terminator = Math.min(4, maxDataBits - bits.length)
+  pushBits(bits, 0, terminator)
+  while (bits.length % 8 !== 0) bits.push(0)
+
+  const dataCw = new Uint8Array(totalDataCw)
+  let byteIdx = 0
+  for (let i = 0; i < bits.length; i += 8) {
+    let b = 0
+    for (let j = 0; j < 8; j++) b = (b << 1) | bits[i + j]
+    dataCw[byteIdx++] = b
+  }
+  let padToggle = true
+  while (byteIdx < totalDataCw) {
+    dataCw[byteIdx++] = padToggle ? 0xec : 0x11
+    padToggle = !padToggle
+  }
+
+  const dataBlocks = []
+  const ecBlocks = []
+  let offset = 0
+  for (let i = 0; i < numBlocks; i++) {
+    const len = shortDataCw + (i < numShortBlocks ? 0 : 1)
+    const block = dataCw.slice(offset, offset + len)
+    offset += len
+    dataBlocks.push(block)
+    ecBlocks.push(rsRemainder(block, ecPerBlock))
+  }
+
+  const interleaved = []
+  for (let col = 0; col <= shortDataCw; col++) {
+    for (let b = 0; b < dataBlocks.length; b++) {
+      if (col < dataBlocks[b].length) interleaved.push(dataBlocks[b][col])
+    }
+  }
+  for (let col = 0; col < ecPerBlock; col++) {
+    for (let b = 0; b < ecBlocks.length; b++) {
+      interleaved.push(ecBlocks[b][col])
+    }
+  }
+
+  const size = 17 + version * 4
+  const modules = Array.from({ length: size }, () => Array(size).fill(false))
+  const isFunc = Array.from({ length: size }, () => Array(size).fill(false))
+
+  const placeFinder = (topR, leftC) => {
+    for (let dr = -1; dr <= 7; dr++) {
+      for (let dc = -1; dc <= 7; dc++) {
+        const r = topR + dr
+        const c = leftC + dc
+        if (r < 0 || r >= size || c < 0 || c >= size) continue
+        const inOuter = dr >= 0 && dr <= 6 && dc >= 0 && dc <= 6
+        const onBorder = dr === 0 || dr === 6 || dc === 0 || dc === 6
+        const inCenter = dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4
+        modules[r][c] = inOuter && (onBorder || inCenter)
+        isFunc[r][c] = true
+      }
+    }
+  }
+  placeFinder(0, 0)
+  placeFinder(0, size - 7)
+  placeFinder(size - 7, 0)
+
+  for (let i = 8; i < size - 8; i++) {
+    modules[6][i] = i % 2 === 0
+    isFunc[6][i] = true
+    modules[i][6] = i % 2 === 0
+    isFunc[i][6] = true
+  }
+
+  for (let i = 0; i < alignCoords.length; i++) {
+    for (let j = 0; j < alignCoords.length; j++) {
+      if (
+        (i === 0 && j === 0) ||
+        (i === 0 && j === alignCoords.length - 1) ||
+        (i === alignCoords.length - 1 && j === 0)
+      ) {
+        continue
+      }
+      const cr = alignCoords[i]
+      const cc = alignCoords[j]
+      for (let dr = -2; dr <= 2; dr++) {
+        for (let dc = -2; dc <= 2; dc++) {
+          const dist = Math.max(Math.abs(dr), Math.abs(dc))
+          modules[cr + dr][cc + dc] = dist !== 1
+          isFunc[cr + dr][cc + dc] = true
+        }
+      }
+    }
+  }
+
+  modules[4 * version + 9][8] = true
+  isFunc[4 * version + 9][8] = true
+  placeFormatBits(modules, isFunc, size, 0)
+
+  if (version >= 7) {
+    const vBits = bchVersionBits(version)
+    for (let i = 0; i < 18; i++) {
+      const bit = ((vBits >>> i) & 1) === 1
+      const a = size - 11 + (i % 3)
+      const b = Math.floor(i / 3)
+      modules[a][b] = bit
+      isFunc[a][b] = true
+      modules[b][a] = bit
+      isFunc[b][a] = true
+    }
+  }
+
+  let bitOffset = 0
+  const totalBits = interleaved.length * 8
+  let upward = true
+  for (let right = size - 1; right >= 1; right -= 2) {
+    if (right === 6) right = 5
+    for (let vert = 0; vert < size; vert++) {
+      const r = upward ? size - 1 - vert : vert
+      for (let j = 0; j < 2; j++) {
+        const c = right - j
+        if (!isFunc[r][c]) {
+          let dark = false
+          if (bitOffset < totalBits) {
+            const cw = interleaved[bitOffset >>> 3]
+            dark = ((cw >>> (7 - (bitOffset & 7))) & 1) === 1
+            bitOffset++
+          }
+          modules[r][c] = dark
+        }
+      }
+    }
+    upward = !upward
+  }
+
+  let bestMask = 0
+  let bestScore = Infinity
+  let bestMatrix = null
+  for (let m = 0; m < 8; m++) {
+    const candidate = modules.map((row, r) =>
+      row.map((val, c) => (!isFunc[r][c] && maskBit(m, r, c) ? !val : val)),
+    )
+    placeFormatBits(candidate, null, size, m)
+    const score = qrPenaltyScore(candidate, size)
+    if (score < bestScore) {
+      bestScore = score
+      bestMask = m
+      bestMatrix = candidate
+    }
+  }
+  placeFormatBits(bestMatrix, null, size, bestMask)
+  return bestMatrix
+}
+
+/**
+ * Builds a pure-DOM <svg> element for a BOLT11 Lightning invoice without
+ * HTML string parsing or inline styles. Returns null if the invoice is invalid.
+ */
+function createInvoiceQrSvg(invoice) {
+  if (typeof invoice !== 'string' || !BOLT11_RE.test(invoice.trim())) {
+    return null
+  }
+  const matrix = encodeQrMatrix(invoice.trim())
+  if (!matrix) return null
+
+  const size = matrix.length
+  const margin = 4
+  const total = size + margin * 2
+  const createEl = (tag) =>
+    typeof document.createElementNS === 'function'
+      ? document.createElementNS(SVG_NS, tag)
+      : document.createElement(tag)
+
+  const svg = createEl('svg')
+  svg.setAttribute('viewBox', `0 0 ${total} ${total}`)
+  svg.setAttribute('class', 'invoice-qr-svg')
+  svg.setAttribute('aria-hidden', 'true')
+
+  const bg = createEl('rect')
+  bg.setAttribute('width', String(total))
+  bg.setAttribute('height', String(total))
+  bg.setAttribute('class', 'invoice-qr-bg')
+
+  const parts = []
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      if (matrix[r][c]) {
+        parts.push(`M${c + margin},${r + margin}h1v1h-1z`)
+      }
+    }
+  }
+  const fg = createEl('path')
+  fg.setAttribute('d', parts.join(''))
+  fg.setAttribute('class', 'invoice-qr-fg')
+
+  svg.append(bg, fg)
+  return svg
+}
 
 // ─────────────────────────────────────────────
 // Pure helpers (unit-tested in tests/web_dashboard.test.ts)
@@ -75,6 +545,13 @@ function listNodes(ids) {
 
 function formatUsd(usd) {
   return `$${usd.toFixed(2)}`
+}
+
+function formatSats(sats) {
+  if (typeof sats !== 'number' || !Number.isFinite(sats) || sats <= 0) {
+    return 'Amount encoded in invoice'
+  }
+  return `${Math.round(sats).toLocaleString('en-US')} sats`
 }
 
 function formatTime(iso) {
@@ -122,6 +599,49 @@ function nextRetrySuffix(pending) {
 function retryText(pending) {
   if (!pending || !pending.lastError) return ''
   return ` Last check failed: ${pending.lastError}${nextRetrySuffix(pending)}`
+}
+
+const INVOICE_KINDS = [
+  { kind: 'order', title: 'Pay Subscription Invoice', label: 'Subscription' },
+  { kind: 'renewal', title: 'Pay Renewal Invoice', label: 'Renewal' },
+  {
+    kind: 'reset',
+    title: 'Pay Bandwidth Reset Invoice',
+    label: 'Bandwidth reset',
+  },
+]
+
+/**
+ * Every unpaid BOLT11 invoice in m.pending, in a fixed order (subscription,
+ * renewal, bandwidth reset). More than one can be payable at the same time,
+ * for example a renewal and a bandwidth reset.
+ */
+function payableInvoices(m) {
+  const pending = (m && m.pending) || {}
+  const out = []
+  for (const meta of INVOICE_KINDS) {
+    const entry = pending[meta.kind]
+    if (
+      entry &&
+      typeof entry.invoice === 'string' &&
+      BOLT11_RE.test(entry.invoice) &&
+      !isPaymentReceived(entry)
+    ) {
+      out.push({ kind: meta.kind, title: meta.title, label: meta.label, entry })
+    }
+  }
+  return out
+}
+
+/**
+ * The payable invoice the panel shows: the one the operator picked in the
+ * invoice switcher while it is still payable, otherwise the first one.
+ * Returns null when nothing is payable.
+ */
+function activePayableInvoice(m) {
+  const all = payableInvoices(m)
+  if (!all.length) return null
+  return all.find((item) => item.kind === selectedInvoiceKind) || all[0]
 }
 
 /**
@@ -356,8 +876,8 @@ function badgeState(m, failed) {
 }
 
 // ─────────────────────────────────────────────
-// Rendering (textContent only: values from the read model are never parsed
-// as HTML)
+// Rendering (textContent / createElementNS only: values from the read model
+// are never parsed as HTML)
 // ─────────────────────────────────────────────
 function byId(id) {
   return document.getElementById(id)
@@ -386,8 +906,11 @@ function renderPlans(m) {
   const plans =
     m && Array.isArray(m.plans) && m.plans.length ? m.plans : PLAN_PRICES_USD
   const items = plans.map((plan) => {
+    const durationKey = `${plan.months}m`
     const li = document.createElement('li')
     li.className = 'plan-card'
+    li.setAttribute('data-plan-duration', durationKey)
+    li.classList.toggle('is-selected', durationKey === selectedBuyDuration)
     const duration = document.createElement('span')
     duration.className = 'plan-duration'
     duration.textContent = `${plan.months} month${plan.months > 1 ? 's' : ''}`
@@ -404,6 +927,195 @@ function renderPlans(m) {
     return li
   })
   list.replaceChildren(...items)
+}
+
+/**
+ * One toggle button per payable invoice when more than one is waiting.
+ * Buttons are rebuilt only when the set of invoices changes, so a poll does
+ * not steal keyboard focus from them.
+ */
+function renderInvoiceSwitcher(all, active) {
+  const switcher = byId('invoice-switcher')
+  if (!switcher) return
+  if (all.length < 2) {
+    switcher.hidden = true
+    switcher.replaceChildren()
+    switcher.setAttribute('data-key', '')
+    return
+  }
+  const labels = all.map(
+    (item) => `${item.label} · ${formatSats(item.entry.amountSats)}`,
+  )
+  const key = all.map((item, i) => `${item.kind}:${labels[i]}`).join('|')
+  if (switcher.getAttribute('data-key') !== key) {
+    const buttons = all.map((item, i) => {
+      const button = document.createElement('button')
+      button.setAttribute('type', 'button')
+      button.className = 'invoice-switch'
+      button.setAttribute('data-invoice-kind', item.kind)
+      button.textContent = labels[i]
+      return button
+    })
+    switcher.replaceChildren(...buttons)
+    switcher.setAttribute('data-key', key)
+  }
+  for (const button of switcher.children) {
+    const on = button.getAttribute('data-invoice-kind') === active.kind
+    button.setAttribute('aria-pressed', on ? 'true' : 'false')
+  }
+  switcher.hidden = false
+}
+
+function renderInvoicePanel(m) {
+  const panel = byId('invoice-panel')
+  const qrBox = byId('invoice-qr')
+  if (!panel || !qrBox) return
+  const all = payableInvoices(m)
+  const active = activePayableInvoice(m)
+  renderInvoiceSwitcher(all, active)
+  if (!active) {
+    panel.hidden = true
+    qrBox.replaceChildren()
+    lastRenderedInvoice = null
+    return
+  }
+
+  const entry = active.entry
+  const nodeName = nodeLabel(entry.targetNode || (m && m.targetNode))
+  panel.hidden = false
+  setText('invoice-title', active.title)
+  setText(
+    'invoice-framing',
+    `A Pay Invoice task has been raised on ${nodeName}. Accept it in StartOS, or scan/copy the same invoice below.${all.length > 1 ? ` ${all.length} invoices are waiting for payment.` : ''}`,
+  )
+  setText('invoice-amount', formatSats(entry.amountSats))
+  const expiresFormatted = formatTime(entry.expiresAt)
+  setText(
+    'invoice-expiry',
+    expiresFormatted ? `Expires ${expiresFormatted}` : 'Awaiting payment',
+  )
+  const invEl = byId('val-invoice')
+  if (invEl) {
+    invEl.textContent = entry.invoice
+    invEl.title = entry.invoice
+  }
+  if (lastRenderedInvoice !== entry.invoice) {
+    const svg = createInvoiceQrSvg(entry.invoice)
+    if (svg) {
+      qrBox.replaceChildren(svg)
+      qrBox.setAttribute('aria-label', 'Lightning invoice QR code')
+    } else {
+      // Longer than a QR code can hold (version 40, level L): say so rather
+      // than leave an empty box; the Pay Invoice task and Copy still work.
+      const text =
+        'This invoice is too long for a QR code. Accept the Pay Invoice task or copy the invoice instead.'
+      const note = document.createElement('p')
+      note.className = 'invoice-qr-fallback'
+      note.textContent = text
+      qrBox.replaceChildren(note)
+      qrBox.setAttribute('aria-label', text)
+    }
+    lastRenderedInvoice = entry.invoice
+  }
+}
+
+/** Shows the chosen payable invoice; unknown or unpayable kinds are ignored. */
+function selectInvoice(kind) {
+  if (!payableInvoices(model).some((item) => item.kind === kind)) return
+  selectedInvoiceKind = kind
+  renderInvoicePanel(model)
+}
+
+function activeIntentMessage(m) {
+  const intents = (m && m.intents) || {}
+  const target = nodeLabel(m && m.targetNode)
+  for (const kind of ['buy', 'renew', 'reset']) {
+    const slot = intents[kind]
+    if (slot && (slot.status === 'pending' || slot.status === 'processing')) {
+      return {
+        level: 'info',
+        text: `Requesting Lightning invoice from TunnelSats and raising the Pay Invoice task on ${target}…`,
+      }
+    }
+  }
+  if (localIntentFeedback) return localIntentFeedback
+  const failure = latestIntentFailure(m)
+  if (failure) return { level: 'error', text: failure.error }
+  return null
+}
+
+/** The m.pending invoice kind each dashboard request kind produces. */
+const INTENT_INVOICE_KIND = { buy: 'order', renew: 'renewal', reset: 'reset' }
+
+/**
+ * The most recent failed dashboard request. A failure is left out only when
+ * a payable invoice of the same kind was created after it (a later request
+ * of that kind produced it); an invoice of another kind never hides it, so
+ * a refused or failed request stays explained next to any invoice.
+ */
+function latestIntentFailure(m) {
+  const intents = (m && m.intents) || {}
+  const invoiceMsByKind = {}
+  for (const item of payableInvoices(m)) {
+    const ms = Date.parse(item.entry.createdAt)
+    if (Number.isFinite(ms)) invoiceMsByKind[item.kind] = ms
+  }
+  let latest = null
+  let latestMs = -Infinity
+  for (const kind of ['buy', 'renew', 'reset']) {
+    const slot = intents[kind]
+    if (!slot || slot.status !== 'failed' || !slot.error) continue
+    const ms = Date.parse(slot.updatedAt || slot.createdAt)
+    const when = Number.isFinite(ms) ? ms : -Infinity
+    const supersededAt = invoiceMsByKind[INTENT_INVOICE_KIND[kind]]
+    if (supersededAt !== undefined && when < supersededAt) continue
+    if (!latest || when > latestMs) {
+      latest = slot
+      latestMs = when
+    }
+  }
+  return latest
+}
+
+function renderIntentFeedback(m) {
+  const el = byId('intent-feedback')
+  if (!el) return
+  const msg = activeIntentMessage(m)
+  if (!msg) {
+    el.hidden = true
+    el.textContent = ''
+    el.classList.remove('is-error', 'is-success')
+    return
+  }
+  el.hidden = false
+  el.textContent = msg.text
+  el.classList.toggle('is-error', msg.level === 'error')
+  el.classList.toggle('is-success', msg.level === 'success')
+}
+
+function renderIntentControls(m) {
+  const intents = (m && m.intents) || {}
+  const anyInFlight =
+    submittingIntent ||
+    ['buy', 'renew', 'reset'].some(
+      (k) =>
+        intents[k] &&
+        (intents[k].status === 'pending' || intents[k].status === 'processing'),
+    )
+  const canRenewOrReset = Boolean(
+    m && m.configured && !(m.subscription && m.subscription.keyUnknown),
+  )
+
+  const buyBtn = byId('btn-intent-buy')
+  if (buyBtn) buyBtn.disabled = anyInFlight
+  const manageBuyBtn = byId('btn-manage-buy')
+  if (manageBuyBtn) manageBuyBtn.disabled = anyInFlight
+  const renewBtn = byId('btn-intent-renew')
+  if (renewBtn) renewBtn.disabled = anyInFlight || !canRenewOrReset
+  const renewSelect = byId('renew-duration-select')
+  if (renewSelect) renewSelect.disabled = anyInFlight || !canRenewOrReset
+  const resetBtn = byId('btn-intent-reset')
+  if (resetBtn) resetBtn.disabled = anyInFlight || !canRenewOrReset
 }
 
 function renderNotices(m) {
@@ -515,6 +1227,8 @@ function render() {
       ? 'The TunnelSats service did not answer. The values below may be out of date; retrying.'
       : ''
   }
+  renderIntentFeedback(model)
+  renderIntentControls(model)
   if (!model) return
   const setup = byId('view-setup')
   const overview = byId('view-overview')
@@ -526,15 +1240,38 @@ function render() {
   )
   if (model.version) setText('footer-version', `v${model.version}`)
   renderPlans(model)
+  renderInvoicePanel(model)
   renderNotices(model)
   renderActions(model)
   if (model.configured) renderOverview(model)
 }
 
 // ─────────────────────────────────────────────
-// Data
+// Data & Intent Bridge
 // ─────────────────────────────────────────────
+function getCsrfToken() {
+  if (typeof document.querySelector === 'function') {
+    const meta = document.querySelector('meta[name="csrf-token"]')
+    if (meta && typeof meta.getAttribute === 'function') {
+      return meta.getAttribute('content') || ''
+    }
+  }
+  return ''
+}
+
+function hasActiveAsyncWork(m) {
+  if (!m) return false
+  if (activePayableInvoice(m)) return true
+  const intents = m.intents || {}
+  return ['buy', 'renew', 'reset'].some(
+    (k) =>
+      intents[k] &&
+      (intents[k].status === 'pending' || intents[k].status === 'processing'),
+  )
+}
+
 async function refresh() {
+  lastPollAt = Date.now()
   try {
     const response = await fetch(DASHBOARD_URL, {
       cache: 'no-store',
@@ -543,11 +1280,90 @@ async function refresh() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     model = await response.json()
     loadFailed = false
+    if (activePayableInvoice(model)) {
+      localIntentFeedback = null
+    }
   } catch (error) {
     console.error('Failed to load the dashboard state:', error)
     loadFailed = true
   }
   render()
+}
+
+async function submitIntent(actionKey) {
+  if (submittingIntent) return
+  let payload = null
+  if (actionKey === 'buy') {
+    const serverSelect = byId('buy-server-select')
+    const durationSelect = byId('buy-duration-select')
+    payload = {
+      kind: 'buy',
+      serverId: (serverSelect && serverSelect.value) || 'eu-de',
+      duration:
+        (durationSelect && durationSelect.value) || selectedBuyDuration || '3m',
+    }
+  } else if (actionKey === 'buy-manage') {
+    const serverSelect = byId('manage-buy-server-select')
+    const durationSelect = byId('manage-buy-duration-select')
+    payload = {
+      kind: 'buy',
+      serverId: (serverSelect && serverSelect.value) || 'eu-de',
+      duration: (durationSelect && durationSelect.value) || '3m',
+    }
+  } else if (actionKey === 'renew') {
+    const durationSelect = byId('renew-duration-select')
+    payload = {
+      kind: 'renew',
+      duration: (durationSelect && durationSelect.value) || '3m',
+    }
+  } else if (actionKey === 'reset') {
+    payload = { kind: 'reset' }
+  } else {
+    return
+  }
+
+  submittingIntent = true
+  localIntentFeedback = {
+    level: 'info',
+    text: 'Submitting request to TunnelSats…',
+  }
+  render()
+
+  try {
+    const response = await fetch(INTENTS_URL, {
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': getCsrfToken(),
+      },
+      body: JSON.stringify(payload),
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      localIntentFeedback = {
+        level: 'error',
+        text: data.error || `Request failed (HTTP ${response.status})`,
+      }
+      submittingIntent = false
+      render()
+      return
+    }
+    localIntentFeedback = {
+      level: 'info',
+      text: 'Request accepted; preparing the invoice and raising the Pay Invoice task…',
+    }
+  } catch (error) {
+    console.error('Intent submission failed:', error)
+    localIntentFeedback = {
+      level: 'error',
+      text: 'Could not reach the TunnelSats service to submit the request.',
+    }
+  } finally {
+    submittingIntent = false
+  }
+  await refresh()
 }
 
 // ─────────────────────────────────────────────
@@ -606,6 +1422,27 @@ function bindEvents() {
       copyText(copier.getAttribute('data-copy'), copier)
       return
     }
+    const intentBtn = target.closest('[data-submit-intent]')
+    if (intentBtn && !intentBtn.disabled) {
+      submitIntent(intentBtn.getAttribute('data-submit-intent'))
+      return
+    }
+    const invoiceSwitch = target.closest('[data-invoice-kind]')
+    if (invoiceSwitch) {
+      selectInvoice(invoiceSwitch.getAttribute('data-invoice-kind'))
+      return
+    }
+    const planCard = target.closest('[data-plan-duration]')
+    if (planCard) {
+      const dur = planCard.getAttribute('data-plan-duration')
+      if (dur) {
+        selectedBuyDuration = dur
+        const select = byId('buy-duration-select')
+        if (select) select.value = dur
+        renderPlans(model)
+      }
+      return
+    }
     // Light dismiss: .app-modal fills the viewport around .modal-dialog-inner,
     // so a click on the backdrop targets the <dialog> element directly.
     if (target.tagName === 'DIALOG' && target.open) {
@@ -627,8 +1464,12 @@ function init() {
   render()
   refresh()
   setInterval(() => {
-    if (!document.hidden) refresh()
-  }, POLL_MS)
+    if (document.hidden) return
+    const interval = hasActiveAsyncWork(model) ? FAST_POLL_MS : POLL_MS
+    if (Date.now() - lastPollAt >= interval) {
+      refresh()
+    }
+  }, FAST_POLL_MS)
   if (!countdownTimer) countdownTimer = setInterval(renderCountdown, 30000)
 }
 

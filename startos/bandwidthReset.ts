@@ -8,7 +8,11 @@
  * instead of requesting another.
  */
 import type { BandwidthResetOrder, ResetState } from './apiClient'
-import { runPaymentExclusive, recordThenRaise } from './settlement'
+import {
+  NothingToResumeError,
+  runPaymentExclusive,
+  recordThenRaise,
+} from './settlement'
 import type { TargetNode } from './settlement'
 
 /** The fields of meta.pendingReset this module reads. */
@@ -109,6 +113,7 @@ function hasExpired(pending: PendingReset, now: Date): boolean {
 export function runBandwidthReset(
   publicKey: string,
   ops: ResetOps,
+  options: { reuseOnly?: boolean } = {},
 ): Promise<ResetRunResult> {
   return runPaymentExclusive(async () => {
     const current = await ops.readCurrent()
@@ -154,6 +159,9 @@ export function runBandwidthReset(
       }
     }
 
+    // A dashboard request resumed after a restart (see
+    // PurchaseInput.reuseOnly) never reserves another monthly reset.
+    if (options.reuseOnly) throw new NothingToResumeError()
     const order = await ops.requestReset()
     await recordThenRaise('reset', order.paymentHash, {
       readCurrent: ops.readCurrent,

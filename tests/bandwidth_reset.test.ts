@@ -16,7 +16,7 @@ import {
   type PendingReset,
   type ResetOps,
 } from '../startos/bandwidthReset'
-import { payTaskReplayId } from '../startos/settlement'
+import { NothingToResumeError, payTaskReplayId } from '../startos/settlement'
 
 const HASH = 'b'.repeat(64)
 const INVOICE =
@@ -386,6 +386,30 @@ test('runBandwidthReset reuses an unpaid invoice in its final minute before expi
   const result = await runBandwidthReset(KEY, f.ops)
   assert.deepEqual(result, { kind: 'reused', pending: finalMinute })
   assert.equal(f.requests(), 0)
+})
+
+test('runBandwidthReset reuseOnly returns the recorded invoice or paid state but never requests', async () => {
+  const reuse = fakeOps({ pending: PENDING, status: 'unpaid' })
+  assert.deepEqual(
+    await runBandwidthReset(KEY, reuse.ops, { reuseOnly: true }),
+    { kind: 'reused', pending: PENDING },
+  )
+  const paid = fakeOps({ pending: PENDING, status: 'paid' })
+  assert.equal(
+    (await runBandwidthReset(KEY, paid.ops, { reuseOnly: true })).kind,
+    'already-paid',
+  )
+  for (const f of [
+    fakeOps({}),
+    fakeOps({ pending: PENDING, status: 'expired' }),
+  ]) {
+    await assert.rejects(
+      runBandwidthReset(KEY, f.ops, { reuseOnly: true }),
+      NothingToResumeError,
+    )
+    assert.equal(f.requests(), 0)
+    assert.equal(f.raised.length, 0)
+  }
 })
 
 for (const status of ['processing', 'paid'] as const) {

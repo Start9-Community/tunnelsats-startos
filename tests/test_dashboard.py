@@ -1,8 +1,10 @@
-"""Dashboard read model (GET /api/dashboard).
+"""Dashboard read model (GET /api/dashboard) and intent bridge (POST /api/intents).
 
 The dashboard is reachable from the LAN without operator authentication, so
 the read model is an explicit allow-list: it must never carry a private key,
-an invoice, the WireGuard configuration or any other secret. These tests run
+a payment hash, the WireGuard configuration or any other secret. Only an
+unpaid, non-expired BOLT11 invoice is exposed so the operator can scan or
+copy the exact invoice raised on the Lightning node. These tests run
 get_dashboard and the real HTTP handler against real state files in a
 temporary directory.
 """
@@ -23,7 +25,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import bridge
 
 # Any key that looks like it could hold secret material fails the test.
-FORBIDDEN_KEY_RE = re.compile(r"private|secret|preshared|psk|invoice|password|macaroon|token|paymenthash",
+FORBIDDEN_KEY_RE = re.compile(r"private|secret|preshared|psk|password|macaroon|token|paymenthash",
                               re.IGNORECASE)
 
 ORDER_HASH = "a" * 64
@@ -62,14 +64,23 @@ class DashboardStateTestBase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         d = self._tmp.name
-        self._names = ("CONFIG_PATH", "APP_CONFIG_PATH", "META_FILE_PATH", "HANDOFF_FILE_PATH",
-                       "NOTICES_FILE_PATH")
+        self._names = (
+            "CONFIG_PATH",
+            "APP_CONFIG_PATH",
+            "META_FILE_PATH",
+            "HANDOFF_FILE_PATH",
+            "NOTICES_FILE_PATH",
+            "INTENTS_FILE_PATH",
+            "INTENT_RESULTS_FILE_PATH",
+        )
         self._orig = {name: getattr(bridge, name) for name in self._names}
         bridge.CONFIG_PATH = os.path.join(d, "tunnelsatsv3.conf")
         bridge.APP_CONFIG_PATH = os.path.join(d, "config.json")
         bridge.META_FILE_PATH = os.path.join(d, "tunnelsats-meta.json")
         bridge.HANDOFF_FILE_PATH = os.path.join(d, "vpn-handoff.json")
         bridge.NOTICES_FILE_PATH = os.path.join(d, "subscription-notices.json")
+        bridge.INTENTS_FILE_PATH = os.path.join(d, "dashboard-intents.json")
+        bridge.INTENT_RESULTS_FILE_PATH = os.path.join(d, "dashboard-intent-results.json")
         bridge._pubkey_cache = None
         bridge._enabled_cache = None
         bridge._enabled_cache_mtime = 0
@@ -133,7 +144,7 @@ class TestDashboardReadModel(DashboardStateTestBase):
             "pendingOrder": {
                 "paymentHash": ORDER_HASH, "orderId": "order-123", "privateKey": order_priv,
                 "publicKey": order_pub, "targetNode": "cln", "serverId": "eu-de",
-                "createdAt": self.iso(self.now), "invoice": ORDER_INVOICE,
+                "duration": 3, "createdAt": self.iso(self.now), "invoice": ORDER_INVOICE,
             },
             "pendingRenewal": {
                 "paymentHash": RENEW_HASH, "renewalId": "renew-456",
@@ -185,20 +196,27 @@ class TestDashboardReadModel(DashboardStateTestBase):
         self.assertEqual(model["plans"], bridge.PLAN_PRICES_USD)
         self.assertEqual(model["bandwidth"], {"usedGb": 42.5, "limitGb": 100})
         self.assertEqual(model["pending"]["order"], {
-            "targetNode": "cln", "serverId": "eu-de", "createdAt": self.iso(self.now),
+            "targetNode": "cln", "serverId": "eu-de", "duration": "3m",
+            "createdAt": self.iso(self.now),
+            "expiresAt": self.iso(self.now + timedelta(hours=1)),
+            "amountSats": 25000,
             "lastError": None, "nextAttemptAt": None, "paymentReceived": False,
+            "invoice": ORDER_INVOICE,
         })
         self.assertEqual(model["pending"]["renewal"]["targetNode"], "eclair")
         self.assertEqual(model["pending"]["renewal"]["lastError"],
                          "HTTP 503 from the TunnelSats API: unavailable")
         self.assertFalse(model["pending"]["renewal"]["paymentReceived"])
+        self.assertIsNone(model["pending"]["renewal"]["invoice"])
         self.assertEqual(model["pending"]["reset"]["amountSats"], 1500)
         self.assertTrue(model["pending"]["reset"]["paymentReceived"])
+        self.assertIsNone(model["pending"]["reset"]["invoice"])
         self.assertEqual(
             model["pending"]["reset"]["lastError"],
             "The payment was received, but the bandwidth reset failed. "
             "Contact TunnelSats support with the payment hash from the Reset Bandwidth action.",
         )
+        self.assertEqual(model["intents"], {"buy": None, "renew": None, "reset": None})
         self.assertEqual(model["handoff"], {"activeTarget": "eclair", "pendingOff": ["lnd"], "unraised": []})
         self.assertEqual(model["notices"], {"sent": ["7d"], "unknownKey": False})
 
@@ -208,7 +226,10 @@ class TestDashboardReadModel(DashboardStateTestBase):
 
         self.assertEqual(forbidden_keys(model), [])
         body = json.dumps(model)
-        for secret in (s["priv"], s["order_priv"], PSK, s["conf"], ORDER_INVOICE, RESET_INVOICE,
+        # ORDER_INVOICE is unpaid and non-expired so it is exposed on pending.order.invoice;
+        # RESET_INVOICE has paymentReceived=True so it is omitted.
+        self.assertEqual(model["pending"]["order"]["invoice"], ORDER_INVOICE)
+        for secret in (s["priv"], s["order_priv"], PSK, s["conf"], RESET_INVOICE,
                        ORDER_HASH, RENEW_HASH, RESET_HASH, "order-123", "renew-456", "reset-789"):
             self.assertNotIn(secret, body)
         # Public keys the operator does not need (an unpaid order's, the
@@ -216,6 +237,48 @@ class TestDashboardReadModel(DashboardStateTestBase):
         self.assertNotIn(s["order_pub"], body)
         self.assertNotIn("payTasksToClear", body)
         self.assertNotIn("handedOutKeys", body)
+
+    def test_payable_invoice_omitted_when_paid_expired_or_malformed(self):
+        order_priv, order_pub = new_keypair()
+        # 1. Paid invoice is omitted
+        self.write_json(bridge.META_FILE_PATH, {
+            "pendingOrder": {
+                "paymentHash": ORDER_HASH, "orderId": "o", "privateKey": order_priv,
+                "publicKey": order_pub, "targetNode": "lnd", "serverId": "eu-de",
+                "createdAt": self.iso(self.now), "invoice": ORDER_INVOICE,
+                "paymentReceivedFor": ORDER_HASH,
+            },
+        })
+        model = bridge.get_dashboard()
+        self.assertTrue(model["pending"]["order"]["paymentReceived"])
+        self.assertIsNone(model["pending"]["order"]["invoice"])
+        self.assertNotIn(ORDER_INVOICE, json.dumps(model))
+
+        # 2. Expired invoice is omitted
+        self.write_json(bridge.META_FILE_PATH, {
+            "pendingOrder": {
+                "paymentHash": ORDER_HASH, "orderId": "o", "privateKey": order_priv,
+                "publicKey": order_pub, "targetNode": "lnd", "serverId": "eu-de",
+                "createdAt": self.iso(self.now - timedelta(hours=2)),
+                "expiresAt": self.iso(self.now - timedelta(minutes=1)),
+                "invoice": ORDER_INVOICE,
+            },
+        })
+        model = bridge.get_dashboard()
+        self.assertFalse(model["pending"]["order"]["paymentReceived"])
+        self.assertIsNone(model["pending"]["order"]["invoice"])
+        self.assertNotIn(ORDER_INVOICE, json.dumps(model))
+
+        # 3. Malformed / non-BOLT11 invoice is rejected
+        self.write_json(bridge.META_FILE_PATH, {
+            "pendingOrder": {
+                "paymentHash": ORDER_HASH, "orderId": "o", "privateKey": order_priv,
+                "publicKey": order_pub, "targetNode": "lnd", "serverId": "eu-de",
+                "createdAt": self.iso(self.now), "invoice": "javascript:alert(1)",
+            },
+        })
+        model = bridge.get_dashboard()
+        self.assertIsNone(model["pending"]["order"]["invoice"])
 
     def test_imported_ipv6_endpoint_extracts_full_address(self):
         priv, _ = new_keypair()
@@ -238,8 +301,8 @@ class TestDashboardReadModel(DashboardStateTestBase):
 
     def test_forbidden_key_check_catches_a_leak(self):
         # Guards the guard: a nested secret-like key is reported.
-        leaked = {"pending": {"order": {"privateKey": "x"}}, "list": [{"Invoice": "y"}]}
-        self.assertEqual(forbidden_keys(leaked), ["$.pending.order.privateKey", "$.list[0].Invoice"])
+        leaked = {"pending": {"order": {"privateKey": "x"}}, "list": [{"paymentHash": "y"}]}
+        self.assertEqual(forbidden_keys(leaked), ["$.pending.order.privateKey", "$.list[0].paymentHash"])
 
     def test_unconfigured_with_pending_order(self):
         order_priv, order_pub = new_keypair()
@@ -477,6 +540,219 @@ class TestDashboardEndpoint(DashboardStateTestBase):
                 self.assertEqual(status, 404)
                 self.assert_security_headers(headers)
 
+    def test_post_intents_csrf_and_validation(self):
+        self.configure("lnd")
+        csrf_headers = {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": bridge.get_csrf_token(),
+        }
+        # Missing CSRF token -> 403
+        status, headers, _ = self.post(
+            "/api/intents",
+            body=b'{"kind":"reset"}',
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(status, 403)
+        self.assert_security_headers(headers)
+
+        # Arbitrary extra keys, bad kind, bad serverId, bad duration -> 400
+        for bad_payload in (
+            {"kind": "unknown"},
+            {"kind": "buy", "serverId": "eu-de", "duration": "3m", "privateKey": "leak"},
+            {"kind": "buy", "serverId": "../evil", "duration": "3m"},
+            {"kind": "buy", "serverId": "eu-de", "duration": "99m"},
+            {"kind": "renew", "duration": "3m", "extra": 1},
+            {"kind": "reset", "duration": "1m"},
+        ):
+            with self.subTest(payload=bad_payload):
+                status, headers, body = self.post(
+                    "/api/intents",
+                    body=json.dumps(bad_payload).encode(),
+                    headers=csrf_headers,
+                )
+                self.assertEqual(status, 400)
+                self.assert_security_headers(headers)
+                self.assertIn("error", json.loads(body))
+
+    def test_post_intents_requires_configured_key_for_renew_and_reset(self):
+        csrf_headers = {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": bridge.get_csrf_token(),
+        }
+        for payload in ({"kind": "renew", "duration": "3m"}, {"kind": "reset"}):
+            with self.subTest(payload=payload):
+                status, _, body = self.post(
+                    "/api/intents",
+                    body=json.dumps(payload).encode(),
+                    headers=csrf_headers,
+                )
+                self.assertEqual(status, 409)
+                self.assertIn("before a WireGuard configuration is installed", json.loads(body)["error"])
+
+    def test_post_intents_queues_even_with_a_payable_invoice(self):
+        """Reuse, conflict or replacement is decided by the shared action core
+        in the runner; the bridge queues the request, so an identical
+        request also re-raises a Pay Invoice task that failed to raise."""
+        _, pub, _ = self.configure("lnd")
+        order_priv, order_pub = new_keypair()
+        self.write_json(bridge.META_FILE_PATH, {
+            "publicKey": pub,
+            "pendingOrder": {
+                "paymentHash": ORDER_HASH, "orderId": "order-1", "privateKey": order_priv,
+                "publicKey": order_pub, "targetNode": "lnd", "serverId": "eu-de",
+                "duration": 3, "createdAt": self.iso(self.now), "invoice": ORDER_INVOICE,
+            },
+        })
+        csrf_headers = {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": bridge.get_csrf_token(),
+        }
+        status, headers, body = self.post(
+            "/api/intents",
+            body=json.dumps({"kind": "buy", "serverId": "eu-de", "duration": "3m"}).encode(),
+            headers=csrf_headers,
+        )
+        self.assertEqual(status, 202)
+        self.assert_security_headers(headers)
+        data = json.loads(body)
+        self.assertEqual(data["status"], "accepted")
+        self.assertEqual(forbidden_keys(data), [])
+        with open(bridge.INTENTS_FILE_PATH) as f:
+            self.assertEqual(json.load(f)["buy"]["serverId"], "eu-de")
+        # The payable invoice itself stays visible for scan/copy.
+        _, _, dash_body = self.get("/api/dashboard")
+        self.assertEqual(json.loads(dash_body)["pending"]["order"]["invoice"], ORDER_INVOICE)
+
+    def test_post_intents_writes_slot_and_rate_limits_repeats(self):
+        _, pub, _ = self.configure("lnd")
+        csrf_headers = {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": bridge.get_csrf_token(),
+        }
+        status, headers, body = self.post(
+            "/api/intents",
+            body=json.dumps({"kind": "buy", "serverId": "eu-de", "duration": "3m"}).encode(),
+            headers=csrf_headers,
+        )
+        self.assertEqual(status, 202)
+        self.assert_security_headers(headers)
+        resp = json.loads(body)
+        self.assertEqual(resp["status"], "accepted")
+        intent_id = resp["intent"]["id"]
+        self.assertEqual(resp["intent"]["status"], "pending")
+
+        # Immediate repeat of 'buy' is rejected with 429
+        status2, _, body2 = self.post(
+            "/api/intents",
+            body=json.dumps({"kind": "buy", "serverId": "eu-de", "duration": "3m"}).encode(),
+            headers=csrf_headers,
+        )
+        self.assertEqual(status2, 429)
+        self.assertIn("retryAfterSeconds", json.loads(body2))
+
+        # Simulate TypeScript intentRunner completing the intent
+        self.write_json(bridge.INTENT_RESULTS_FILE_PATH, {
+            "buy": {
+                "id": intent_id,
+                "kind": "buy",
+                "status": "succeeded",
+                "createdAt": resp["intent"]["createdAt"],
+                "updatedAt": self.iso(self.now + timedelta(seconds=2)),
+            }
+        })
+        _, _, dash_body = self.get("/api/dashboard")
+        dash = json.loads(dash_body)
+        self.assertEqual(dash["intents"]["buy"]["id"], intent_id)
+        self.assertEqual(dash["intents"]["buy"]["status"], "succeeded")
+        self.assertEqual(forbidden_keys(dash), [])
+
+        # Repeat within 30s is still rejected by per-kind cooldown even after completion
+        status3, _, _ = self.post(
+            "/api/intents",
+            body=json.dumps({"kind": "buy", "serverId": "us-east", "duration": "6m"}).encode(),
+            headers=csrf_headers,
+        )
+        self.assertEqual(status3, 429)
+
+    def test_submit_intent_hourly_cap_and_ttl_expiry(self):
+        self.configure("lnd")
+        base_t = self.now - timedelta(minutes=30)
+        for i in range(bridge.INTENT_HOURLY_CAP):
+            t = base_t + timedelta(minutes=i * 2)
+            code, res = bridge.submit_dashboard_intent(
+                {"kind": "reset"},
+                now=t,
+            )
+            self.assertEqual(code, 202)
+            # Mark succeeded so the next submission 2 minutes later is not blocked as in-flight
+            self.write_json(bridge.INTENT_RESULTS_FILE_PATH, {
+                "reset": {
+                    "id": res["intent"]["id"],
+                    "kind": "reset",
+                    "status": "succeeded",
+                    "createdAt": res["intent"]["createdAt"],
+                    "updatedAt": self.iso(t + timedelta(seconds=1)),
+                }
+            })
+
+        # 6th submission within the hour hits the 5/hour cap
+        code, res = bridge.submit_dashboard_intent(
+            {"kind": "renew", "duration": "1m"},
+            now=base_t + timedelta(minutes=20),
+        )
+        self.assertEqual(code, 429)
+        self.assertIn("Too many payment requests", res["error"])
+
+        # An unanswered intent older than INTENT_TTL (120s) is reported as failed in _intents_summary
+        self.write_json(bridge.INTENTS_FILE_PATH, {
+            "buy": {
+                "id": "buy-stale-1",
+                "kind": "buy",
+                "createdAt": self.iso(self.now - timedelta(seconds=150)),
+                "serverId": "eu-de",
+                "duration": "1m",
+            }
+        })
+        summary = bridge._intents_summary(now=self.now)
+        self.assertEqual(summary["buy"]["status"], "failed")
+        self.assertIn("timed out", summary["buy"]["error"])
+
+    def test_buy_slot_carries_configured_node_and_wire_format(self):
+        self.write_json(bridge.APP_CONFIG_PATH, {"enabled": False, "target-node": "cln"})
+        code, res = bridge.submit_dashboard_intent(
+            {"kind": "buy", "serverId": "eu-ch", "duration": "6m"}, now=self.now,
+        )
+        self.assertEqual(code, 202)
+        with open(bridge.INTENTS_FILE_PATH) as f:
+            slot = json.load(f)["buy"]
+        # The exact shape startos/fileModels/dashboardIntents.ts parses.
+        self.assertEqual(slot["kind"], "buy")
+        self.assertEqual(slot["serverId"], "eu-ch")
+        self.assertEqual(slot["duration"], "6m")
+        self.assertEqual(slot["targetNode"], "cln")
+        self.assertEqual(bridge._intents_summary(now=self.now)["buy"]["targetNode"], "cln")
+
+        # Durations stay strict on the wire: whole months are not accepted.
+        code, _ = bridge.submit_dashboard_intent(
+            {"kind": "renew", "duration": 3}, now=self.now,
+        )
+        self.assertEqual(code, 400)
+
+    def test_processing_intent_is_not_timed_out_by_the_bridge(self):
+        """Only the runner records the outcome of a request it picked up (it
+        re-runs a processing slot after a restart), so the bridge never
+        reports a processing request as failed while its action may run."""
+        created = self.now - bridge.INTENT_TTL - timedelta(hours=1)
+        self.write_json(bridge.INTENTS_FILE_PATH, {
+            "reset": {"id": "reset-1", "kind": "reset", "createdAt": self.iso(created)},
+        })
+        self.write_json(bridge.INTENT_RESULTS_FILE_PATH, {
+            "reset": {
+                "id": "reset-1", "kind": "reset", "status": "processing",
+                "createdAt": self.iso(created), "updatedAt": self.iso(created),
+            },
+        })
+        self.assertEqual(bridge._intents_summary(now=self.now)["reset"]["status"], "processing")
 
 if __name__ == "__main__":
     unittest.main()

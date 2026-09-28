@@ -15,6 +15,7 @@ export interface SubscriptionOrder {
   paymentHash: string
   amountSats: number
   orderId: string
+  expiresAt?: string
 }
 
 export interface OrderStatus {
@@ -47,6 +48,8 @@ export interface RenewalOrder {
   oldExpiry: string
   newExpiry: string
   renewalId: string
+  amountSats?: number
+  expiresAt?: string
 }
 
 export interface BandwidthResetOrder {
@@ -431,6 +434,23 @@ function words5ToHex32(words: readonly number[]): string | null {
     }
   }
   return hex.length === 64 ? hex : null
+}
+
+/**
+ * Extracts the whole-satoshi amount encoded in a BOLT11 invoice HRP, or
+ * undefined if the invoice has no valid whole-satoshi HRP amount.
+ */
+export function bolt11AmountSats(invoice: string): number | undefined {
+  if (typeof invoice !== 'string' || invoice.length > 4000) return undefined
+  const lower = invoice.toLowerCase()
+  const sep = lower.lastIndexOf('1')
+  if (sep < 4) return undefined
+  const m = lower.slice(0, sep).match(BOLT11_HRP)
+  if (!m) return undefined
+  const msat = hrpAmountMsat(m[1], m[2])
+  if (msat === null || msat % 1000n !== 0n) return undefined
+  const sats = Number(msat / 1000n)
+  return Number.isSafeInteger(sats) && sats > 0 ? sats : undefined
 }
 
 /**

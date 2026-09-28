@@ -345,5 +345,54 @@ class TestHTTPHandler(unittest.TestCase):
         res = json.loads(wfile.getvalue().decode("utf-8"))
         self.assertEqual(res.get("csrf_token"), bridge.get_csrf_token())
 
+    @patch('bridge.submit_dashboard_intent')
+    @patch('bridge.get_default_gateway')
+    def test_do_POST_api_intents_body_guards(self, mock_get_gw, mock_submit):
+        mock_get_gw.return_value = "172.18.0.1"
+        mock_submit.return_value = (202, {"status": "accepted"})
+
+        # Oversized body rejected with 400
+        handler_big = bridge.DashboardHTTPRequestHandler.__new__(bridge.DashboardHTTPRequestHandler)
+        handler_big.command = "POST"
+        handler_big.client_address = ("127.0.0.1", 12345)
+        handler_big.path = "/api/intents"
+        handler_big.headers = DummyHeaders({
+            "Host": "localhost",
+            "Content-Type": "application/json",
+            "Content-Length": str(bridge.INTENT_MAX_BODY_BYTES + 1),
+            "X-CSRF-Token": bridge.get_csrf_token(),
+        })
+        handler_big.rfile = BytesIO(b"{}")
+        handler_big.wfile = BytesIO()
+        handler_big.send_response = MagicMock()
+        handler_big.send_header = MagicMock()
+        handler_big.end_headers = MagicMock()
+        handler_big.send_error = MagicMock()
+        bridge.DashboardHTTPRequestHandler.do_POST(handler_big)
+        handler_big.send_response.assert_called_once_with(400)
+        mock_submit.assert_not_called()
+
+        # Valid JSON body calls submit_dashboard_intent
+        valid_body = b'{"kind":"buy","serverId":"eu-de","duration":"3m"}'
+        handler_ok = bridge.DashboardHTTPRequestHandler.__new__(bridge.DashboardHTTPRequestHandler)
+        handler_ok.command = "POST"
+        handler_ok.client_address = ("127.0.0.1", 12345)
+        handler_ok.path = "/api/intents"
+        handler_ok.headers = DummyHeaders({
+            "Host": "localhost",
+            "Content-Type": "application/json",
+            "Content-Length": str(len(valid_body)),
+            "X-CSRF-Token": bridge.get_csrf_token(),
+        })
+        handler_ok.rfile = BytesIO(valid_body)
+        handler_ok.wfile = BytesIO()
+        handler_ok.send_response = MagicMock()
+        handler_ok.send_header = MagicMock()
+        handler_ok.end_headers = MagicMock()
+        handler_ok.send_error = MagicMock()
+        bridge.DashboardHTTPRequestHandler.do_POST(handler_ok)
+        handler_ok.send_response.assert_called_once_with(202)
+        mock_submit.assert_called_once_with({"kind": "buy", "serverId": "eu-de", "duration": "3m"})
+
 if __name__ == '__main__':
     unittest.main()

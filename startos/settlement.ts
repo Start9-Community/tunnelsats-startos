@@ -96,6 +96,19 @@ export interface PaymentRecordOps {
 let paymentRecordTail: Promise<unknown> = Promise.resolve()
 
 /**
+ * A dashboard request resumed after StartOS restarted mid-request (reuseOnly)
+ * whose recorded invoice is gone: it is never given a new invoice.
+ */
+export class NothingToResumeError extends Error {
+  constructor() {
+    super(
+      'StartOS restarted while this request was being processed, and no payable invoice from it remains. Request it again.',
+    )
+    this.name = 'NothingToResumeError'
+  }
+}
+
+/**
  * Runs `job` after every earlier payment job has finished, one at a time.
  * All package procedures share one JS runtime, like the handoff queue
  * (createHandoffQueue). A job must not enqueue another one and wait for it:

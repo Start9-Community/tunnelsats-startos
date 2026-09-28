@@ -25,6 +25,10 @@ META_FILE_PATH = os.path.join(DATA_DIR, "tunnelsats-meta.json")
 # dashboard read model (get_dashboard).
 HANDOFF_FILE_PATH = os.path.join(DATA_DIR, "vpn-handoff.json")
 NOTICES_FILE_PATH = os.path.join(DATA_DIR, "subscription-notices.json")
+# Written ONLY here (POST /api/intents); read by the TypeScript intentRunner.
+INTENTS_FILE_PATH = os.path.join(DATA_DIR, "dashboard-intents.json")
+# Written ONLY by the TypeScript intentRunner; read here by get_dashboard.
+INTENT_RESULTS_FILE_PATH = os.path.join(DATA_DIR, "dashboard-intent-results.json")
 TUNNELSATS_API_URL = "https://tunnelsats.com/api/public/v1"
 # Fields that only hold for the key they were confirmed for (see lazy_sync).
 CONFIRMED_META_FIELDS = ("expiresAt", "expirySource", "lastSync", "syncSuccess", "bandwidth_used_gb")
@@ -1474,8 +1478,40 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404, "File not found")
 
+    def _send_json(self, status_code, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         if not self.is_trusted_request():
+            return
+        path_only = self.path.partition('?')[0].partition('#')[0]
+        if path_only == "/api/intents":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._send_json(400, {"error": "Invalid Content-Length header"})
+                return
+            if length <= 0 or length > INTENT_MAX_BODY_BYTES:
+                self._send_json(400, {"error": f"Request body must be between 1 and {INTENT_MAX_BODY_BYTES} bytes"})
+                return
+            try:
+                raw_body = self.rfile.read(length)
+                payload = json.loads(raw_body.decode("utf-8"))
+            except (OSError, ValueError):
+                self._send_json(400, {"error": "Invalid JSON body"})
+                return
+            try:
+                status_code, response_body = submit_dashboard_intent(payload)
+            except Exception as e:
+                print(f"Dashboard intent submission failed: {e}", file=sys.stderr)
+                self._send_json(500, {"error": "Could not queue dashboard request"})
+                return
+            self._send_json(status_code, response_body)
             return
         self.send_error(404, "Not found")
 
@@ -1798,13 +1834,15 @@ def get_status():
         "allow_ipv6": is_allow_ipv6(),
     }
 
-# ─── Dashboard read model ────────────────────────────────────────────────────
-# GET /api/dashboard. The dashboard is reachable from the LAN without operator
-# authentication, so it only ever sees what this allow-list copies out of the
-# state files: never a private key, an invoice, the WireGuard configuration or
-# any field not named here. Every value is type-checked and bounded, so a
-# malformed or tampered file cannot pass other data through an allowed name.
-# Money and state changes stay with the StartOS actions; this is read-only.
+# ─── Dashboard read model & intent bridge ────────────────────────────────────
+# GET /api/dashboard and POST /api/intents. The dashboard is reachable from the
+# LAN without operator authentication, so it only ever sees what this allow-list
+# copies out of the state files: never a private key, a payment hash, the
+# WireGuard configuration or any field not named here. Only an unpaid,
+# non-expired BOLT11 invoice is exposed so the operator can scan or copy the
+# exact same invoice raised on the Lightning node. Every value is type-checked
+# and bounded, so a malformed or tampered file cannot pass other data through
+# an allowed name.
 
 DASHBOARD_TEXT_LIMIT = 300
 BANDWIDTH_LIMIT_GB = 100
@@ -1820,12 +1858,42 @@ PLAN_PRICES_USD = [
 ]
 HANDOFF_PACKAGE_IDS = ("lnd", "c-lightning", "eclair")
 NOTICE_KINDS = ("7d", "3d", "lapsed")
+INVOICE_DEFAULT_TTL = timedelta(hours=1)
+INTENT_KINDS = ("buy", "renew", "reset")
+INTENT_DURATIONS = ("1m", "3m", "6m", "12m")
+INTENT_TTL = timedelta(seconds=120)
+INTENT_RATE_LIMIT_WINDOW = timedelta(seconds=30)
+INTENT_HOURLY_WINDOW = timedelta(hours=1)
+INTENT_HOURLY_CAP = 5
+INTENT_MAX_BODY_BYTES = 4096
 _HEX64_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
+_BOLT11_RE = re.compile(r"^ln(?:bcrt|bc|tbs|tb|sb)[0-9a-z]{20,4000}$", re.IGNORECASE)
+_BOLT11_AMOUNT_RE = re.compile(r"^ln(?:bcrt|bc|tbs|tb|sb)(?:(\d+)([munp])?)?1[0-9a-z]{7,}$", re.IGNORECASE)
+_SERVER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{2,32}$")
 _PAID_ERROR_RE = re.compile(
     r"payment was received|renewal is paid|bandwidth reset was applied|"
     r"bandwidth reset failed|claim|Provisioning failed|stored private key",
     re.IGNORECASE,
 )
+
+
+def _bolt11_amount_sats(invoice):
+    """Amount in whole satoshis from a BOLT11 invoice's human-readable part,
+    or None when omitted, sub-satoshi, or unparseable."""
+    if not isinstance(invoice, str):
+        return None
+    m = _BOLT11_AMOUNT_RE.match(invoice.strip())
+    if not m or not m.group(1):
+        return None
+    value = int(m.group(1))
+    unit = (m.group(2) or "").lower()
+    msat_per_unit = {"": 100_000_000_000, "m": 100_000_000, "u": 100_000, "n": 100, "p": 0.1}.get(unit)
+    if msat_per_unit is None:
+        return None
+    msats = round(value * msat_per_unit)
+    if msats <= 0 or msats % 1000 != 0:
+        return None
+    return msats // 1000
 
 
 def _dashboard_text(value, limit=DASHBOARD_TEXT_LIMIT):
@@ -1873,6 +1941,20 @@ def _dashboard_node(value):
     return value if value in TARGET_NODES else None
 
 
+def _dashboard_duration(value):
+    """'1m'..'12m', from the wire format or the whole months TypeScript stores
+    in tunnelsats-meta.json; None for anything else."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and f"{value}m" in INTENT_DURATIONS:
+        return f"{value}m"
+    return value if value in INTENT_DURATIONS else None
+
+
+def _dashboard_server_id(value):
+    return value if isinstance(value, str) and _SERVER_ID_RE.match(value) else None
+
+
 def _read_json_object(path):
     try:
         with open(path, "r") as f:
@@ -1891,19 +1973,26 @@ def get_target_node():
 
 
 # Per pending payment: the fields the dashboard may see, each with its
-# sanitizer. paymentHash, privateKey, publicKey, invoice and the order,
-# renewal and reset IDs are deliberately absent.
+# sanitizer. paymentHash, privateKey, publicKey and the order, renewal and
+# reset IDs are deliberately absent. Only an unpaid, non-expired BOLT11
+# invoice is copied onto summary["invoice"] in _pending_summary().
 _PENDING_SUMMARY_FIELDS = {
     "pendingOrder": {
         "targetNode": _dashboard_node,
         "serverId": _dashboard_short_text,
+        "duration": _dashboard_duration,
         "createdAt": _dashboard_time,
+        "expiresAt": _dashboard_time,
+        "amountSats": _dashboard_amount,
         "lastError": _dashboard_text,
         "nextAttemptAt": _dashboard_time,
     },
     "pendingRenewal": {
         "targetNode": _dashboard_node,
+        "duration": _dashboard_duration,
         "createdAt": _dashboard_time,
+        "expiresAt": _dashboard_time,
+        "amountSats": _dashboard_amount,
         "oldExpiry": _dashboard_time,
         "newExpiry": _dashboard_time,
         "lastError": _dashboard_text,
@@ -1920,9 +2009,9 @@ _PENDING_SUMMARY_FIELDS = {
 }
 
 
-def _pending_summary(meta, key, public_key=None):
+def _pending_summary(meta, key, public_key=None, now=None):
     """A summary of meta[key], or None when no payment is pending there for
-    the current key."""
+    the current key. Exposes `invoice` only while unpaid and not expired."""
     pending = meta.get(key)
     if not isinstance(pending, dict) or not isinstance(pending.get("paymentHash"), str) \
             or not pending["paymentHash"]:
@@ -1932,12 +2021,33 @@ def _pending_summary(meta, key, public_key=None):
             return None
     elif key == "pendingOrder" and public_key is not None and pending.get("publicKey") == public_key:
         return None
+    now = now or datetime.now(timezone.utc)
     summary = {name: clean(pending.get(name)) for name, clean in _PENDING_SUMMARY_FIELDS[key].items()}
     summary["lastError"] = _dashboard_error_text(pending.get("lastError"), pending)
     summary["paymentReceived"] = bool(
         pending.get("paymentReceivedFor") == pending["paymentHash"]
         or (isinstance(pending.get("lastError"), str) and _PAID_ERROR_RE.search(pending["lastError"]))
     )
+    raw_inv = pending.get("invoice")
+    valid_inv = raw_inv.strip().lower() if isinstance(raw_inv, str) and _BOLT11_RE.match(raw_inv.strip()) else None
+    created_dt = _parse_iso(pending.get("createdAt"))
+    expires_dt = _parse_iso(pending.get("expiresAt"))
+    effective_expires_dt = expires_dt or (
+        created_dt + INVOICE_DEFAULT_TTL if created_dt is not None and valid_inv is not None else None
+    )
+    if (
+        valid_inv is not None
+        and not summary["paymentReceived"]
+        and effective_expires_dt is not None
+        and now < effective_expires_dt
+    ):
+        summary["invoice"] = valid_inv
+        if summary.get("expiresAt") is None:
+            summary["expiresAt"] = _iso(effective_expires_dt)
+        if summary.get("amountSats") is None:
+            summary["amountSats"] = _bolt11_amount_sats(valid_inv)
+    else:
+        summary["invoice"] = None
     return summary
 
 
@@ -1974,6 +2084,226 @@ def _notices_summary(public_key):
     }
 
 
+def _intent_slot_summary(kind, req_slot, res_slot, now):
+    if not isinstance(req_slot, dict) or req_slot.get("kind") != kind:
+        return None
+    intent_id = _dashboard_short_text(req_slot.get("id"))
+    created_dt = _parse_iso(req_slot.get("createdAt"))
+    if intent_id is None or created_dt is None:
+        return None
+    created_at = _iso(created_dt)
+    if kind == "buy":
+        server_id = _dashboard_server_id(req_slot.get("serverId"))
+        duration = _dashboard_duration(req_slot.get("duration"))
+        if server_id is None or duration is None:
+            return None
+    elif kind == "renew":
+        server_id = None
+        duration = _dashboard_duration(req_slot.get("duration"))
+        if duration is None:
+            return None
+    else:
+        server_id = None
+        duration = None
+
+    status = "pending"
+    updated_at = created_at
+    error = None
+    if isinstance(res_slot, dict) and res_slot.get("id") == intent_id:
+        res_status = res_slot.get("status")
+        # The statuses startos/intentRunner.ts writes.
+        if res_status in ("processing", "succeeded", "failed"):
+            status = res_status
+            updated_at = _dashboard_time(res_slot.get("updatedAt")) or created_at
+            if status == "failed":
+                error = _dashboard_error_text(res_slot.get("error")) or "The request failed."
+    # The runner refuses intents older than INTENT_TTL, so one it never
+    # picked up has failed. One it picked up stays "processing" until the
+    # runner records the outcome: the runner re-runs a processing slot after
+    # a restart and then records it, so it never stays processing for good.
+    if status == "pending" and now - created_dt >= INTENT_TTL:
+        status = "failed"
+        error = "The dashboard request timed out before StartOS processed it. Please try again."
+
+    summary = {
+        "id": intent_id,
+        "kind": kind,
+        "status": status,
+        "createdAt": created_at,
+        "updatedAt": updated_at,
+        "error": error,
+    }
+    if kind == "buy":
+        summary["serverId"] = server_id
+        summary["duration"] = duration
+        summary["targetNode"] = _dashboard_node(req_slot.get("targetNode"))
+    elif kind == "renew":
+        summary["duration"] = duration
+    return summary
+
+
+def _intents_summary(now=None):
+    """Per-kind intent state merged from dashboard-intents.json (written by
+    bridge.py) and dashboard-intent-results.json (written by TypeScript)."""
+    now = now or datetime.now(timezone.utc)
+    intents_data = _read_json_object(INTENTS_FILE_PATH) or {}
+    results_data = _read_json_object(INTENT_RESULTS_FILE_PATH) or {}
+    return {
+        kind: _intent_slot_summary(kind, intents_data.get(kind), results_data.get(kind), now)
+        for kind in INTENT_KINDS
+    }
+
+
+@contextmanager
+def intents_lock():
+    """Exclusive cross-thread/process lock around dashboard-intents.json."""
+    fd = os.open(INTENTS_FILE_PATH + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _current_configured_pubkey():
+    if not os.path.exists(CONFIG_PATH):
+        return None
+    pubkey = get_wg_pubkey()
+    if pubkey in ("Unknown", "None", "Not available") or not isinstance(pubkey, str):
+        return None
+    return pubkey
+
+
+def submit_dashboard_intent(payload, now=None):
+    """Validates a POST /api/intents request, enforces rate limits, and
+    writes the single-writer dashboard-intents.json slot. Returns
+    (http_status, response_dict)."""
+    if not isinstance(payload, dict):
+        return 400, {"error": "Request body must be a JSON object"}
+    kind = payload.get("kind")
+    if kind not in INTENT_KINDS:
+        return 400, {"error": "Invalid intent kind; expected 'buy', 'renew', or 'reset'"}
+
+    expected_keys = {
+        "buy": {"kind", "serverId", "duration"},
+        "renew": {"kind", "duration"},
+        "reset": {"kind"},
+    }[kind]
+    if set(payload.keys()) != expected_keys:
+        return 400, {"error": f"Unexpected or missing fields for '{kind}' intent"}
+
+    server_id = None
+    duration = None
+    if kind in ("buy", "renew"):
+        # Strict wire format: exactly one of INTENT_DURATIONS.
+        duration = payload.get("duration") if payload.get("duration") in INTENT_DURATIONS else None
+        if duration is None:
+            return 400, {"error": "Invalid duration; expected '1m', '3m', '6m', or '12m'"}
+    if kind == "buy":
+        server_id = _dashboard_server_id(payload.get("serverId"))
+        if server_id is None:
+            return 400, {"error": "Invalid serverId"}
+
+    public_key = _current_configured_pubkey()
+    if kind in ("renew", "reset") and public_key is None:
+        action_label = "renew" if kind == "renew" else "reset bandwidth"
+        return 409, {"error": f"Cannot {action_label} before a WireGuard configuration is installed."}
+
+    # Whether a payable invoice of this kind is reused, refused as a
+    # conflicting selection or replaced is decided in one place: the shared
+    # action core the runner calls (keepPayable). Re-submitting an identical
+    # request therefore also raises a Pay Invoice task that failed to raise.
+    now = now or datetime.now(timezone.utc)
+
+    import secrets
+    with intents_lock():
+        intents_data = _read_json_object(INTENTS_FILE_PATH) or {}
+        results_data = _read_json_object(INTENT_RESULTS_FILE_PATH) or {}
+
+        current_slot = _intent_slot_summary(
+            kind, intents_data.get(kind), results_data.get(kind), now
+        )
+        if current_slot is not None and current_slot["status"] in ("pending", "processing"):
+            return 429, {
+                "error": f"A {kind} request is already in progress.",
+                "retryAfterSeconds": 5,
+            }
+
+        raw_history = intents_data.get("history")
+        recent_history = []
+        if isinstance(raw_history, list):
+            for entry in raw_history:
+                if not isinstance(entry, dict):
+                    continue
+                e_id = _dashboard_short_text(entry.get("id"))
+                e_kind = entry.get("kind")
+                e_dt = _parse_iso(entry.get("createdAt"))
+                if e_id and e_kind in INTENT_KINDS and e_dt is not None:
+                    age = now - e_dt
+                    if timedelta(0) <= age < INTENT_HOURLY_WINDOW:
+                        recent_history.append({
+                            "id": e_id,
+                            "kind": e_kind,
+                            "createdAt": _iso(e_dt),
+                            "_dt": e_dt,
+                        })
+
+        for entry in recent_history:
+            if entry["kind"] == kind:
+                elapsed = now - entry["_dt"]
+                if elapsed < INTENT_RATE_LIMIT_WINDOW:
+                    retry_after = max(1, math.ceil((INTENT_RATE_LIMIT_WINDOW - elapsed).total_seconds()))
+                    return 429, {
+                        "error": f"Please wait {retry_after}s before repeating this request.",
+                        "retryAfterSeconds": retry_after,
+                    }
+
+        if len(recent_history) >= INTENT_HOURLY_CAP:
+            oldest_dt = min(entry["_dt"] for entry in recent_history)
+            retry_after = max(1, math.ceil((INTENT_HOURLY_WINDOW - (now - oldest_dt)).total_seconds()))
+            return 429, {
+                "error": "Too many payment requests in the last hour. Please pay the existing invoice or wait before trying again.",
+                "retryAfterSeconds": retry_after,
+            }
+
+        intent_id = f"{kind}-{int(now.timestamp() * 1000)}-{secrets.token_hex(4)}"
+        created_at = _iso(now)
+        new_slot = {
+            "id": intent_id,
+            "kind": kind,
+            "createdAt": created_at,
+        }
+        if kind == "buy":
+            new_slot["serverId"] = server_id
+            new_slot["duration"] = duration
+            # The configured node, as the Buy action defaults to; the runner
+            # raises the Pay Invoice task there.
+            new_slot["targetNode"] = get_target_node()
+        elif kind == "renew":
+            new_slot["duration"] = duration
+
+        clean_history = [
+            {"id": e["id"], "kind": e["kind"], "createdAt": e["createdAt"]}
+            for e in recent_history
+        ]
+        clean_history.append({"id": intent_id, "kind": kind, "createdAt": created_at})
+
+        next_doc = {}
+        for k in INTENT_KINDS:
+            if k == kind:
+                next_doc[k] = new_slot
+            elif isinstance(intents_data.get(k), dict):
+                next_doc[k] = intents_data[k]
+        next_doc["history"] = clean_history
+        atomic_write_json(INTENTS_FILE_PATH, next_doc)
+
+    intent_view = dict(new_slot)
+    intent_view["status"] = "pending"
+    intent_view["updatedAt"] = created_at
+    intent_view["error"] = None
+    return 202, {"status": "accepted", "intent": intent_view}
+
+
 def get_dashboard():
     """The dashboard read model. See the section comment above: an explicit
     allow-list, never a secret."""
@@ -1987,6 +2317,7 @@ def get_dashboard():
     server = status.get("server")
     vpn_ip = status.get("vpn_ip")
     days = status.get("days_remaining")
+    now = datetime.now(timezone.utc)
     return {
         "version": _dashboard_short_text(status.get("version")),
         "enabled": bool(status.get("enabled")),
@@ -2015,10 +2346,11 @@ def get_dashboard():
             "limitGb": BANDWIDTH_LIMIT_GB,
         },
         "pending": {
-            "order": _pending_summary(meta, "pendingOrder", public_key),
-            "renewal": _pending_summary(meta, "pendingRenewal", public_key),
-            "reset": _pending_summary(meta, "pendingReset", public_key),
+            "order": _pending_summary(meta, "pendingOrder", public_key, now=now),
+            "renewal": _pending_summary(meta, "pendingRenewal", public_key, now=now),
+            "reset": _pending_summary(meta, "pendingReset", public_key, now=now),
         },
+        "intents": _intents_summary(now=now),
         "handoff": _handoff_summary(),
         "notices": _notices_summary(public_key),
     }

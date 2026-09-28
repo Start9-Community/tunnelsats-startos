@@ -6,6 +6,8 @@ import { NODE_TITLES } from './vpnHandoff'
 import { runSettlementTick } from './settlement'
 import { tunnelsatsMeta } from './fileModels/tunnelsatsMeta'
 import { subscriptionNotices } from './fileModels/subscriptionNotices'
+import { dashboardIntents } from './fileModels/dashboardIntents'
+import { processDashboardIntents } from './intentRunner'
 import { createNoticeRunner } from './notifications'
 import { noticeInputsFor } from './dependencies'
 
@@ -130,7 +132,24 @@ export const main = sdk.setupMain(async ({ effects }) => {
     }
   }
 
-  // 6. Define daemons and health checks
+  // 6. Watch dashboard-intents.json (written by bridge.py POST /api/intents)
+  // so Buy/Renew/Reset requests from the dashboard run immediately through
+  // the shared action core, with a fallback poll in the settlement health check.
+  let intentsWatcherActive = true
+  effects.onLeaveContext(() => {
+    intentsWatcherActive = false
+  })
+  dashboardIntents.read().onChange(effects, async (intents) => {
+    if (!intentsWatcherActive) return { cancel: true }
+    if (intents) {
+      await processDashboardIntents(effects).catch((e: unknown) =>
+        console.warn(`TunnelSats dashboard intent runner failed: ${String(e)}`),
+      )
+    }
+    return { cancel: !intentsWatcherActive }
+  })
+
+  // 7. Define daemons and health checks
   return sdk.Daemons.of(effects)
     .addDaemon('main', {
       subcontainer,
@@ -235,6 +254,9 @@ export const main = sdk.setupMain(async ({ effects }) => {
         // Buy completes on a package that has no configuration yet.
         trigger: sdk.trigger.cooldownTrigger(20_000),
         fn: async () => {
+          await processDashboardIntents(effects).catch((e) =>
+            console.warn(`TunnelSats dashboard intent check failed: ${e}`),
+          )
           const status = await runSettlementTick({
             settle: () =>
               subcontainer.exec(['python3', '/app/bridge.py', 'settle']),

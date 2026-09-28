@@ -64,6 +64,13 @@
       </header>
 
       <p id="load-error" class="load-error" role="alert" hidden></p>
+      <p
+        id="intent-feedback"
+        class="intent-feedback"
+        role="status"
+        aria-live="polite"
+        hidden
+      ></p>
 
       <!-- Live state from GET /api/dashboard: pending payments, handoff, key and expiry. -->
       <section
@@ -78,6 +85,60 @@
       </section>
 
       <main id="main" class="dashboard-grid">
+        <!-- ══════════ Payable Lightning invoice (D1 dual-path) ══════════ -->
+        <section
+          id="invoice-panel"
+          class="card glass-card span-2 invoice-card"
+          aria-labelledby="invoice-title"
+          aria-live="polite"
+          hidden
+        >
+          <div class="card-header">
+            <h2 id="invoice-title">Lightning invoice ready</h2>
+            <span class="info-label" id="invoice-expiry">…</span>
+          </div>
+          <div
+            id="invoice-switcher"
+            class="invoice-switcher"
+            role="group"
+            aria-label="Payable invoices"
+            hidden
+          ></div>
+          <p class="invoice-framing" id="invoice-framing">…</p>
+          <div class="invoice-body">
+            <div
+              id="invoice-qr"
+              class="invoice-qr"
+              role="img"
+              aria-label="Lightning invoice QR code"
+            ></div>
+            <div class="invoice-details">
+              <div class="invoice-amount-row">
+                <span class="metric-label">Invoice amount</span>
+                <span class="invoice-amount" id="invoice-amount">…</span>
+              </div>
+              <div class="prop-item">
+                <span class="prop-label">BOLT11 Lightning invoice</span>
+                <div class="prop-value-group">
+                  <span class="prop-value truncated" id="val-invoice">…</span>
+                  <button
+                    type="button"
+                    class="btn-copy"
+                    data-copy="val-invoice"
+                    aria-label="Copy Lightning invoice"
+                  >
+                    Copy Invoice
+                  </button>
+                </div>
+              </div>
+              <p class="invoice-status-note" id="invoice-status-note">
+                Once paid, TunnelSats confirms the payment and updates your
+                configuration automatically.
+              </p>
+            </div>
+          </div>
+        </section>
+
         <!-- ══════════ Not set up yet ══════════ -->
         <section
           id="view-setup"
@@ -112,13 +173,55 @@
               and show the exact amount in sats on the invoice. 100 GB of
               transfer per month included.
             </p>
+            <div
+              class="intent-bar"
+              role="group"
+              aria-label="Buy a subscription from the dashboard"
+            >
+              <label class="intent-field">
+                <span class="intent-field-label">Server region</span>
+                <select id="buy-server-select" class="intent-select">
+                  <option value="eu-de" selected>Europe (Nuremberg, DE)</option>
+                  <option value="eu-ch">Europe (Geneva, CH)</option>
+                  <option value="us-east">
+                    North America East (Ashburn, US)
+                  </option>
+                  <option value="us-west">
+                    North America West (Hillsboro, US)
+                  </option>
+                  <option value="sa-br">South America (Sao Paulo, BR)</option>
+                  <option value="asia-sg">Asia (Singapore, SG)</option>
+                  <option value="oc-au">Oceania (Sydney, AU)</option>
+                </select>
+              </label>
+              <label class="intent-field">
+                <span class="intent-field-label">Duration</span>
+                <select id="buy-duration-select" class="intent-select">
+                  <option value="1m">1 month ($3.00)</option>
+                  <option value="3m" selected>
+                    3 months ($8.55 · save 5%)
+                  </option>
+                  <option value="6m">6 months ($16.20 · save 10%)</option>
+                  <option value="12m">12 months ($28.80 · save 20%)</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                id="btn-intent-buy"
+                class="btn-intent"
+                data-submit-intent="buy"
+              >
+                Buy Subscription
+              </button>
+            </div>
           </div>
 
           <div class="setup-block">
             <h2 class="step-label">How to buy</h2>
             <ol class="guide-steps">
               <li>
-                In StartOS, open
+                Use the <strong>Buy Subscription</strong> controls above, or in
+                StartOS open
                 <strong class="path"
                   >Services → TunnelSats → Actions → Buy Subscription</strong
                 >
@@ -126,8 +229,8 @@
               </li>
               <li>
                 Accept the <strong>Pay Invoice</strong> task TunnelSats raises
-                on your Lightning node, or pay the invoice shown in the action
-                result with any Lightning wallet.
+                on your Lightning node, or pay the invoice shown here or in the
+                action result with any Lightning wallet.
               </li>
               <li>
                 Once the payment settles, TunnelSats saves the configuration by
@@ -297,17 +400,52 @@
             <h2 id="manage-title">Manage in StartOS</h2>
           </div>
           <p class="card-intro">
-            Payments and changes run as StartOS actions: they need your StartOS
-            login, and every payment goes through a
-            <strong>Pay Invoice</strong> task on your node. Open
-            <strong class="path">Services → TunnelSats → Actions</strong>.
+            Buy, Renew and Reset Bandwidth can be started right from this
+            dashboard or from
+            <strong class="path">Services → TunnelSats → Actions</strong>. Every
+            payment raises a <strong>Pay Invoice</strong> task on your node and
+            shows the same invoice here.
           </p>
           <ul class="action-list">
             <li class="action-item" id="action-buy">
               <span class="action-name">Buy Subscription</span>
               <span class="action-desc"
-                >A new tunnel: pick the node, a server region and a plan.</span
+                >A new tunnel on the configured node: pick a server region and a
+                plan.</span
               >
+              <div class="action-controls" id="buy-controls">
+                <select
+                  id="manage-buy-server-select"
+                  class="intent-select intent-select-sm"
+                  aria-label="Server region"
+                >
+                  <option value="eu-de" selected>Europe (DE)</option>
+                  <option value="eu-ch">Europe (CH)</option>
+                  <option value="us-east">US East</option>
+                  <option value="us-west">US West</option>
+                  <option value="sa-br">South America (BR)</option>
+                  <option value="asia-sg">Asia (SG)</option>
+                  <option value="oc-au">Oceania (AU)</option>
+                </select>
+                <select
+                  id="manage-buy-duration-select"
+                  class="intent-select intent-select-sm"
+                  aria-label="Subscription duration"
+                >
+                  <option value="1m">1 mo ($3.00)</option>
+                  <option value="3m" selected>3 mo ($8.55)</option>
+                  <option value="6m">6 mo ($16.20)</option>
+                  <option value="12m">12 mo ($28.80)</option>
+                </select>
+                <button
+                  type="button"
+                  id="btn-manage-buy"
+                  class="btn-intent btn-intent-sm"
+                  data-submit-intent="buy-manage"
+                >
+                  Buy Subscription
+                </button>
+              </div>
             </li>
             <li class="action-item" id="action-renew">
               <span class="action-name">Renew Subscription</span>
@@ -315,6 +453,28 @@
                 >Extends the current subscription. Your node and its
                 configuration stay as they are.</span
               >
+              <div class="action-controls" id="renew-controls">
+                <select
+                  id="renew-duration-select"
+                  class="intent-select intent-select-sm"
+                  aria-label="Renewal duration"
+                >
+                  <option value="1m">1 month ($3.00)</option>
+                  <option value="3m" selected>
+                    3 months ($8.55 · save 5%)
+                  </option>
+                  <option value="6m">6 months ($16.20 · save 10%)</option>
+                  <option value="12m">12 months ($28.80 · save 20%)</option>
+                </select>
+                <button
+                  type="button"
+                  id="btn-intent-renew"
+                  class="btn-intent btn-intent-sm"
+                  data-submit-intent="renew"
+                >
+                  Renew Subscription
+                </button>
+              </div>
             </li>
             <li class="action-item" id="action-reset">
               <span class="action-name">Reset Bandwidth</span>
@@ -323,6 +483,16 @@
                 small fee (exact sats on the invoice), a limited number of times
                 per month.</span
               >
+              <div class="action-controls" id="reset-controls">
+                <button
+                  type="button"
+                  id="btn-intent-reset"
+                  class="btn-intent btn-intent-sm"
+                  data-submit-intent="reset"
+                >
+                  Reset Bandwidth
+                </button>
+              </div>
             </li>
             <li class="action-item" id="action-import">
               <span class="action-name">Import Subscription</span>

@@ -159,7 +159,7 @@ Endpoint = [2001:db8::1]:51820
 `
 
 const NOT_ANNOUNCEABLE =
-  'This configuration has no endpoint that can be announced to the Lightning Network (an IPv6 endpoint needs Allow Home IPv6 Coexistence).'
+  'This configuration has no endpoint that can be announced to the Lightning Network (an IPv6 endpoint needs Allow IPv6 Endpoint).'
 
 test('Configure rejects enabling an IPv6-only endpoint without IPv6 coexistence, like Import', async () => {
   const origMerge = configJson.merge

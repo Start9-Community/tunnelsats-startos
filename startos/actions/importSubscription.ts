@@ -34,9 +34,9 @@ const inputSpec = InputSpec.of({
     placeholder: `[Interface]\nPrivateKey = <your_private_key>\nAddress = 10.x.x.x/32\n# VPNPort: 12345\n...`,
   }),
   'allow-ipv6': Value.toggle({
-    name: i18n('Allow Home IPv6 Coexistence'),
+    name: i18n('Allow IPv6 Endpoint'),
     description: i18n(
-      'Allow announcing an IPv6 endpoint to your Lightning node if specified in your configuration. WARNING: TunnelSats VPN tunnels IPv4 traffic only. IPv6 connections bypass the VPN tunnel and expose your real home ISP IP address.',
+      'Allow handing your Lightning node an IPv6 TunnelSats server endpoint to announce, if your configuration uses one. The announced address is the TunnelSats server, not your home connection. This setting does not change how your node routes IPv6; that is decided by the Lightning node package.',
     ),
     default: false,
   }),
@@ -91,7 +91,7 @@ export const importSubscription = sdk.Action.withInput(
     if (!announceEndpoint) {
       throw new Error(
         i18n(
-          'This configuration has no endpoint that can be announced to the Lightning Network (an IPv6 endpoint needs Allow Home IPv6 Coexistence).',
+          'This configuration has no endpoint that can be announced to the Lightning Network (an IPv6 endpoint needs Allow IPv6 Endpoint).',
         ),
       )
     }

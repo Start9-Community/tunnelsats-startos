@@ -16,6 +16,7 @@ import {
   type VpnHandoffState,
 } from '../startos/vpnHandoff'
 import { generateWireguardKeypair } from '../startos/keygen'
+import { getTargetVpnConfig } from '../startos/dependencies'
 
 /** The fields every plan test asserts on; handedOutKeys has its own tests. */
 const core = (s: VpnHandoffState) => ({
@@ -866,4 +867,78 @@ test('a failed own-task update is retried through the handoff health check', asy
   })
   const base = { activeTarget: null, pendingOff: [], retryOwnTasks: false }
   assert.equal(sameHandoffState(base, { ...base, retryOwnTasks: true }), false)
+})
+
+// --- port change (G7): the sync rewrites the stored config's port marker
+
+function portConf(privateKey: string, port: number) {
+  return `[Interface]\nPrivateKey = ${privateKey}\nAddress = 10.9.0.2/32\n# VPNPort: ${port}\n\n[Peer]\nPublicKey = bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=\nEndpoint = de2.tunnelsats.com:51820\n`
+}
+
+function desiredFor(conf: string, targetNode: 'lnd' | 'cln' = 'lnd') {
+  const target = getTargetVpnConfig({
+    enabled: true,
+    'target-node': targetNode,
+    'tunnelsats-conf': conf,
+  })
+  assert.ok(target)
+  return target
+}
+
+test('a changed port marker re-raises the active node on-task with the new announce address', () => {
+  const kp = generateWireguardKeypair()
+  const before = portConf(kp.privateKey, 24556)
+  const after = portConf(kp.privateKey, 30111)
+  const state: VpnHandoffState = {
+    activeTarget: 'lnd',
+    pendingOff: [],
+    handedOutKeys: [kp.publicKey],
+  }
+  const plan = planClearnetVpnTasks({
+    desired: desiredFor(after),
+    state,
+    installed: ALL_INSTALLED,
+    // The node still runs the tunnel with the old port marker: same key, so
+    // it is ours and never blocks its own update.
+    nodeVpn: {
+      lnd: readNodeVpnState(
+        { config: before, announce: 'de2.tunnelsats.com:24556' },
+        { ownConf: after, handedOutKeys: state.handedOutKeys ?? [] },
+      ),
+    },
+  })
+  assert.deepEqual(plan.on, {
+    packageId: 'lnd',
+    config: after,
+    announce: 'de2.tunnelsats.com:30111',
+  })
+  assert.equal(plan.held, null)
+  assert.deepEqual(core(plan.next), { activeTarget: 'lnd', pendingOff: [] })
+  // Same key: nothing new is recorded as handed out.
+  assert.deepEqual(plan.next.handedOutKeys, [kp.publicKey])
+  // The task input differs from what the node accepted, so StartOS raises
+  // the task again; once accepted, the same plan is satisfied.
+  assert.notDeepEqual(
+    buildOnTaskInput(after, 'de2.tunnelsats.com:30111'),
+    buildOnTaskInput(before, 'de2.tunnelsats.com:24556'),
+  )
+})
+
+test('a port change during a node switch stays held until the previous node is off', () => {
+  const kp = generateWireguardKeypair()
+  const after = portConf(kp.privateKey, 30111)
+  const plan = planClearnetVpnTasks({
+    desired: desiredFor(after, 'cln'),
+    state: {
+      activeTarget: 'lnd',
+      pendingOff: [],
+      handedOutKeys: [kp.publicKey],
+    },
+    installed: ALL_INSTALLED,
+    nodeVpn: { lnd: 'on' },
+  })
+  assert.equal(plan.on, null)
+  assert.deepEqual(plan.held, { packageId: 'c-lightning', waitingFor: ['lnd'] })
+  assert.deepEqual(plan.off, ['lnd'])
+  assert.deepEqual(core(plan.next), { activeTarget: null, pendingOff: ['lnd'] })
 })

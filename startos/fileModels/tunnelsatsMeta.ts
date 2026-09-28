@@ -15,6 +15,15 @@ export const metaShape = z.object({
   serverDomain: z.string().optional(),
   vpnPort: z.number().optional(),
   bandwidth_used_gb: z.number().optional(),
+  /**
+   * Set by bridge.py when the API has no subscription for `publicKey`
+   * (see _record_not_found); only meaningful for that key.
+   */
+  keyUnknown: z.boolean().optional().catch(undefined),
+  /** First "not found" answer since the last confirmation (bridge.py). */
+  notFoundSince: z.string().optional().catch(undefined),
+  /** Public key of the last settled purchase (bridge.py save_configuration). */
+  provisionedKey: z.string().optional().catch(undefined),
   pendingOrder: z
     .object({
       paymentHash: z.string(),

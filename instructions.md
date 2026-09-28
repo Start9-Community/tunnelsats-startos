@@ -14,7 +14,7 @@ TunnelSats provides dedicated, privacy-focused WireGuard VPN infrastructure spec
 6. **Activate Routing**:
    - Open your target Lightning node in StartOS.
    - Accept the 1-click prompt: **"Route [Node] through the TunnelSats tunnel"**.
-   - Your node brings up WireGuard internally (`wg0`), announces its public address, and routes all clearnet peer traffic through the encrypted tunnel with fail-closed privacy.
+   - Your node brings up WireGuard internally (`wg0`), announces its public address, and routes its clearnet peer traffic through the encrypted tunnel (see the kill switch caveat below).
 
 ### Option 2: Bring Your Own Configuration
 
@@ -30,10 +30,11 @@ Use the **Configure** action to switch TunnelSats off, pick a different target n
 
 ## Routing & Full Egress Privacy
 
-- **In-Container Egress Privacy**: The Lightning node owns the WireGuard tunnel directly inside its container (`wg0`). Policy routing (table 51820) encapsulates all clearnet peer traffic (inbound connections, gossip, ping/pong acknowledgments) with fail-closed privacy.
-- **Zero Residential IP Leakage**: Your home ISP IP address is never exposed to the clearnet Lightning Network.
+- **In-Container Egress Privacy**: The Lightning node owns the WireGuard tunnel directly inside its container (`wg0`). Policy routing (table 51820) sends all clearnet peer traffic (inbound connections, gossip, ping/pong acknowledgments) through the tunnel.
+- **Home IP Hidden While the Tunnel Is Up**: Clearnet peers see the TunnelSats server address, not your home ISP address.
+- **Kill Switch Caveat**: The tunnel and its routing belong to your Lightning node package, not to TunnelSats. With current node builds, clearnet traffic can fall back to your home connection if `wg0` goes down or is removed; a fix in the node packages is pending. While `wg0` is up, clearnet peer traffic uses the tunnel.
 - **Tor Hybrid Coexistence**: Onion peer connections continue to route normally over the Tor network across the container bridge, while clearnet peer traffic is routed through TunnelSats.
-- **IPv4 Routing**: TunnelSats routes IPv4 traffic. Residential IPv6 traffic is disabled by default to prevent clearnet ISP address leaks.
+- **IPv6**: How your node routes IPv6 is decided by the Lightning node package. Current builds send IPv6 through the tunnel when the configuration's `AllowedIPs` include `::/0` (TunnelSats configurations do), and block it otherwise. The **Allow IPv6 Endpoint** setting only lets TunnelSats hand your node an IPv6 server endpoint to announce.
 - **No Box-Wide Changes**: Nothing to set up in the StartOS system settings, no interface firewall toggling, and no port 9735 conflicts. Only the target node's own traffic uses the tunnel.
 
 ---
@@ -43,6 +44,8 @@ Use the **Configure** action to switch TunnelSats off, pick a different target n
 - **Monthly Allowance**: Subscriptions include 100 GB of transfer bandwidth per calendar month. Bandwidth counters reset automatically on the 1st of every month.
 - **On-Demand Telemetry**: Current bandwidth usage and subscription validity are fetched on-demand when opening the Web Dashboard.
 - **Renewal Reminders**: TunnelSats raises a **Renew Subscription** task when the subscription expires in 7 days or less, updates it at 3 days or less, and again once it has expired. Run **Renew Subscription** at any time to extend it; the invoice is paid through a Pay Invoice task on your Lightning node.
+- **Lapsed Subscription**: When the subscription expires, TunnelSats disables the tunnel on its server, so your node's clearnet peer connections through TunnelSats stop until you renew or turn off the clearnet VPN on your node.
+- **Notifications**: TunnelSats also posts a StartOS notification 7 and 3 days before the subscription expires, once it has expired, and when TunnelSats has no subscription for the WireGuard key in your configuration (then an **Import Subscription** task asks you to import a valid configuration or buy a new one). Each notification is sent once per subscription period; none are sent while TunnelSats is stopped.
 - **Bandwidth Reset**: Once this month's usage reaches 70% of the allowance, the **Reset Bandwidth** action (Subscription group) buys a reset of the monthly counter for a small fee, paid through a Pay Invoice task on your Lightning node. Resets per month are limited, and every requested invoice holds one of them until it is paid or expires, so running the action again while an invoice is still payable shows the same invoice instead of requesting a new one. The reset is confirmed automatically once the payment settles.
 
 ---

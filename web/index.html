@@ -51,7 +51,7 @@
         </div>
       </header>
 
-      <!-- Security Notice if Allow Home IPv6 Coexistence is enabled -->
+      <!-- Notice if Allow IPv6 Endpoint is enabled -->
       <div
         id="ipv6-warning-banner"
         class="info-box-warning"
@@ -61,13 +61,13 @@
           <svg class="warning-icon" viewBox="0 0 24 24">
             <path d="M12 2L1 21h22L12 2zm1 14h-2v-2h2v2zm0-4h-2V10h2v2z" />
           </svg>
-          <span>Home IP Exposure Notice (IPv6 Enabled)</span>
+          <span>IPv6 Endpoint Allowed</span>
         </div>
         <p>
-          "Allow Home IPv6 Coexistence" is enabled. TunnelSats VPN tunnels IPv4
-          traffic only. Any direct IPv6 connections to your Lightning node
-          bypass the encrypted tunnel and expose your residential home ISP
-          address.
+          "Allow IPv6 Endpoint" is enabled: TunnelSats may hand your node an
+          IPv6 server endpoint to announce. How your node routes its own IPv6
+          traffic is decided by the Lightning node package, not by this
+          setting.
         </p>
       </div>
 
@@ -114,8 +114,8 @@
             <h2>Get Your Dedicated Lightning VPN Tunnel</h2>
             <p class="hero-desc">
               Generate cryptographic WireGuard keys locally in-process on your
-              device and pay via Lightning. Encapsulates all clearnet peer
-              traffic with zero residential IP leaks.
+              device and pay via Lightning. Your node sends its clearnet peer
+              traffic through the tunnel.
             </p>
           </div>
 
@@ -1169,7 +1169,7 @@
           <!-- Q1: Architecture & In-Container VPN -->
           <details class="faq-item" open>
             <summary class="faq-question">
-              How does TunnelSats ensure zero residential IP leaks?
+              How does TunnelSats keep my home IP hidden?
             </summary>
             <div class="faq-answer">
               <p>
@@ -1187,11 +1187,17 @@
                   forwarding and multi-node port conflicts.
                 </li>
                 <li>
-                  <strong>Fail-Closed Egress Privacy:</strong> Container-level
-                  policy routing (table 51820) directs all clearnet traffic
+                  <strong>Egress Routing:</strong> Container-level policy
+                  routing (table 51820) directs all clearnet traffic
                   (handshakes, channel gossip, ping/pong acknowledgments)
-                  through the encrypted tunnel. If the tunnel drops, routing
-                  fails closed rather than leaking your home IP.
+                  through the encrypted tunnel while it is up.
+                </li>
+                <li>
+                  <strong>Kill Switch Caveat:</strong> The tunnel and its
+                  routing belong to your Lightning node package. With current
+                  node builds, clearnet traffic can fall back to your home
+                  connection if <code>wg0</code> goes down; a fix in the node
+                  packages is pending.
                 </li>
                 <li>
                   <strong>Tor Hybrid Coexistence:</strong> Tor traffic continues
@@ -1342,19 +1348,18 @@
           <!-- Q6: IPv6 Warning -->
           <details class="faq-item">
             <summary class="faq-question">
-              Does TunnelSats support IPv6? Why is IPv6 disabled by default?
+              How is IPv6 handled?
             </summary>
             <div class="faq-answer">
               <p>
-                <strong
-                  >TunnelSats is strictly an IPv4 WireGuard VPN service.</strong
-                >
+                Your Lightning node package decides how IPv6 is routed. Current
+                builds send IPv6 through the tunnel when the configuration's
+                <code>AllowedIPs</code> include <code>::/0</code> (TunnelSats
+                configurations do), and block it otherwise.
               </p>
               <p>
-                Because TunnelSats tunnels IPv4 clearnet only, any direct IPv6
-                traffic bypasses the encrypted tunnel and routes over your home
-                ISP connection, exposing your residential IP. Keep IPv6 disabled
-                unless you accept revealing your home IP for IPv6 traffic.
+                The <strong>Allow IPv6 Endpoint</strong> setting only lets
+                TunnelSats hand your node an IPv6 server endpoint to announce.
               </p>
             </div>
           </details>
@@ -1386,8 +1391,9 @@
                   margin-top: 4px;
                 "
               >
-                Expected output: Your assigned TunnelSats server IP (confirming
-                zero residential ISP leak).
+                Expected output: your assigned TunnelSats server IP, not your
+                home IP. This checks the tunnel while it is up; it does not
+                test what happens when it goes down.
               </p>
             </div>
           </details>

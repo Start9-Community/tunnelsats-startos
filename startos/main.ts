@@ -4,6 +4,10 @@ import { configJson } from './fileModels/config.json'
 import { checkHandoffProgress } from './handoffIO'
 import { NODE_TITLES } from './vpnHandoff'
 import { runSettlementTick } from './settlement'
+import { tunnelsatsMeta } from './fileModels/tunnelsatsMeta'
+import { subscriptionNotices } from './fileModels/subscriptionNotices'
+import { createNoticeRunner } from './notifications'
+import { noticeInputsFor } from './dependencies'
 
 export const main = sdk.setupMain(async ({ effects }) => {
   console.info(i18n('Starting TunnelSats!'))
@@ -39,7 +43,94 @@ export const main = sdk.setupMain(async ({ effects }) => {
     'main',
   )
 
-  // 5. Define daemons and health checks
+  // 5. Subscription notices (7 and 3 days before expiry, lapse, unknown
+  // key), driven by the Subscription health check. See notifications.ts.
+  const runNotices = createNoticeRunner({
+    readInputs: async () =>
+      noticeInputsFor(
+        await configJson.read().once(),
+        await tunnelsatsMeta
+          .read()
+          .once()
+          .catch(() => null),
+      ),
+    // An unreadable record counts as missing: at worst one notice repeats,
+    // and the next write replaces the broken file.
+    readState: async () =>
+      (await subscriptionNotices
+        .read()
+        .once()
+        .catch(() => null)) ?? null,
+    writeState: async (state) => {
+      await subscriptionNotices.write(effects, {
+        ...state,
+        sent: state.sent ? [...state.sent] : undefined,
+      })
+    },
+    notify: async (notice) => {
+      await sdk.notification.create(effects, {
+        level: notice.level,
+        title: notice.title,
+        message: notice.message,
+      })
+    },
+  })
+
+  const checkSubscription = async (): Promise<{
+    result: 'success' | 'failure' | 'loading' | 'disabled'
+    message: string
+  }> => {
+    if (!config?.enabled) {
+      return {
+        result: 'disabled',
+        message: i18n('TunnelSats is disabled.'),
+      }
+    }
+    const res = await subcontainer.exec([
+      'python3',
+      '/app/bridge.py',
+      'health',
+      'subscription',
+    ])
+    if (res.exitCode !== 0) {
+      try {
+        const errData = JSON.parse(
+          res.stdout.toString() || res.stderr.toString(),
+        )
+        return {
+          result: 'failure',
+          message: errData.message || i18n('Subscription verification failed'),
+        }
+      } catch {
+        return {
+          result: 'failure',
+          message:
+            res.stderr?.toString() || i18n('Subscription verification failed'),
+        }
+      }
+    }
+    try {
+      const data = JSON.parse(res.stdout.toString())
+      const isOk = data.result === 'ok' || data.result === 'success'
+      return {
+        result: isOk
+          ? 'success'
+          : data.result === 'loading'
+            ? 'loading'
+            : 'failure',
+        message:
+          data.message ||
+          (isOk ? i18n('Subscription is active') : String(data.result)),
+      }
+    } catch {
+      return {
+        result: 'failure',
+        message: i18n('Failed to parse health check result'),
+      }
+    }
+  }
+
+  // 6. Define daemons and health checks
   return sdk.Daemons.of(effects)
     .addDaemon('main', {
       subcontainer,
@@ -62,56 +153,18 @@ export const main = sdk.setupMain(async ({ effects }) => {
       ready: {
         display: i18n('Subscription Status'),
         fn: async () => {
-          if (!config?.enabled) {
-            return {
-              result: 'disabled',
-              message: i18n('TunnelSats is disabled.'),
-            }
-          }
-          const res = await subcontainer.exec([
-            'python3',
-            '/app/bridge.py',
-            'health',
-            'subscription',
-          ])
-          if (res.exitCode !== 0) {
-            try {
-              const errData = JSON.parse(
-                res.stdout.toString() || res.stderr.toString(),
+          const status = await checkSubscription()
+          // After the bridge check, which may just have synced the
+          // metadata. Never changes the health result.
+          if (config?.enabled) {
+            const notices = await runNotices()
+            if (notices.error) {
+              console.warn(
+                `TunnelSats subscription notice not sent: ${notices.error}`,
               )
-              return {
-                result: 'failure',
-                message:
-                  errData.message || i18n('Subscription verification failed'),
-              }
-            } catch {
-              return {
-                result: 'failure',
-                message:
-                  res.stderr?.toString() ||
-                  i18n('Subscription verification failed'),
-              }
             }
           }
-          try {
-            const data = JSON.parse(res.stdout.toString())
-            const isOk = data.result === 'ok' || data.result === 'success'
-            return {
-              result: isOk
-                ? 'success'
-                : data.result === 'loading'
-                  ? 'loading'
-                  : 'failure',
-              message:
-                data.message ||
-                (isOk ? i18n('Subscription is active') : String(data.result)),
-            }
-          } catch {
-            return {
-              result: 'failure',
-              message: i18n('Failed to parse health check result'),
-            }
-          }
+          return status
         },
       },
       requires: ['main'],
@@ -155,7 +208,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
               return {
                 result: 'waiting',
                 message: i18n(
-                  'Updating the TunnelSats renewal reminder failed; retrying automatically.',
+                  'Updating the TunnelSats reminder tasks failed; retrying automatically.',
                 ),
               }
             }

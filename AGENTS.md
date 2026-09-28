@@ -13,6 +13,7 @@ This document defines architecture, conventions, testing, and contribution stand
   - StartOS 0.4.0 Actions & Tasks (`sdk.action.createTask`, `sdk.action.createOwnTask`, `sdk.action.clearTask`) for the node handoff and renewal reminders.
   - Fail-closed health checks monitoring subscription validity, the VPN handoff and payment settlement.
 - **Stored config is passed through verbatim**: never rewrite a stored WireGuard config (e.g. to strip markers written by earlier versions). The node task accepts the exact string, so any rewrite re-raises it on every upgraded box.
+- **One lock for shared files**: `tunnelsats-meta.json`, `config.json` and the conf file are rewritten by both runtimes. Every read-modify-write holds bridge.py's `meta_lock` (TypeScript: `metaLockFor(effects)` in `startos/metaLock.ts`, which holds it through `bridge.py meta-lock`). Hold it for the file read and write only: never await an exec of bridge.py, an API request or a task call under it.
 
 ## Project Structure
 

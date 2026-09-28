@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { testMetaLock } from './metaLockSupport'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -423,6 +424,7 @@ function fakeMetaStore(initial: {
     meta: () => meta,
     purchase(hash: string, gate?: Promise<void>) {
       return recordPaymentThenRaiseTask('order', hash, {
+        lockMeta: testMetaLock,
         readCurrent: async () => {
           log.push(`read ${hash[0]}`)
           return {
@@ -477,6 +479,7 @@ test('recordPaymentThenRaiseTask: a failed record raises no task and frees the q
   const raised: string[] = []
   await assert.rejects(
     recordPaymentThenRaiseTask('renewal', 'e'.repeat(64), {
+      lockMeta: testMetaLock,
       readCurrent: async () => null,
       record: async () => {
         throw new Error('disk full')
@@ -511,6 +514,7 @@ test('recordPaymentThenRaiseTask: a failed read records nothing and raises no ta
   const calls: string[] = []
   await assert.rejects(
     recordPaymentThenRaiseTask('order', 'f'.repeat(64), {
+      lockMeta: testMetaLock,
       readCurrent: async () => {
         throw new Error('EIO')
       },

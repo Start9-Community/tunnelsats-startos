@@ -14,6 +14,7 @@ import {
   recordThenRaise,
 } from './settlement'
 import type { TargetNode } from './settlement'
+import type { MetaLock } from './metaLock'
 
 /** The fields of meta.pendingReset this module reads. */
 export interface PendingReset {
@@ -57,6 +58,8 @@ export function resetAvailability(publicKey: string | null): ResetAvailability {
 /** What runBandwidthReset needs from StartOS and the API. */
 export interface ResetOps {
   now(): Date
+  /** The cross-runtime metadata lock around the record (metaLockFor). */
+  lockMeta: MetaLock
   /**
    * A fresh read of meta.pendingReset and the pay-task queue. Must throw on
    * a read error: taking it for "nothing pending" would request (and
@@ -164,6 +167,7 @@ export function runBandwidthReset(
     if (options.reuseOnly) throw new NothingToResumeError()
     const order = await ops.requestReset()
     await recordThenRaise('reset', order.paymentHash, {
+      lockMeta: ops.lockMeta,
       readCurrent: ops.readCurrent,
       record: (patch) => ops.record(order, patch),
       raiseTask: () =>

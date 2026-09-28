@@ -1,6 +1,7 @@
 import { sdk } from '../sdk'
 import { configJson } from '../fileModels/config.json'
 import { tunnelsatsConf } from '../fileModels/tunnelsatsConf'
+import { metaLockFor } from '../metaLock'
 import { getAnnounceEndpoint, validateWireguardConfig } from '../utils'
 import { i18n } from '../i18n'
 import { rm } from 'node:fs/promises'
@@ -94,19 +95,23 @@ export const configure = sdk.Action.withInput(
       )
     }
 
-    await configJson.merge(effects, {
-      enabled: input.enabled,
-      'target-node': input['target-node'],
-      'tunnelsats-conf': processedConf || undefined,
-      'allow-ipv6': input['allow-ipv6'],
-    })
+    // Under bridge.py's lock: its port rewrite (apply_vpn_port) replaces
+    // config.json and the conf file, and must not interleave with this save.
+    await metaLockFor(effects)(async () => {
+      await configJson.merge(effects, {
+        enabled: input.enabled,
+        'target-node': input['target-node'],
+        'tunnelsats-conf': processedConf || undefined,
+        'allow-ipv6': input['allow-ipv6'],
+      })
 
-    if (input.enabled && processedConf) {
-      await tunnelsatsConf.write(effects, processedConf)
-    } else {
-      const confPath = sdk.volumes.main.subpath('./tunnelsatsv3.conf')
-      await rm(confPath, { force: true })
-    }
+      if (input.enabled && processedConf) {
+        await tunnelsatsConf.write(effects, processedConf)
+      } else {
+        const confPath = sdk.volumes.main.subpath('./tunnelsatsv3.conf')
+        await rm(confPath, { force: true })
+      }
+    })
 
     if (processedConf) {
       return {

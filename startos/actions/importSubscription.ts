@@ -1,6 +1,7 @@
 import { sdk } from '../sdk'
 import { configJson } from '../fileModels/config.json'
 import { tunnelsatsConf } from '../fileModels/tunnelsatsConf'
+import { metaLockFor } from '../metaLock'
 import {
   validateWireguardConfig,
   parseWireguardTunnelInfo,
@@ -96,13 +97,17 @@ export const importSubscription = sdk.Action.withInput(
       )
     }
 
-    await configJson.merge(effects, {
-      enabled: true,
-      'target-node': input['target-node'],
-      'tunnelsats-conf': input['tunnelsats-conf'],
-      'allow-ipv6': input['allow-ipv6'],
+    // Under bridge.py's lock: its port rewrite (apply_vpn_port) replaces
+    // config.json and the conf file, and must not interleave with this save.
+    await metaLockFor(effects)(async () => {
+      await configJson.merge(effects, {
+        enabled: true,
+        'target-node': input['target-node'],
+        'tunnelsats-conf': input['tunnelsats-conf'],
+        'allow-ipv6': input['allow-ipv6'],
+      })
+      await tunnelsatsConf.write(effects, input['tunnelsats-conf'])
     })
-    await tunnelsatsConf.write(effects, input['tunnelsats-conf'])
 
     // The clearnet-vpn task (and the off-task for a previously targeted
     // node) is raised by setDependencies, which reacts to this config write.

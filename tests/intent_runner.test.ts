@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { testMetaLock, useTestMetaLock } from './metaLockSupport'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -47,6 +48,8 @@ import { derivePublicKey, generateWireguardKeypair } from '../startos/keygen'
 import { NothingToResumeError, payTaskReplayId } from '../startos/settlement'
 
 const NOW = new Date('2026-10-01T12:00:00.000Z')
+// Actions' default ops take the real bridge.py lock, run locally.
+useTestMetaLock()
 const inMs = (ms: number) => new Date(NOW.getTime() + ms).toISOString()
 
 const ORDER_HASH = '1'.repeat(64)
@@ -145,6 +148,7 @@ test('runPurchase creates, records, and raises a task, then reuses while payable
 
   const ops: PurchaseOps = {
     now: () => NOW,
+    lockMeta: testMetaLock,
     readCurrent: async () => ({ ...state }),
     generateKeypair: () => (keyIdx++ === 0 ? kp1 : kp2),
     createOrder: async (params) => {
@@ -280,6 +284,7 @@ test('runRenewal creates, records, and reuses a payable renewal invoice', async 
 
   const ops: RenewalOps = {
     now: () => NOW,
+    lockMeta: testMetaLock,
     readConfig: async () => ({
       enabled: true,
       'target-node': 'cln',
@@ -376,6 +381,7 @@ test('a dashboard renewal never replaces the previous key renewal while payable 
   let renewCalls = 0
   const ops: RenewalOps = {
     now: () => NOW,
+    lockMeta: testMetaLock,
     readConfig: async () => ({
       enabled: true,
       'target-node': 'lnd',
@@ -957,6 +963,7 @@ test('dashboard Buy and Renew never replace a legacy pending record without a st
   }
   const purchaseOps: PurchaseOps = {
     now: () => NOW,
+    lockMeta: testMetaLock,
     readCurrent: async () => ({ pending: legacyOrder }),
     generateKeypair: () => generateWireguardKeypair(),
     createOrder: async () => {
@@ -994,6 +1001,7 @@ test('dashboard Buy and Renew never replace a legacy pending record without a st
     } as PendingRenewalRecord
     const renewalOps: RenewalOps = {
       now: () => NOW,
+      lockMeta: testMetaLock,
       readConfig: async () => ({
         enabled: true,
         'target-node': 'lnd',
@@ -1039,6 +1047,7 @@ test('reuseOnly Buy and Renew return the recorded invoice but never create a new
   }
   const purchaseOps: PurchaseOps = {
     now: () => NOW,
+    lockMeta: testMetaLock,
     readCurrent: async () => ({ pending: orderPending }),
     generateKeypair: () => generateWireguardKeypair(),
     createOrder: async () => {
@@ -1073,6 +1082,7 @@ test('reuseOnly Buy and Renew return the recorded invoice but never create a new
   }
   const renewalOps: RenewalOps = {
     now: () => NOW,
+    lockMeta: testMetaLock,
     readConfig: async () => ({
       enabled: true,
       'target-node': 'lnd',
@@ -1117,6 +1127,7 @@ test('a paid, settling renewal answers only a dashboard request for the same pla
   let requested = 0
   const ops: RenewalOps = {
     now: () => NOW,
+    lockMeta: testMetaLock,
     readConfig: async () => ({
       enabled: true,
       'target-node': 'lnd',

@@ -6,6 +6,7 @@ import json
 import subprocess
 import signal
 import fcntl
+import select
 import time
 import socket
 import ipaddress
@@ -142,17 +143,85 @@ def atomic_write_file(filepath, content, mode=0o600):
 @contextmanager
 def meta_lock():
     """Exclusive cross-process lock around every read-modify-write of the
-    metadata file. The dashboard's sync thread, the forced sync, the health
-    check (a separate process) and save_configuration all rewrite it; without
-    the lock one writer can replace another's newer result with metadata it
-    loaded before a slow API request. The purchase actions (TypeScript
-    FileHelper.merge of pendingOrder/pendingRenewal) cannot take this lock;
-    every writer here therefore merges into a fresh read taken right before
-    its write, which narrows their window to the read-to-rename span."""
+    metadata file, and of config.json and the conf file. The dashboard's
+    sync thread, the forced sync, the health check (a separate process) and
+    save_configuration all rewrite them; without the lock one writer can
+    replace another's newer result with metadata it loaded before a slow API
+    request. The TypeScript writers (the Buy/Renew/Reset record, Configure,
+    Import) take the same lock through `bridge.py meta-lock`
+    (hold_meta_lock, startos/metaLock.ts). Every writer still merges into a
+    fresh read taken under the lock, never into data it loaded before."""
     fd = os.open(META_FILE_PATH + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
+    finally:
+        os.close(fd)
+
+META_LOCK_ACQUIRE_TIMEOUT = 30
+META_LOCK_LEASE = 30
+META_LOCK_EXIT_BUSY = 2
+META_LOCK_EXIT_LEASE = 3
+
+def hold_meta_lock(stdin_fd, out, acquire_timeout=META_LOCK_ACQUIRE_TIMEOUT, lease=META_LOCK_LEASE):
+    """meta_lock for a process that cannot flock (the TypeScript runtime):
+    takes the same lock file, writes "locked" to `out`, and holds the lock
+    until `stdin_fd` reaches EOF, which is how the owner releases it (the
+    holder then writes "released" before closing the lock file). An owner
+    that dies closes the pipe, so its lock is released as well.
+
+    The owner keeps the hold alive by writing to stdin (a heartbeat); every
+    write renews the lease. A slow file operation therefore never loses the
+    lock while its owner is alive, but an owner that hangs (a blocked event
+    loop sends no heartbeat) cannot block bridge.py's writers forever.
+
+    Returns 0 after a release, META_LOCK_EXIT_BUSY (after writing a JSON
+    error, never "locked") when the lock stays taken for acquire_timeout
+    seconds, and META_LOCK_EXIT_LEASE when the owner sent neither a
+    heartbeat nor EOF for `lease` seconds. The owner treats any exit without
+    "released" as a lost lock and fails its job."""
+    fd = os.open(META_FILE_PATH + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + acquire_timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    out.write(json.dumps({"error": "Timed out waiting for the TunnelSats metadata lock"}) + "\n")
+                    out.flush()
+                    return META_LOCK_EXIT_BUSY
+                readable, _, _ = select.select([stdin_fd], [], [], min(0.02, remaining))
+                if readable and not os.read(stdin_fd, 4096):
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        # The owner disconnected while the lock is still busy.
+                        return 0
+        try:
+            out.write("locked\n")
+            out.flush()
+        except (BrokenPipeError, OSError):
+            # The owner is gone before it got the lock: nothing to hold.
+            return 0
+        lease_end = time.monotonic() + lease
+        while True:
+            remaining = lease_end - time.monotonic()
+            if remaining <= 0:
+                return META_LOCK_EXIT_LEASE
+            readable, _, _ = select.select([stdin_fd], [], [], remaining)
+            if readable:
+                if not os.read(stdin_fd, 4096):
+                    try:
+                        out.write("released\n")
+                        out.flush()
+                    except (BrokenPipeError, OSError):
+                        pass
+                    return 0
+                lease_end = time.monotonic() + lease
     finally:
         os.close(fd)
 
@@ -359,20 +428,19 @@ def apply_vpn_port(port):
     (tunnelsats-v2-web#308).
 
     Returns "unchanged", "updated", "conflict" (config.json holds another
-    configuration: the TypeScript actions write it without meta_lock, first
-    config.json, then the conf file, so a save is in flight and wins),
-    "no-config" or "no-marker". Raises OSError when a write fails.
+    configuration: Configure/Import write first config.json, then the conf
+    file, so that save was interrupted and the operator's newer configuration
+    wins), "no-config" or "no-marker". Raises OSError when a write fails.
 
     config.json is written first: after an interruption it holds the
     rewritten configuration while the conf file does not, and the next call
     completes the rewrite. The reverse order would strand config.json.
 
-    config.json is only replaced while its stamp still matches the one taken
-    before it was read (_write_json_if_unchanged). Residual window: an
-    import whose in-place write lands between that last stat and the rename
-    is overwritten with the rewritten old configuration, and the operator
-    has to save again. Closing it needs the TypeScript actions to share
-    meta_lock, which they cannot take."""
+    Configure and Import save under the same meta_lock (through
+    `bridge.py meta-lock`, #94), so no save interleaves with this rewrite.
+    config.json is still only replaced while its stamp matches the one taken
+    before it was read (_write_json_if_unchanged), as a guard against a
+    writer that bypasses the lock."""
     try:
         with open(CONFIG_PATH, "r") as f:
             stored = f.read()
@@ -388,7 +456,7 @@ def apply_vpn_port(port):
         with open(APP_CONFIG_PATH, "r") as f:
             app_config = json.load(f)
     except (OSError, ValueError):
-        # Missing, or caught mid-write by an in-place TypeScript write.
+        # Missing, or unreadable (e.g. a write that bypassed the lock).
         return "conflict"
     if not isinstance(app_config, dict):
         return "conflict"
@@ -2712,6 +2780,11 @@ def main():
         # Runs regardless of `enabled`: a first Buy completes on a package
         # that has no configuration (and is therefore disabled) yet.
         print(json.dumps(settle_pending()))
+
+    elif command == "meta-lock":
+        # Held by the TypeScript runtime around its metadata/config writes
+        # (startos/metaLock.ts); released when it closes stdin.
+        sys.exit(hold_meta_lock(sys.stdin.fileno(), sys.stdout))
 
     elif command == "settle-ack":
         ack_pay_tasks(sys.argv[2:])

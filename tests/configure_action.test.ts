@@ -1,11 +1,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { configure } from '../startos/actions/configure'
+import { importSubscription } from '../startos/actions/importSubscription'
+import { generateWireguardKeypair } from '../startos/keygen'
 import { configJson } from '../startos/fileModels/config.json'
 import { tunnelsatsConf } from '../startos/fileModels/tunnelsatsConf'
 import { getTargetVpnConfig } from '../startos/dependencies'
 import { buildOnTaskInput } from '../startos/vpnHandoff'
 import defaultDict from '../startos/i18n/dictionaries/default'
+import { lockIsFree, testLockDir, useTestMetaLock } from './metaLockSupport'
+
+// Configure takes the real bridge.py lock (run locally) around its writes.
+useTestMetaLock()
 
 const CLEAN_CONF = `[Interface]
 PrivateKey = DUMMY_TEST_PRIVATE_KEY_FOR_TESTING_123456=
@@ -41,10 +47,13 @@ async function runConfigure(conf: string, enabled = true, allowIpv6 = false) {
   const origWrite = tunnelsatsConf.write
   let merged: any = null
   let written: string | null = null
+  const lockedDuring: boolean[] = []
   configJson.merge = (async (_effects: unknown, data: unknown) => {
+    lockedDuring.push(!lockIsFree(testLockDir()))
     merged = data
   }) as any
   tunnelsatsConf.write = (async (_effects: unknown, data: string) => {
+    lockedDuring.push(!lockIsFree(testLockDir()))
     written = data
   }) as any
   try {
@@ -57,7 +66,7 @@ async function runConfigure(conf: string, enabled = true, allowIpv6 = false) {
         'allow-ipv6': allowIpv6,
       },
     })
-    return { response, merged, written }
+    return { response, merged, written, lockedDuring }
   } finally {
     configJson.merge = origMerge
     tunnelsatsConf.write = origWrite
@@ -65,7 +74,10 @@ async function runConfigure(conf: string, enabled = true, allowIpv6 = false) {
 }
 
 test('Configure stores a pasted config without gateway markers', async () => {
-  const { response, merged, written } = await runConfigure(CLEAN_CONF)
+  const { response, merged, written, lockedDuring } =
+    await runConfigure(CLEAN_CONF)
+  // Both writes run under bridge.py's meta_lock (#94, D-C3).
+  assert.deepEqual(lockedDuring, [true, true])
   assert.equal(merged['tunnelsats-conf'], CLEAN_CONF)
   assert.equal(written, CLEAN_CONF)
   assert.equal(response.result.value, CLEAN_CONF)
@@ -216,4 +228,33 @@ test('Configure keeps an IPv6-only config while TunnelSats is switched off', asy
   assert.equal(merged.enabled, false)
   assert.equal(merged['tunnelsats-conf'], IPV6_CONF)
   assert.equal(written, null)
+})
+
+test('Import saves config.json and the conf file under the bridge.py lock', async () => {
+  const kp = generateWireguardKeypair()
+  const conf = `[Interface]\nPrivateKey = ${kp.privateKey}\nAddress = 10.9.0.102/32\n# VPNPort: 24556\n\n[Peer]\nPublicKey = ${kp.publicKey}\nEndpoint = ch1.tunnelsats.com:51820\nAllowedIPs = 0.0.0.0/0\n`
+  const origMerge = configJson.merge
+  const origWrite = tunnelsatsConf.write
+  const lockedDuring: boolean[] = []
+  configJson.merge = (async () => {
+    lockedDuring.push(!lockIsFree(testLockDir()))
+  }) as any
+  tunnelsatsConf.write = (async () => {
+    lockedDuring.push(!lockIsFree(testLockDir()))
+  }) as any
+  try {
+    await (importSubscription as any).runFn({
+      effects: {},
+      input: {
+        'target-node': 'lnd',
+        'tunnelsats-conf': conf,
+        'allow-ipv6': false,
+      },
+    })
+  } finally {
+    configJson.merge = origMerge
+    tunnelsatsConf.write = origWrite
+  }
+  assert.deepEqual(lockedDuring, [true, true])
+  assert.equal(lockIsFree(testLockDir()), true)
 })

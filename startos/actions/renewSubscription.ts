@@ -2,6 +2,7 @@ import { T } from '@start9labs/start-sdk'
 import { sdk } from '../sdk'
 import { configJson } from '../fileModels/config.json'
 import { tunnelsatsMeta } from '../fileModels/tunnelsatsMeta'
+import { metaLockFor, type MetaLock } from '../metaLock'
 import { i18n } from '../i18n'
 import { parseWireguardTunnelInfo } from '../utils'
 import { derivePublicKey } from '../keygen'
@@ -57,6 +58,8 @@ export interface RenewalInput {
 
 export interface RenewalOps {
   now(): Date
+  /** The cross-runtime metadata lock around the record (metaLockFor). */
+  lockMeta: MetaLock
   readConfig(): Promise<{
     enabled?: boolean
     'target-node'?: TargetNode
@@ -258,6 +261,7 @@ export async function runRenewal(
     }
 
     await recordThenRaise('renewal', renewal.paymentHash, {
+      lockMeta: ops.lockMeta,
       readCurrent: ops.readCurrent,
       record: (patch) => ops.record(entry, patch),
       raiseTask: () =>
@@ -283,6 +287,7 @@ export function startRenewal(
 ): Promise<RenewalRunResult> {
   const defaultOps: RenewalOps = {
     now: () => new Date(),
+    lockMeta: metaLockFor(effects),
     readConfig: () =>
       configJson
         .read()

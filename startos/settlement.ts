@@ -8,6 +8,8 @@
  * injects the exec and clearTask effects.
  */
 
+import type { MetaLock } from './metaLock'
+
 export type TargetNode = 'lnd' | 'cln' | 'eclair'
 export type PaymentKind = 'order' | 'renewal' | 'reset'
 const PAYMENT_KINDS: readonly string[] = ['order', 'renewal', 'reset']
@@ -81,6 +83,11 @@ export function replacedPayTaskPatch(
 
 /** What recordPaymentThenRaiseTask needs from the package; injected. */
 export interface PaymentRecordOps {
+  /**
+   * The cross-runtime metadata lock (metaLockFor): the read and the record
+   * run under it, so a bridge.py write cannot land between them.
+   */
+  lockMeta: MetaLock
   /** A fresh read of the pending entry being replaced and the queue. */
   readCurrent(): Promise<{
     pending?: { paymentHash?: string; targetNode?: string } | null
@@ -129,15 +136,21 @@ export async function recordThenRaise(
   newHash: string,
   ops: PaymentRecordOps,
 ): Promise<void> {
-  const current = await ops.readCurrent()
-  await ops.record(
-    replacedPayTaskPatch(
-      kind,
-      current?.pending,
-      current?.payTasksToClear,
-      newHash,
-    ),
-  )
+  // bridge.py rewrites payTasksToClear too (settlement, acknowledgements),
+  // and the patch carries the whole queue: read and record under its lock.
+  // The task is raised after the release; nothing under the lock may wait
+  // for bridge.py or StartOS.
+  await ops.lockMeta(async () => {
+    const current = await ops.readCurrent()
+    await ops.record(
+      replacedPayTaskPatch(
+        kind,
+        current?.pending,
+        current?.payTasksToClear,
+        newHash,
+      ),
+    )
+  })
   await ops.raiseTask()
 }
 

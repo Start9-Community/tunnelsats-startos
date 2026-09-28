@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { testMetaLock } from './metaLockSupport'
 import { createServer, Server } from 'node:http'
 import {
   ApiHttpError,
@@ -317,6 +318,7 @@ function fakeOps(opts: {
   let requests = 0
   const ops: ResetOps = {
     now: () => NOW,
+    lockMeta: testMetaLock,
     targetNode: 'lnd',
     readCurrent: async () => {
       calls.push('read')

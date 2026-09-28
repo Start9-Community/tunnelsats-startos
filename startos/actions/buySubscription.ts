@@ -1,6 +1,7 @@
 import { T } from '@start9labs/start-sdk'
 import { sdk } from '../sdk'
 import { tunnelsatsMeta } from '../fileModels/tunnelsatsMeta'
+import { metaLockFor, type MetaLock } from '../metaLock'
 import { i18n } from '../i18n'
 import { generateWireguardKeypair } from '../keygen'
 import {
@@ -75,6 +76,8 @@ export function untilText(untilMs: number): string {
 
 export interface PurchaseOps {
   now(): Date
+  /** The cross-runtime metadata lock around the record (metaLockFor). */
+  lockMeta: MetaLock
   readCurrent(): Promise<{
     pending?: PendingOrderRecord | null
     payTasksToClear?: string[]
@@ -300,6 +303,7 @@ export function runPurchase(
     }
 
     await recordThenRaise('order', order.paymentHash, {
+      lockMeta: ops.lockMeta,
       readCurrent: ops.readCurrent,
       record: (patch) => ops.record(entry, patch),
       raiseTask: () =>
@@ -326,6 +330,7 @@ export function startPurchase(
 ): Promise<PurchaseRunResult> {
   const defaultOps: PurchaseOps = {
     now: () => new Date(),
+    lockMeta: metaLockFor(effects),
     readCurrent: async () => {
       const current = await tunnelsatsMeta.read().once()
       return (

@@ -2,6 +2,7 @@ import { T } from '@start9labs/start-sdk'
 import { sdk } from '../sdk'
 import { configJson } from '../fileModels/config.json'
 import { tunnelsatsMeta } from '../fileModels/tunnelsatsMeta'
+import { metaLockFor } from '../metaLock'
 import { i18n } from '../i18n'
 import { parseWireguardTunnelInfo } from '../utils'
 import { derivePublicKey } from '../keygen'
@@ -90,6 +91,7 @@ export async function startBandwidthReset(
 
   const defaultOps: ResetOps = {
     now: () => new Date(),
+    lockMeta: metaLockFor(effects),
     targetNode,
     // A read error fails the action: taking it for "nothing pending"
     // would reserve another reset while an invoice is still payable.

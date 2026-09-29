@@ -34,11 +34,7 @@ import { i18n } from './i18n'
 
 export type ExpiryStage = '7d' | '3d' | 'lapsed'
 export type NoticeKind =
-  | ExpiryStage
-  | 'unknown-key'
-  | 'nwc-renewed'
-  | 'nwc-fallback'
-  | 'nwc-restore'
+  ExpiryStage | 'unknown-key' | 'nwc-renewed' | 'nwc-fallback' | 'nwc-restore'
 
 /** Mildest first. */
 const STAGES: readonly ExpiryStage[] = ['7d', '3d', 'lapsed']
@@ -318,10 +314,7 @@ export function planNotifications(
     steps.push({ notice: noticeFor('unknown-key', null), before: state, after })
     state = after
   }
-  if (
-    input.nwcRestoreNeeded &&
-    !state.nwcRestoreNotified
-  ) {
+  if (input.nwcRestoreNeeded && !state.nwcRestoreNotified) {
     const after = { ...state, nwcRestoreNotified: true }
     steps.push({
       notice: noticeFor('nwc-restore', expiry),

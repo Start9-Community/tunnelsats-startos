@@ -33,7 +33,7 @@ test('getDependenciesForConfig returns LND dependency when enabled and target-no
   assert.deepEqual(res, {
     lnd: {
       kind: 'running',
-      versionRange: '>=0.15.5:0',
+      versionRange: '>=0.21.3-beta:7',
       healthChecks: ['lnd'],
     },
   })
@@ -44,7 +44,7 @@ test('getDependenciesForConfig returns c-lightning dependency when enabled and t
   assert.deepEqual(res, {
     'c-lightning': {
       kind: 'running',
-      versionRange: '>=23.2.2:0',
+      versionRange: '>=26.6.7:3',
       healthChecks: ['lightningd'],
     },
   })
@@ -60,15 +60,15 @@ test('getDependenciesForConfig keeps nodes with a pending off-task as exists dep
   assert.deepEqual(res, {
     'c-lightning': {
       kind: 'running',
-      versionRange: '>=23.2.2:0',
+      versionRange: '>=26.6.7:3',
       healthChecks: ['lightningd'],
     },
-    lnd: { kind: 'exists', versionRange: '>=0.15.5:0' },
+    lnd: { kind: 'exists', versionRange: '>=0.21.3-beta:7' },
   })
 
   const disabled = getDependenciesForConfig({ enabled: false }, ['eclair'])
   assert.deepEqual(disabled, {
-    eclair: { kind: 'exists', versionRange: '>=0.10.0:0' },
+    eclair: { kind: 'exists', versionRange: '>=0.14.3:2' },
   })
 })
 

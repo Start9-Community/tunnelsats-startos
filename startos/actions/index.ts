@@ -15,4 +15,3 @@ export const actions = sdk.Actions.of()
   .addAction(resetBandwidth)
   .addAction(exportConfig)
   .addAction(configure)
-

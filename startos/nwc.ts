@@ -231,7 +231,9 @@ export function estimateRenewalSatsForDuration(
     }
     if (lastDuration > 0) {
       return {
-        estimatedSats: Math.ceil((lastAmountSats / lastDuration) * durationMonths),
+        estimatedSats: Math.ceil(
+          (lastAmountSats / lastDuration) * durationMonths,
+        ),
         isExactQuote: false,
       }
     }

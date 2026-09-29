@@ -22,4 +22,3 @@ export const subscriptionNotices = FileHelper.json(
     nwcRestoreNotified: z.boolean().optional().catch(undefined),
   }),
 )
-

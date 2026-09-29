@@ -488,9 +488,9 @@ export function getSubscriptionExpiryTask(
 }
 
 const NODE_VERSION_RANGES = {
-  lnd: '>=0.15.5:0',
-  'c-lightning': '>=23.2.2:0',
-  eclair: '>=0.10.0:0',
+  lnd: '>=0.21.3-beta:7',
+  'c-lightning': '>=26.6.7:3',
+  eclair: '>=0.14.3:2',
 } as const
 
 const NODE_HEALTH_CHECKS = {
@@ -842,7 +842,13 @@ export const setDependencies = sdk.setupDependencies(async ({ effects }) => {
           config,
           meta,
           lockMeta: metaLockFor(effects),
-          createTask: ({ packageId, payInvoiceAction, replayId, invoice, reason }) =>
+          createTask: ({
+            packageId,
+            payInvoiceAction,
+            replayId,
+            invoice,
+            reason,
+          }) =>
             sdk.action.createTask(
               effects,
               packageId,
@@ -896,4 +902,3 @@ export const setDependencies = sdk.setupDependencies(async ({ effects }) => {
 
   return getDependenciesForConfig(config.config, pendingOff, config.meta)
 })
-

@@ -8,7 +8,6 @@ export function buildMainBackups() {
   })
 }
 
-export const { createBackup, restoreInit } = sdk.setupBackups(
-  async () => buildMainBackups(),
+export const { createBackup, restoreInit } = sdk.setupBackups(async () =>
+  buildMainBackups(),
 )
-

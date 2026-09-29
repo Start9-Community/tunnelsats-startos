@@ -500,7 +500,7 @@ export const fr_FR: LangDict = {
   110: 'Acheminer le trafic du portefeuille via Tor',
   111: 'Achemine les connexions WebSocket du relais NWC via le proxy Tor SOCKS5 de StartOS (tor.embassy:9050) afin que le relais ne voie jamais votre IP domestique. Forcé automatiquement pour les relais .onion.',
   112: 'Portefeuille NWC connecté',
-  113: "Le renouvellement automatique NWC est actif via le relais ${relayHost} (${transport}). TunnelSats renouvellera automatiquement pour ${duration} mois lorsque votre abonnement confirmé expirera dans 7 jours ou moins. Budget recommandé du portefeuille NWC (marge 1,2x) : ${perRenewalSats} sats par renouvellement (${annualSats} sats/an).",
+  113: 'Le renouvellement automatique NWC est actif via le relais ${relayHost} (${transport}). TunnelSats renouvellera automatiquement pour ${duration} mois lorsque votre abonnement confirmé expirera dans 7 jours ou moins. Budget recommandé du portefeuille NWC (marge 1,2x) : ${perRenewalSats} sats par renouvellement (${annualSats} sats/an).',
   114: 'Hôte du relais',
   115: 'Transport',
   116: 'Budget recommandé (marge 1,2x)',

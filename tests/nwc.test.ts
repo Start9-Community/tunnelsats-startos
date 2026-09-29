@@ -268,7 +268,10 @@ test('dependencies: Tor is declared when nwcConnected && nwcRouteViaTor, and 7d/
     expiresAt: nextPeriodExpiry,
   }
   assert.equal(isNwcAutoRenewHealthy(advancedMeta, true), true)
-  assert.equal(getNwcWalletTask(cfg, advancedMeta, true).shouldCreateTask, false)
+  assert.equal(
+    getNwcWalletTask(cfg, advancedMeta, true).shouldCreateTask,
+    false,
+  )
   assert.equal(noticeInputsFor(cfg, advancedMeta, true)?.nwcFallback, undefined)
 
   // updateOwnTasks wires renewSubscription, unknownKey, and nwcWallet tasks
@@ -438,4 +441,3 @@ test('metaShape preserves all NWC auto-renewal fields written by bridge.py', asy
   assert.equal(parsed.pendingRenewal?.paidViaNwc, true)
   assert.equal(parsed.pendingRenewal?.raisePayTask, true)
 })
-

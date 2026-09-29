@@ -3990,20 +3990,30 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
             # Persist pendingRenewal under meta_lock BEFORE attempting payment,
             # checking that no concurrent manual Renew wrote a pendingRenewal first.
             used_concurrent = False
+            concurrent_paid_hash = None
             with meta_lock():
                 fresh_meta = read_meta()
                 concurrent_pending = fresh_meta.get("pendingRenewal")
                 c_hash = concurrent_pending.get("paymentHash") if isinstance(concurrent_pending, dict) else None
                 c_recv = concurrent_pending.get("paymentReceivedFor") if isinstance(concurrent_pending, dict) else None
                 c_exp = _invoice_expiry(concurrent_pending) if isinstance(concurrent_pending, dict) else None
-                
-                if (
+                c_same_key = (
                     isinstance(concurrent_pending, dict)
                     and concurrent_pending.get("publicKey") == wg_pubkey
                     and isinstance(c_hash, str)
-                    and c_hash
+                    and bool(c_hash)
+                )
+
+                if c_same_key and c_recv == c_hash:
+                    # A concurrent writer's renewal was already paid and awaits
+                    # settlement: never overwrite it (that would drop the paid
+                    # renewal) and never pay it again. The fresh invoice is
+                    # simply abandoned unpaid.
+                    concurrent_paid_hash = c_hash
+                elif (
+                    c_same_key
                     and c_hash != stale_hash
-                    and c_recv in (None, c_hash)
+                    and c_recv is None
                     and isinstance(concurrent_pending.get("invoice"), str)
                     and c_exp is not None
                     and now < c_exp
@@ -4021,6 +4031,9 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
                             tasks.append(replay_id)
                         fresh_meta["payTasksToClear"] = tasks
                     atomic_write_json(META_FILE_PATH, fresh_meta)
+            if concurrent_paid_hash is not None:
+                settle_pending(now=now)
+                return {"result": "already-paid", "paymentHash": concurrent_paid_hash}
             if used_concurrent:
                 payment_hash = reusable_pending["paymentHash"]
                 invoice = reusable_pending["invoice"]
@@ -4065,9 +4078,20 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
                     "message": "NWC wallet was disconnected or updated before payment.",
                 }
             cur_pending = pre_pay_meta.get("pendingRenewal")
-            if isinstance(cur_pending, dict) and cur_pending.get("paymentHash") == payment_hash:
-                cur_pending["nwcAttempted"] = True
-                atomic_write_json(META_FILE_PATH, pre_pay_meta)
+            if (
+                not isinstance(cur_pending, dict)
+                or cur_pending.get("paymentHash") != payment_hash
+                or cur_pending.get("paymentReceivedFor")
+            ):
+                # Replaced, cleared or already paid by a concurrent writer
+                # while the preflight ran: never pay a discarded invoice.
+                return {
+                    "result": "superseded",
+                    "paymentHash": payment_hash,
+                    "message": "Pending renewal changed before payment; not paying the discarded invoice.",
+                }
+            cur_pending["nwcAttempted"] = True
+            atomic_write_json(META_FILE_PATH, pre_pay_meta)
 
         try:
             nwc_execute_command(

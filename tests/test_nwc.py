@@ -424,6 +424,176 @@ class TestNwcAutoRenew(unittest.TestCase):
         bridge._finish_pending("pendingRenewal", self.payment_hash, confirmed_expiry=new_expiry)
         self.assertEqual(bridge.read_meta()["nwcAutoRenewState"]["lastPaidNewExpiry"], new_expiry)
 
+    def _seed_auto_renew_state(self, now, pending=None):
+        meta = {
+            "publicKey": self.wg_pubkey,
+            "expiresAt": _iso_in(now, days=5),
+            "expirySource": "api",
+            "lastDuration": 1,
+            "nwcConnected": True,
+            "nwcRelayHost": "relay.getalby.com",
+            "nwcAutoRenewDuration": "1m",
+        }
+        if pending is not None:
+            meta["pendingRenewal"] = pending
+        bridge.atomic_write_json(self.meta_path, meta)
+        bridge.atomic_write_json(
+            self.wallet_path,
+            {
+                "uri": f"nostr+walletconnect://{self.wallet_pubkey}?relay=wss://relay.getalby.com/v1&secret={self.client_secret}",
+                "relayHost": "relay.getalby.com",
+                "autoRenewDuration": "1m",
+            },
+        )
+
+    def _pending(self, now, payment_hash, invoice, *, expires_in_minutes, **extra):
+        entry = {
+            "renewalId": payment_hash,
+            "paymentHash": payment_hash,
+            "invoice": invoice,
+            "amountSats": 4500,
+            "duration": 1,
+            "publicKey": self.wg_pubkey,
+            "targetNode": "lnd",
+            "createdAt": bridge._iso(now - timedelta(hours=2)),
+            "expiresAt": bridge._iso(now + timedelta(minutes=expires_in_minutes)),
+            "paidViaNwc": False,
+            "nwcAttempted": False,
+        }
+        entry.update(extra)
+        return entry
+
+    def _run_auto_renew(self, now, concurrent_write=None, during_preflight=None):
+        """Runs the real maybe_nwc_auto_renew (including the real settle_pending)
+        with only API/NWC transport patched. concurrent_write, if given, is
+        written as pendingRenewal while the /subscription/renew call is in
+        flight (between the initial read and the meta_lock re-check);
+        during_preflight, if given, is a callable run inside the NWC get_budget
+        preflight (after the invoice is chosen, before pay_invoice)."""
+        paid_invoices = []
+
+        def fake_api_call(method, path, payload=None):
+            if method == "POST" and path == "/subscription/renew":
+                if concurrent_write is not None:
+                    m = bridge.read_meta()
+                    m["pendingRenewal"] = concurrent_write
+                    bridge.atomic_write_json(self.meta_path, m)
+                return 200, {"renewalId": "fresh", "paymentHash": self.payment_hash, "invoice": self.valid_invoice}
+            return 200, {}
+
+        def fake_nwc(_parsed, method, params, **_kw):
+            if method == "get_budget":
+                if during_preflight is not None:
+                    during_preflight()
+                return {"remaining_budget": 50_000_000}
+            if method == "get_balance":
+                return {"balance": 100_000_000}
+            if method == "pay_invoice":
+                paid_invoices.append(params["invoice"])
+                return {"preimage": "00" * 32}
+            return {}
+
+        with (
+            patch.object(bridge, "_api_call", side_effect=fake_api_call),
+            patch.object(bridge, "_payment_state", return_value="expired"),
+            patch.object(bridge, "nwc_execute_command", side_effect=fake_nwc),
+        ):
+            res = bridge.maybe_nwc_auto_renew(self.wg_pubkey, now=now)
+        return res, paid_invoices
+
+    def test_auto_renew_replaces_expired_pending_renewal_instead_of_resurrecting_it(self):
+        # QA R4.2: an expired pendingRenewal from an earlier session must never be paid.
+        now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+        stale_hash = "cd" * 32
+        stale_invoice = _build_test_bolt11("45u", stale_hash)
+        self._seed_auto_renew_state(now, self._pending(now, stale_hash, stale_invoice, expires_in_minutes=-30))
+
+        res, paid = self._run_auto_renew(now)
+
+        self.assertEqual(res["result"], "paid")
+        self.assertEqual(res["paymentHash"], self.payment_hash)
+        self.assertEqual(paid, [self.valid_invoice])
+        meta = bridge.read_meta()
+        self.assertEqual(meta["pendingRenewal"]["paymentHash"], self.payment_hash)
+        self.assertIn(bridge.pay_task_replay_id("renewal", "lnd", stale_hash), meta["payTasksToClear"])
+
+    def test_auto_renew_does_not_reuse_concurrent_entry_equal_to_stale_or_expired(self):
+        now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+        stale_hash = "cd" * 32
+        stale_invoice = _build_test_bolt11("45u", stale_hash)
+        stale = self._pending(now, stale_hash, stale_invoice, expires_in_minutes=-30)
+
+        # Concurrent re-write of the same stale entry (even with a bogus future expiry) is not reused.
+        self._seed_auto_renew_state(now, stale)
+        res, paid = self._run_auto_renew(now, concurrent_write=dict(stale, expiresAt=bridge._iso(now + timedelta(minutes=30))))
+        self.assertEqual(res["result"], "paid")
+        self.assertEqual(paid, [self.valid_invoice])
+
+        # A different but expired concurrent entry is replaced and its pay task is cleared.
+        other_hash = "ef" * 32
+        other = self._pending(now, other_hash, _build_test_bolt11("45u", other_hash), expires_in_minutes=-5)
+        self._seed_auto_renew_state(now, stale)
+        res, paid = self._run_auto_renew(now, concurrent_write=other)
+        self.assertEqual(res["result"], "paid")
+        self.assertEqual(paid, [self.valid_invoice])
+        meta = bridge.read_meta()
+        self.assertEqual(meta["pendingRenewal"]["paymentHash"], self.payment_hash)
+        self.assertIn(bridge.pay_task_replay_id("renewal", "lnd", other_hash), meta["payTasksToClear"])
+
+    def test_auto_renew_reuses_genuine_concurrent_unpaid_invoice(self):
+        now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+        other_hash = "ef" * 32
+        other_invoice = _build_test_bolt11("45u", other_hash)
+        self._seed_auto_renew_state(now)
+
+        res, paid = self._run_auto_renew(
+            now, concurrent_write=self._pending(now, other_hash, other_invoice, expires_in_minutes=30)
+        )
+
+        self.assertEqual(res["result"], "paid")
+        self.assertEqual(res["paymentHash"], other_hash)
+        self.assertEqual(paid, [other_invoice])
+        self.assertEqual(bridge.read_meta()["pendingRenewal"]["paymentHash"], other_hash)
+
+    def test_auto_renew_never_overwrites_or_repays_concurrent_paid_renewal(self):
+        now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+        other_hash = "ef" * 32
+        other_invoice = _build_test_bolt11("45u", other_hash)
+        self._seed_auto_renew_state(now)
+        # Paid but not yet settled; invoice expiry already passed (paid invoices expire too).
+        paid_entry = self._pending(now, other_hash, other_invoice, expires_in_minutes=-1, paymentReceivedFor=other_hash)
+
+        res, paid = self._run_auto_renew(now, concurrent_write=paid_entry)
+
+        self.assertEqual(res, {"result": "already-paid", "paymentHash": other_hash})
+        self.assertEqual(paid, [])
+        pending_after = bridge.read_meta()["pendingRenewal"]
+        self.assertEqual(pending_after["paymentHash"], other_hash)
+        self.assertEqual(pending_after["paymentReceivedFor"], other_hash)
+
+    def test_auto_renew_does_not_pay_invoice_superseded_during_preflight(self):
+        now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+        other_hash = "ef" * 32
+        replacement = self._pending(now, other_hash, _build_test_bolt11("45u", other_hash), expires_in_minutes=30)
+
+        def replace_pending():
+            m = bridge.read_meta()
+            m["pendingRenewal"] = replacement
+            bridge.atomic_write_json(self.meta_path, m)
+
+        def clear_pending():
+            m = bridge.read_meta()
+            m.pop("pendingRenewal", None)
+            bridge.atomic_write_json(self.meta_path, m)
+
+        for mutate in (replace_pending, clear_pending):
+            with self.subTest(mutate=mutate.__name__):
+                self._seed_auto_renew_state(now)
+                res, paid = self._run_auto_renew(now, during_preflight=mutate)
+                self.assertEqual(res["result"], "superseded")
+                self.assertEqual(res["paymentHash"], self.payment_hash)
+                self.assertEqual(paid, [])
+
     def test_maybe_nwc_auto_renew_preflight_budget_and_transient_retry_fallback(self):
         now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
         old_expiry = _iso_in(now, days=4)

@@ -3788,6 +3788,10 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
     """Checks if the current subscription is within the NWC auto-renewal window
     (-7 days < remaining <= 7 days) and executes idempotent NIP-47 renewal.
     Serialized across processes via nwc_renew_lock()."""
+    def _invoice_expiry(p):
+        c = _parse_iso(p.get("createdAt"))
+        return _parse_iso(p.get("expiresAt")) or (c + INVOICE_DEFAULT_TTL if c is not None else None)
+
     now = now or datetime.now(timezone.utc)
     if not wg_pubkey or wg_pubkey in ("Unknown", "Not available"):
         return {"result": "skipped", "message": "No configured WireGuard key."}
@@ -3878,6 +3882,9 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
         # Check if there is already a pendingRenewal for this key
         pending = meta.get("pendingRenewal")
         reusable_pending = None
+        stale_hash = None
+        stale_node = None
+        
         if (
             isinstance(pending, dict)
             and pending.get("publicKey") == wg_pubkey
@@ -3911,10 +3918,7 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
                 return {"result": "already-paid", "paymentHash": payment_hash}
 
             inv = pending.get("invoice")
-            created_dt = _parse_iso(pending.get("createdAt"))
-            inv_exp_dt = _parse_iso(pending.get("expiresAt")) or (
-                created_dt + INVOICE_DEFAULT_TTL if created_dt is not None else None
-            )
+            inv_exp_dt = _invoice_expiry(pending)
             if api_state == "unknown" and nwc_was_attempted:
                 return {
                     "result": "deferred-unknown-status",
@@ -3928,6 +3932,10 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
                 and now < inv_exp_dt
             ):
                 reusable_pending = dict(pending)
+
+        if reusable_pending is None and isinstance(pending, dict) and isinstance(pending.get("paymentHash"), str) and pending.get("paymentHash"):
+            stale_hash = pending.get("paymentHash")
+            stale_node = pending.get("targetNode")
 
         if reusable_pending is None:
             raw_server = meta.get("serverDomain")
@@ -3985,17 +3993,33 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
             with meta_lock():
                 fresh_meta = read_meta()
                 concurrent_pending = fresh_meta.get("pendingRenewal")
+                c_hash = concurrent_pending.get("paymentHash") if isinstance(concurrent_pending, dict) else None
+                c_recv = concurrent_pending.get("paymentReceivedFor") if isinstance(concurrent_pending, dict) else None
+                c_exp = _invoice_expiry(concurrent_pending) if isinstance(concurrent_pending, dict) else None
+                
                 if (
                     isinstance(concurrent_pending, dict)
                     and concurrent_pending.get("publicKey") == wg_pubkey
-                    and isinstance(concurrent_pending.get("paymentHash"), str)
-                    and concurrent_pending.get("paymentHash")
+                    and isinstance(c_hash, str)
+                    and c_hash
+                    and c_hash != stale_hash
+                    and c_recv in (None, c_hash)
                     and isinstance(concurrent_pending.get("invoice"), str)
+                    and c_exp is not None
+                    and now < c_exp
                 ):
                     reusable_pending = dict(concurrent_pending)
                     used_concurrent = True
                 else:
                     fresh_meta["pendingRenewal"] = reusable_pending
+                    hash_to_clear = c_hash if c_hash else stale_hash
+                    node_to_clear = concurrent_pending.get("targetNode") if (isinstance(concurrent_pending, dict) and c_hash) else stale_node
+                    if hash_to_clear and node_to_clear in TARGET_NODES and hash_to_clear != reusable_pending.get("paymentHash"):
+                        tasks = [t for t in fresh_meta.get("payTasksToClear") or [] if isinstance(t, str)]
+                        replay_id = pay_task_replay_id("renewal", node_to_clear, hash_to_clear)
+                        if replay_id not in tasks:
+                            tasks.append(replay_id)
+                        fresh_meta["payTasksToClear"] = tasks
                     atomic_write_json(META_FILE_PATH, fresh_meta)
             if used_concurrent:
                 payment_hash = reusable_pending["paymentHash"]

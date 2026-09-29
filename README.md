@@ -14,7 +14,7 @@ A privacy-focused companion package and routing guide for Lightning Network node
 >
 > Items 2 to 4 are the same issue in each node package: when `wg0` goes down, clearnet traffic can fall back to your home connection. Until they are fixed, we can't recommend the package to node operators.
 >
-> **The older gateway-based setup is end-of-life.** The existing builds on the [Releases](https://github.com/Tunnelsats/tunnelsats-startos/releases) page (`0.4.0:3` to `0.4.0:5`) use the old Host-Managed Gateway approach (System > Gateways plus manual outbound gateway and external host settings). Please don't start new installs with them. We'll announce the new package on [tunnelsats.com](https://tunnelsats.com) once it is available.
+> **The older gateway-based setup is end-of-life.** Its release builds (`0.4.0:3` to `0.4.0:5`, based on StartOS System > Gateways plus manual outbound gateway and external host settings) have been withdrawn, and there is currently no published build. Please don't set up TunnelSats on StartOS through System > Gateways. We'll announce the new package on [tunnelsats.com](https://tunnelsats.com) once it is available.
 
 ## Table of Contents
 

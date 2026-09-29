@@ -4,6 +4,18 @@
 
 A privacy-focused companion package and routing guide for Lightning Network nodes (LND, Core Lightning and Eclair) on StartOS.
 
+> [!CAUTION]
+> **Not yet available for adoption.** The code in this repository is the new native storefront and in-container clearnet VPN package. It is feature-complete and has passed our QA, but it is **not released** and should not be used on a production node until these upstream items are resolved:
+>
+> 1. **Start9 community review:** the package is under review for the Start9 Community registry ([Start9-Community/tunnelsats-startos#4](https://github.com/Start9-Community/tunnelsats-startos/pull/4)).
+> 2. **LND kill switch:** [Start9Labs/lnd-startos#214](https://github.com/Start9Labs/lnd-startos/issues/214)
+> 3. **Core Lightning kill switch:** [Start9Labs/cln-startos#213](https://github.com/Start9Labs/cln-startos/issues/213)
+> 4. **Eclair kill switch:** [Start9Labs/eclair-startos#6](https://github.com/Start9Labs/eclair-startos/issues/6)
+>
+> Items 2 to 4 are the same issue in each node package: when `wg0` goes down, clearnet traffic can fall back to your home connection. Until they are fixed, we can't recommend the package to node operators.
+>
+> **The older gateway-based setup is end-of-life.** The existing builds on the [Releases](https://github.com/Tunnelsats/tunnelsats-startos/releases) page (`0.4.0:3` to `0.4.0:5`) use the old Host-Managed Gateway approach (System > Gateways plus manual outbound gateway and external host settings). Please don't start new installs with them. We'll announce the new package on [tunnelsats.com](https://tunnelsats.com) once it is available.
+
 ## Table of Contents
 
 - [Overview](#overview)

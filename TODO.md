@@ -18,7 +18,7 @@
 - [ ] **Step 3: Community Beta Deployment (`community-beta`)** 👈 **CURRENT FOCUS**
   - **Action**: Open a Pull Request from `Tunnelsats/tunnelsats-startos:main` to `Start9-Community/tunnelsats-startos:main` ([PR #1](https://github.com/Start9-Community/tunnelsats-startos/pull/1)).
   - Originally carried the gateway-model release; the upstream reset replaced it with the node-owned clearnet-vpn model (see [Superseded: StartOS Gateway Model](#superseded-startos-gateway-model)).
-  - Merging into the fork triggers `tagAndRelease.yml`, automatically building and deploying `0.4.0:5` to `https://community-beta-registry.start9.com`.
+  - Merging into the fork triggers `tagAndRelease.yml`, automatically building and deploying `1.0.0:0` to `https://community-beta-registry.start9.com`.
 
 - [ ] **Step 4: Beta Soak Period & Verification**
   - Sideload/install beta package directly from the `community-beta` registry on the live StartOS VM (`https://tunnelsats-040.local`).

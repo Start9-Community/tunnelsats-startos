@@ -5,13 +5,13 @@ setup() {
 }
 
 @test "accepts the current stable release tag" {
-  run bash "$validator" v0.4.0
+  run bash "$validator" v1.0.0
 
   [ "$status" -eq 0 ]
 }
 
 @test "accepts prerelease and build metadata tags for the current version" {
-  run bash "$validator" v0.4.0-alpha.1+build.7
+  run bash "$validator" v1.0.0-alpha.1+build.7
 
   [ "$status" -eq 0 ]
 }

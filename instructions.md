@@ -13,7 +13,7 @@ TunnelSats provides dedicated, privacy-focused WireGuard VPN infrastructure spec
 5. Once settled, TunnelSats automatically provisions your configuration and emits a routing task to your Lightning node.
 6. **Activate Routing**:
    - Open your target Lightning node in StartOS.
-   - Accept the 1-click prompt: **"Route [Node] through the TunnelSats tunnel"**.
+   - Accept the 1-click task: **"Activate TunnelSats VPN tunnel and advertise clearnet endpoint to the Lightning Network"**.
    - Your node brings up WireGuard internally (`wg0`), announces its public address, and routes its clearnet peer traffic through the encrypted tunnel (see the kill switch caveat below).
 
 ### Option 2: Bring Your Own Configuration

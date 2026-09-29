@@ -10,18 +10,14 @@
 - [x] **Step 2: Start9 Fork & Feedback**
   - Start9 fork created at `https://github.com/Start9-Community/tunnelsats-startos`.
   - Addressed comprehensive code review feedback from Start9 packaging engineers ([Issue #54](https://github.com/Tunnelsats/tunnelsats-startos/issues/54)):
-    - [x] **Dual Gateway Markers**: Implemented automated `# StartTunnel` (for StartOS 0.4.0.1) and `# inbound: yes` (for StartOS 0.4.0.2+) marker injection for native StartOS gateway auto-classification ([Start9 PR #3893](https://github.com/Start9Labs/start-technologies/pull/3893)).
-    - [x] **3-Step Setup Guidance**: Streamlined UI workflow across configure modal, instructions, README, and Web UI (System Gateways, Custom External Host, and Peer Interface firewall toggle).
-    - [x] **Full Egress Privacy & Outbound Gateway Routing**: Documented Outbound Gateway policy routing (`Actions -> Set Outbound Gateway -> TunnelSats`) across configure modal, instructions, README, Web UI, and host diagnostics (`verify.sh`) to eliminate residential IP leaks via outbound peer connections and gossip.
-    - [x] **StartOS Port Check Resolution**: Documented clicking "Later" on StartOS "Address Requirements" port test modal (since generic 9735 probe fails while assigned high port works).
-    - [x] **Multi-Node Port Allocation**: Documented internal port 9735 behavior when both LND and Core Lightning are installed.
+    - [x] ~~Gateway-model setup items~~ (markers, 3-step gateway setup, host egress routing, port-check and port 9735 notes): superseded, see [Superseded: StartOS Gateway Model](#superseded-startos-gateway-model).
     - [x] **Full Multilingual Localization**: Full release notes and descriptions across `en_US`, `es_ES`, `de_DE`, `pl_PL`, and `fr_FR`.
-    - [x] **Enhanced Fail-Closed Diagnostics**: Upgraded `verify.sh` to audit real WireGuard interfaces, host port bindings, and external WAN connectivity.
+    - [x] **Enhanced Fail-Closed Diagnostics**: `verify.sh` now runs only in-container checks it can really execute and prints the node-side tunnel checks as manual steps (the host-interface audit was superseded with the gateway model).
     - [x] **Version Bumps**: Released `0.4.0:4` ([PR #80](https://github.com/Tunnelsats/tunnelsats-startos/pull/80)) and `0.4.0:5` ([PR #82](https://github.com/Tunnelsats/tunnelsats-startos/pull/82)) with 5/5 Greptile confidence and 100% CI pass rates.
 
 - [ ] **Step 3: Community Beta Deployment (`community-beta`)** 👈 **CURRENT FOCUS**
   - **Action**: Open a Pull Request from `Tunnelsats/tunnelsats-startos:main` to `Start9-Community/tunnelsats-startos:main` ([PR #1](https://github.com/Start9-Community/tunnelsats-startos/pull/1)).
-  - Incorporates dual markers, outbound policy routing for full egress privacy, and comprehensive diagnostics.
+  - Originally carried the gateway-model release; the upstream reset replaced it with the node-owned clearnet-vpn model (see [Superseded: StartOS Gateway Model](#superseded-startos-gateway-model)).
   - Merging into the fork triggers `tagAndRelease.yml`, automatically building and deploying `0.4.0:5` to `https://community-beta-registry.start9.com`.
 
 - [ ] **Step 4: Beta Soak Period & Verification**
@@ -43,12 +39,9 @@
   - Add FAQ Q9 in `web/index.html` and IPv6 privacy policy section in `instructions.md`.
 
 - [x] **Issue #54: Address Start9 Packaging Review & Inbound Dataplane** ([#54](https://github.com/Tunnelsats/tunnelsats-startos/issues/54) / [PR #80](https://github.com/Tunnelsats/tunnelsats-startos/pull/80) / [PR #81](https://github.com/Tunnelsats/tunnelsats-startos/pull/81) / [PR #82](https://github.com/Tunnelsats/tunnelsats-startos/pull/82))
-  - Support native host-managed WireGuard gateway architecture.
-  - Auto-inject `# StartTunnel` and `# inbound: yes` markers under `[Interface]` in `configure` action.
+  - Gateway-model work from this issue is superseded, see [Superseded: StartOS Gateway Model](#superseded-startos-gateway-model).
   - Return copyable `ActionResultV1` guidance in `configure` modal.
   - Remove synthetic `vpn_connected` / `handshake` reporting in `bridge.py` in favor of honest subscription state.
-  - Refactor `verify.sh` to eliminate Docker assumptions and dynamically audit host interfaces, port 9735 bindings, and WAN ingress.
-  - Comprehensive documentation and FAQ updates explaining the Peer Interface toggle, Address Requirements "Later" bypass, outbound gateway policy routing for zero residential IP leaks, and multi-node port 9735 gotchas.
 
 - [ ] **Future Enhancement: Node-Funded Auto-Renewals via TunnelSats API** ([#83](https://github.com/Tunnelsats/tunnelsats-startos/issues/83) / [Issue #54 Discussion](https://github.com/Tunnelsats/tunnelsats-startos/issues/54#issuecomment-5359358874))
   - Automatically request renewal invoices from the TunnelSats public API (`https://tunnelsats.com/api/public/v1/subscription/renew`) using the stored WireGuard public key when the subscription enters the expiration warning window ($\le 7$ days).
@@ -63,3 +56,16 @@
 
 - [ ] **Upstream Engagement: StartOS Custom External Port Mapping RFC**
   - Submit an issue / feature proposal to `Start9Labs/startos` requesting support for custom external port mappings or test port parameters on Gateways so non-symmetric NAT port forwarding services pass the built-in reachability check.
+
+---
+
+## Superseded: StartOS Gateway Model
+
+The upstream reset (Sep 18) replaced the host-managed StartOS gateway model with the node-owned `clearnet-vpn` model: the Lightning node runs the tunnel itself (`wg0`, policy routing table 51820) and nothing is configured box-wide. The following completed items no longer apply and their code and guidance were removed:
+
+- ~~Gateway classification markers injected into every WireGuard config~~. New configs carry none; configs stored with markers by earlier versions are kept byte-identical, because the node task accepts the stored string exactly.
+- ~~3-step gateway setup guidance~~ (adding a system gateway, a custom external host, and the interface firewall toggle).
+- ~~Routing node egress through a host gateway~~ and the matching `verify.sh` remediation hints.
+- ~~Host-interface audit in `verify.sh`~~ (host gateway list, host port bindings).
+- ~~"Later" workaround for the StartOS Address Requirements port test and the multi-node port 9735 notes~~. Inbound traffic now arrives on the node's own `wg0`, with no host port forward.
+- ~~External host announcement tasks~~ (`lnd:custom-external-host-config`, `c-lightning:config`). Their keys are still cleared on upgrade.

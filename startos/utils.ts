@@ -1,4 +1,4 @@
-import { isIPv6 } from 'node:net'
+import { isIPv6, isIPv4 } from 'node:net'
 
 export interface WireguardTunnelInfo {
   privateKey?: string
@@ -96,33 +96,52 @@ export function parseWireguardTunnelInfo(
   return info
 }
 
-export function ensureInboundMarker(wgConf: string): string {
-  if (!wgConf || !wgConf.trim()) return wgConf
+export function getAnnounceEndpoint(
+  wgConf: string | null | undefined,
+  allowIpv6 = false,
+): string | null {
+  if (!wgConf) return null
+  const info = parseWireguardTunnelInfo(wgConf)
+  if (!info.endpoint || !info.vpnPort) return null
 
-  const lines = wgConf.split(/\r?\n/)
-  const hasStartTunnel = lines.some((line) => {
-    const trimmed = line.trim().toLowerCase()
-    return trimmed === '# starttunnel' || trimmed === 'starttunnel'
-  })
-  const hasInboundYes = lines.some((line) => {
-    return line.trim() === '# inbound: yes'
-  })
+  const fullEndpoint = info.endpoint.trim()
+  const vpnPort = info.vpnPort
 
-  if (hasStartTunnel && hasInboundYes) {
-    return wgConf
+  // 1. Bracketed IPv6 e.g. [2001:db8::1]:51820 or [2001:db8::1]
+  if (fullEndpoint.startsWith('[')) {
+    const closingBracket = fullEndpoint.indexOf(']')
+    if (closingBracket === -1) return null
+    const ipCandidate = fullEndpoint.substring(1, closingBracket)
+    if (!isIPv6(ipCandidate)) return null
+    if (!allowIpv6) return null
+    return `[${ipCandidate}]:${vpnPort}`
   }
 
-  const markersToAdd: string[] = []
-  if (!hasStartTunnel) markersToAdd.push('# StartTunnel')
-  if (!hasInboundYes) markersToAdd.push('# inbound: yes')
-
-  const interfaceIndex = lines.findIndex((line) =>
-    /^\s*\[Interface\]\s*$/i.test(line),
-  )
-  if (interfaceIndex !== -1) {
-    lines.splice(interfaceIndex + 1, 0, ...markersToAdd)
-    return lines.join('\n')
+  // 2. Unbracketed IPv6 without port e.g. 2001:db8::1
+  if (isIPv6(fullEndpoint)) {
+    if (!allowIpv6) return null
+    return `[${fullEndpoint}]:${vpnPort}`
   }
 
-  return `${markersToAdd.join('\n')}\n${wgConf}`
+  // 3. Unbracketed IPv6 with explicit port e.g. 2001:db8::1:51820
+  const lastColonIndex = fullEndpoint.lastIndexOf(':')
+  if (lastColonIndex !== -1) {
+    const ipCandidate = fullEndpoint.substring(0, lastColonIndex)
+    const portCandidate = fullEndpoint.substring(lastColonIndex + 1)
+    if (isIPv6(ipCandidate) && /^\d+$/.test(portCandidate)) {
+      if (!allowIpv6) return null
+      return `[${ipCandidate}]:${vpnPort}`
+    }
+  }
+
+  // 4. Reject any remaining malformed IPv6 strings containing colons
+  if (fullEndpoint.includes(':') && !isIPv4(fullEndpoint.split(':')[0])) {
+    const parts = fullEndpoint.split(':')
+    if (parts.length > 2) return null
+  }
+
+  const host = fullEndpoint.split(':')[0]
+  if (!host) return null
+
+  return `${host}:${vpnPort}`
 }

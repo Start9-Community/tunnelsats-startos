@@ -3,222 +3,742 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tunnel⚡Sats</title>
+    <meta name="color-scheme" content="dark" />
+    <title>TunnelSats Dashboard</title>
     <meta
       name="description"
-      content="TunnelSats VPN dashboard for Lightning Network nodes on StartOS. Monitor tunnel status, subscription expiry, and connection properties."
+      content="TunnelSats subscription, bandwidth and connection status for your Lightning node on StartOS."
     />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
     <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
-    <!-- System font fallbacks are used to ensure complete offline and Tor compatibility -->
     <link rel="stylesheet" href="style.css" />
   </head>
 
   <body>
-    <div class="background-glow"></div>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="background-glow" aria-hidden="true"></div>
     <div class="dashboard-container">
-      <!-- Header -->
       <header class="dashboard-header">
-        <div class="brand">
-          <img src="logo.svg" alt="TunnelSats Logo" class="brand-logo" />
-          <div class="brand-text">
-            <h1>TunnelSats</h1>
-            <span class="subtext">Lightning Network VPN Router</span>
-          </div>
-        </div>
-        <div class="status-badge-container">
-          <span id="status-badge" class="status-badge inactive">
-            <span class="pulse-dot"></span>
-            <span class="status-text">TUNNEL INACTIVE</span>
+        <a class="brand" href="./" aria-label="TunnelSats dashboard">
+          <img
+            src="ts_logo_rectangle.svg"
+            alt="TunnelSats"
+            class="brand-logo-rect"
+            width="152"
+            height="38"
+          />
+          <span class="brand-text">
+            <span class="subtext">Lightning VPN for StartOS</span>
           </span>
+        </a>
+        <div class="header-right">
+          <span id="status-badge" class="status-badge neutral">
+            <span class="pulse-dot" aria-hidden="true"></span>
+            <span class="status-text" id="status-text">Loading…</span>
+          </span>
+          <button
+            id="btn-refresh"
+            class="btn-refresh"
+            type="button"
+            aria-label="Reload status"
+            title="Reload status"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+            </svg>
+          </button>
         </div>
       </header>
 
-      <!-- Main Content Grid -->
-      <main class="dashboard-grid">
-        <!-- Subscription Card -->
-        <section class="card glass-card span-2 subscription-card">
+      <p id="load-error" class="load-error" role="alert" hidden></p>
+      <p
+        id="intent-feedback"
+        class="intent-feedback"
+        role="status"
+        aria-live="polite"
+        hidden
+      ></p>
+
+      <!-- In-flight buy/renew/reset and the node handoff, step by step. -->
+      <section
+        id="flow"
+        class="flow-panel"
+        aria-labelledby="flow-heading"
+        hidden
+      >
+        <h2 id="flow-heading" class="visually-hidden">Progress</h2>
+        <div id="flow-list" class="flow-list"></div>
+      </section>
+
+      <!-- Live state from GET /api/dashboard: pending payments, handoff, key and expiry. -->
+      <section
+        id="notices"
+        class="notices"
+        aria-labelledby="notices-title"
+        aria-live="polite"
+        hidden
+      >
+        <h2 id="notices-title" class="visually-hidden">Status updates</h2>
+        <ul id="notice-list" class="notice-list"></ul>
+      </section>
+
+      <main id="main" class="dashboard-grid">
+        <!-- ══════════ Payable Lightning invoice (D1 dual-path) ══════════ -->
+        <section
+          id="invoice-panel"
+          class="card glass-card span-2 invoice-card"
+          aria-labelledby="invoice-title"
+          aria-live="polite"
+          hidden
+        >
           <div class="card-header">
-            <h2>Subscription Status</h2>
-            <span class="info-label" id="expiry-date-raw">Unknown</span>
+            <h2 id="invoice-title">Lightning invoice ready</h2>
+            <span class="info-label" id="invoice-expiry">…</span>
           </div>
-          <div class="subscription-content">
-            <div class="countdown-container">
-              <span class="countdown-label">Time Remaining</span>
-              <div class="countdown-timer" id="countdown-timer">
-                Checking...
+          <div
+            id="invoice-switcher"
+            class="invoice-switcher"
+            role="group"
+            aria-label="Payable invoices"
+            hidden
+          ></div>
+          <p class="invoice-framing" id="invoice-framing">…</p>
+          <div class="invoice-body">
+            <div
+              id="invoice-qr"
+              class="invoice-qr"
+              role="img"
+              aria-label="Lightning invoice QR code"
+            ></div>
+            <div class="invoice-details">
+              <div class="invoice-amount-row">
+                <span class="metric-label">Invoice amount</span>
+                <span class="invoice-amount" id="invoice-amount">…</span>
               </div>
-            </div>
-            <div class="progress-bar-container">
-              <div
-                class="progress-bar"
-                id="subscription-progress"
-                style="width: 0%"
-              ></div>
-            </div>
-          </div>
-        </section>
-
-        <!-- Option 3 Security Banner if Allow Home IPv6 Coexistence is enabled -->
-        <div id="ipv6-warning-banner" class="info-box" style="display: none; grid-column: span 3; background: rgba(255, 153, 0, 0.15); border: 1px solid rgba(255, 153, 0, 0.5); border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1.5rem; color: #ffcc00; font-size: 0.9rem;">
-          <div style="display: flex; align-items: center; gap: 0.75rem; font-weight: 600;">
-            <svg style="width: 20px; height: 20px; fill: currentColor; flex-shrink: 0;" viewBox="0 0 24 24"><path d="M12 2L1 21h22L12 2zm1 14h-2v-2h2v2zm0-4h-2V10h2v2z"/></svg>
-            <span>Home IP Exposure Notice (IPv6 Enabled)</span>
-          </div>
-          <p style="margin: 0.5rem 0 0 0; opacity: 0.9; line-height: 1.4;">
-            "Allow Home IPv6 Coexistence" is turned ON in <strong>⚙ → Configure</strong>. Note: TunnelSats WireGuard VPN tunnels IPv4 traffic only. Any IPv6 connections to your node bypass the VPN and reveal your real home ISP address to IPv6 peers.
-          </p>
-        </div>
-
-        <!-- Connection Details Card -->
-        <section class="card glass-card span-2 properties-card">
-          <h2>Connection Properties</h2>
-          <div class="properties-grid">
-            <div class="prop-item">
-              <div class="prop-label">TunnelSats Public IP</div>
-              <div class="prop-value-group">
-                <span class="prop-value" id="val-public-ip">...</span>
-                <button
-                  class="btn-copy"
-                  onclick="copyText('val-public-ip', this)"
-                >
-                  Copy
-                </button>
+              <div class="prop-item">
+                <span class="prop-label">BOLT11 Lightning invoice</span>
+                <div class="prop-value-group">
+                  <span class="prop-value truncated" id="val-invoice">…</span>
+                  <button
+                    type="button"
+                    class="btn-copy"
+                    data-copy="val-invoice"
+                    aria-label="Copy Lightning invoice"
+                  >
+                    Copy Invoice
+                  </button>
+                </div>
               </div>
-            </div>
-            <div class="prop-item">
-              <div class="prop-label">Forwarding Port</div>
-              <div class="prop-value-group">
-                <span class="prop-value" id="val-vpn-port">...</span>
-                <button
-                  class="btn-copy"
-                  onclick="copyText('val-vpn-port', this)"
-                >
-                  Copy
-                </button>
-              </div>
-            </div>
-            <div class="prop-item">
-              <div class="prop-label">WireGuard Public Key</div>
-              <div class="prop-value-group">
-                <span class="prop-value truncated" id="val-pubkey">...</span>
-                <button class="btn-copy" onclick="copyText('val-pubkey', this)">
-                  Copy
-                </button>
-              </div>
-            </div>
-            <div class="prop-item">
-              <div class="prop-label">Internal IP (Last Octet)</div>
-              <div class="prop-value-group">
-                <span class="prop-value" id="val-octet">...</span>
-                <button class="btn-copy" onclick="copyText('val-octet', this)">
-                  Copy
-                </button>
-              </div>
-            </div>
-            <div class="prop-item">
-              <div class="prop-label">Outbound Policy Routing</div>
-              <div class="prop-value-group">
-                <span class="prop-value" id="val-routing">StartOS Native Gateway</span>
-                <button class="btn-copy" onclick="copyText('val-routing', this)">
-                  Copy
-                </button>
-              </div>
+              <p class="invoice-status-note" id="invoice-status-note">
+                Once paid, TunnelSats confirms the payment and updates your
+                configuration automatically.
+              </p>
             </div>
           </div>
         </section>
 
-        <!-- Documentation & Guides Card -->
-        <section class="card glass-card span-2 docs-card">
-          <div class="docs-header">
-            <h2>Lightning Routing &amp; Gateway Setup Guides</h2>
-            <div class="tabs">
-              <button
-                class="tab-btn active"
-                onclick="switchTab('gateway-tab', this)"
-              >
-                WireGuard Gateway
-              </button>
-              <button
-                class="tab-btn"
-                onclick="switchTab('lnd-tab', this)"
-              >
-                LND Node
-              </button>
-              <button class="tab-btn" onclick="switchTab('cln-tab', this)">
-                Core Lightning (CLN)
-              </button>
-            </div>
-          </div>
-
-          <div class="tab-content active" id="gateway-tab">
-            <p class="guide-intro">
-              <strong>Step-by-Step StartOS 0.4.0 Native Gateway Configuration:</strong>
+        <!-- ══════════ Not set up yet ══════════ -->
+        <section
+          id="view-setup"
+          class="card glass-card span-2 setup-card"
+          aria-labelledby="setup-title"
+          hidden
+        >
+          <div class="storefront-hero">
+            <p class="hero-tag">
+              <img src="Bitcoin.svg" alt="" class="icon-btc" /> Paid over
+              Lightning
             </p>
-            <ol style="padding-left: 1.25rem; line-height: 1.6; margin: 0.75rem 0; color: #cbd5e1; font-size: 0.9rem;">
-              <li><strong>Configure Companion Service:</strong> Open <strong>Services</strong> &rarr; <strong>TunnelSats</strong> &rarr; <strong>Configure</strong>, paste your downloaded <code>.conf</code>, and click <strong>Save</strong>. The service validates your configuration and automatically injects the required markers (<code># StartTunnel</code> &amp; <code># inbound: yes</code>).</li>
-              <li><strong>Add Gateway in StartOS:</strong> Navigate to <strong>System</strong> &rarr; <strong>Gateways</strong>. Delete any existing TunnelSats gateway first (updating an existing gateway cannot change its classification type). Click <strong>Add Gateway</strong> &rarr; choose <strong>WireGuard</strong> and paste the configuration carrying both inbound markers (StartOS uses these markers to auto-classify the gateway as Inbound/Outbound for Lightning port forwarding). Connect the gateway.</li>
-              <li><strong>Open Firewall:</strong> Open your target node (<strong>LND</strong> or <strong>Core Lightning</strong>) &rarr; <strong>Interfaces</strong> &rarr; <strong>Peer Interface</strong> (for LND) or <strong>Peer</strong> (for Core Lightning), toggle <code>&lt;VPN_IP&gt;:9735</code> to <strong>ON</strong>, and click <strong>"Later"</strong> on the port check prompt.</li>
-              <li><strong>Set Outbound Policy Routing (Required for Full Egress Privacy):</strong> Open your target node (<strong>Services &rarr; LND</strong> or <strong>Core Lightning</strong> — <em>do not set this on TunnelSats</em>) &rarr; <strong>Actions</strong> &rarr; <strong>Set Outbound Gateway</strong> &rarr; select your TunnelSats gateway to route all outbound peer connections and gossip through the VPN and prevent residential IP leakage.</li>
-              <li><strong>Inbound Lightning Traffic:</strong> Inbound connections to your TunnelSats port automatically forward to port <code>9735</code> on your node.</li>
+            <h1 id="setup-title">Get a dedicated Lightning VPN tunnel</h1>
+            <p class="hero-desc">
+              Your Lightning node (LND, Core Lightning or Eclair) sends its
+              clearnet peer traffic through a TunnelSats WireGuard tunnel. While
+              the tunnel is up, clearnet peers see the TunnelSats server address
+              instead of your home IP.
+            </p>
+          </div>
+
+          <div class="setup-block">
+            <h2 class="step-label" id="plans-title">Plans</h2>
+            <ul
+              id="plan-list"
+              class="plan-cards-grid"
+              aria-labelledby="plans-title"
+            ></ul>
+            <p class="price-note">
+              Reference prices in USD. The <strong>Buy Subscription</strong> and
+              <strong>Renew Subscription</strong> actions fetch the live quote
+              and show the exact amount in sats on the invoice. 100 GB of
+              transfer per month included.
+            </p>
+            <div
+              class="intent-bar"
+              role="group"
+              aria-label="Buy a subscription from the dashboard"
+            >
+              <div class="server-picker">
+                <span class="intent-field-label" id="server-cards-title"
+                  >Server regions</span
+                >
+                <ul
+                  id="server-cards"
+                  class="server-cards"
+                  aria-labelledby="server-cards-title"
+                  hidden
+                ></ul>
+                <p id="server-cards-note" class="note" hidden></p>
+                <p id="server-status-note" class="note" hidden>
+                  The list does not show live server health; see
+                  <a
+                    href="https://tunnelsats.com/status"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    >tunnelsats.com/status</a
+                  >.
+                </p>
+              </div>
+              <label class="intent-field">
+                <span class="intent-field-label">Server region</span>
+                <select id="buy-server-select" class="intent-select">
+                  <option value="eu-de" selected>Europe (Nuremberg, DE)</option>
+                  <option value="eu-ch">Europe (Geneva, CH)</option>
+                  <option value="us-east">
+                    North America East (Ashburn, US)
+                  </option>
+                  <option value="us-west">
+                    North America West (Hillsboro, US)
+                  </option>
+                  <option value="sa-br">South America (Sao Paulo, BR)</option>
+                  <option value="asia-sg">Asia (Singapore, SG)</option>
+                  <option value="oc-au">Oceania (Sydney, AU)</option>
+                </select>
+              </label>
+              <label class="intent-field">
+                <span class="intent-field-label">Duration</span>
+                <select id="buy-duration-select" class="intent-select">
+                  <option value="1m">1 month ($3.00)</option>
+                  <option value="3m" selected>
+                    3 months ($8.55 · save 5%)
+                  </option>
+                  <option value="6m">6 months ($16.20 · save 10%)</option>
+                  <option value="12m">12 months ($28.80 · save 20%)</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                id="btn-intent-buy"
+                class="btn-intent"
+                data-submit-intent="buy"
+              >
+                Buy Subscription
+              </button>
+            </div>
+          </div>
+
+          <div class="setup-block">
+            <h2 class="step-label">How to buy</h2>
+            <ol class="guide-steps">
+              <li>
+                Use the <strong>Buy Subscription</strong> controls above, or in
+                StartOS open
+                <strong class="path"
+                  >Services → TunnelSats → Actions → Buy Subscription</strong
+                >
+                and pick your node, a server region and a plan.
+              </li>
+              <li>
+                Accept the <strong>Pay Invoice</strong> task TunnelSats raises
+                on your Lightning node, or pay the invoice shown here or in the
+                action result with any Lightning wallet.
+              </li>
+              <li>
+                Once the payment settles, TunnelSats saves the configuration by
+                itself. Open your node and accept the task that routes it
+                through TunnelSats.
+              </li>
             </ol>
-            <div class="info-box" style="margin-top: 1rem; background: rgba(51, 153, 255, 0.1); border: 1px solid rgba(51, 153, 255, 0.3); border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.875rem;">
-              <strong>Host-Managed Privacy:</strong> StartOS manages kernel WireGuard encapsulation and outbound policy routing natively. IPv6 traffic is automatically blackholed by StartOS when routing through an IPv4-only gateway to prevent ISP leaks.
-            </div>
+            <p class="guide-alt">
+              Already have a TunnelSats configuration? Run
+              <strong class="path"
+                >Services → TunnelSats → Actions → Import Subscription</strong
+              >.
+            </p>
+          </div>
+        </section>
+
+        <!-- ══════════ Configured ══════════ -->
+        <section
+          id="view-overview"
+          class="telemetry-wrapper span-2"
+          aria-labelledby="overview-title"
+          hidden
+        >
+          <h1 id="overview-title" class="visually-hidden">
+            TunnelSats subscription
+          </h1>
+          <div class="telemetry-top-cards">
+            <section
+              class="card glass-card metric-card"
+              aria-labelledby="subscription-title"
+            >
+              <div class="card-header">
+                <h2 id="subscription-title">Subscription</h2>
+                <span class="info-label" id="expiry-date">…</span>
+              </div>
+              <div class="metric-card-body">
+                <span class="metric-label">Time remaining</span>
+                <div class="metric-value-row">
+                  <span class="metric-value countdown-timer" id="countdown"
+                    >…</span
+                  >
+                </div>
+                <progress
+                  id="subscription-progress"
+                  class="gauge gauge-time"
+                  max="100"
+                  value="0"
+                  aria-label="Time left of a one-month term"
+                ></progress>
+                <div class="nwc-status-row" id="nwc-status-row">
+                  <div class="nwc-status-header">
+                    <span class="nwc-status-label">NWC Auto-Renew</span>
+                    <span class="nwc-badge neutral" id="nwc-badge"
+                      >Disabled</span
+                    >
+                  </div>
+                  <p class="nwc-budget-note" id="nwc-budget-note">
+                    Connect a wallet in Services → TunnelSats → Actions →
+                    Connect Wallet.
+                  </p>
+                </div>
+                <div class="metric-footer">
+                  <span class="metric-footer-text"
+                    >Extend it with the
+                    <strong>Renew Subscription</strong> action.</span
+                  >
+                </div>
+              </div>
+            </section>
+
+            <section
+              class="card glass-card metric-card bandwidth-card"
+              aria-labelledby="bandwidth-title"
+            >
+              <div class="card-header">
+                <h2 id="bandwidth-title">Monthly bandwidth</h2>
+                <button
+                  type="button"
+                  class="btn-info-circle"
+                  data-open-dialog="bandwidth-modal"
+                  aria-label="About the bandwidth allowance"
+                  aria-haspopup="dialog"
+                >
+                  ℹ
+                </button>
+              </div>
+              <div class="metric-card-body">
+                <span class="metric-label">Used this month</span>
+                <div class="metric-value-row">
+                  <span class="metric-value" id="bandwidth-used">…</span>
+                  <span class="metric-unit" id="bandwidth-limit">/ 100 GB</span>
+                </div>
+                <meter
+                  id="bandwidth-meter"
+                  class="gauge gauge-bandwidth"
+                  min="0"
+                  max="100"
+                  low="70"
+                  high="90"
+                  optimum="0"
+                  value="0"
+                  aria-label="Bandwidth used this month"
+                ></meter>
+                <div class="metric-footer">
+                  <span class="metric-footer-text"
+                    >Resets on the 1st of each month (UTC).</span
+                  >
+                </div>
+              </div>
+            </section>
           </div>
 
-          <div class="tab-content" id="lnd-tab">
-            <p class="guide-intro">
-              <strong>StartOS 0.4.0 Zero-Hassle LND Setup:</strong><br />
-              When TunnelSats is enabled, StartOS automatically prompts you with a <strong>1-Click Task</strong>! Alternatively, open <strong>LND</strong> &rarr; <strong>Actions &amp; Config</strong> &rarr; <strong>Configuration</strong> &rarr; <strong>Custom External Host</strong>:
-            </p>
-            <div class="code-block-header">
-              <span>Enter into <strong>Custom External Host</strong>:</span>
-              <button
-                class="btn-copy-code"
-                onclick="copyCode('lnd-code', this)"
-              >
-                Copy Value
-              </button>
-            </div>
-            <pre><code id="lnd-code"><span class="highlight-ip">tunnelsats_ip</span>:<span class="highlight-port">tunnelsats_port</span></code></pre>
-            <div class="info-box" style="margin-top: 1rem; background: rgba(51, 153, 255, 0.1); border: 1px solid rgba(51, 153, 255, 0.3); border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.875rem;">
-              <strong>Automatic Advertising:</strong> StartOS 0.4.0's LND package automatically advertises this address to the Lightning Network alongside your Tor address without needing manual <code>lnd.conf</code> edits!
-            </div>
+          <div class="telemetry-top-cards">
+            <section
+              class="card glass-card timeline-card"
+              aria-labelledby="timeline-title"
+            >
+              <div class="card-header">
+                <h2 id="timeline-title">Renewal timeline</h2>
+                <span class="info-label" id="timeline-phase">…</span>
+              </div>
+              <div id="timeline-chart" class="timeline-chart"></div>
+              <ul id="timeline-legend" class="timeline-legend"></ul>
+              <h3 class="subhead">Renewal preview</h3>
+              <ul id="renew-preview-list" class="renew-preview-list"></ul>
+              <p class="note">
+                Estimated: TunnelSats adds calendar months to the later of the
+                current expiry and the time you renew. The renewal invoice
+                carries the exact date.
+              </p>
+            </section>
+
+            <section
+              class="card glass-card quota-card"
+              aria-labelledby="quota-title"
+            >
+              <div class="card-header">
+                <h2 id="quota-title">Bandwidth outlook</h2>
+              </div>
+              <p id="pace-text" class="pace-text">…</p>
+              <dl class="quota-facts">
+                <div class="quota-fact">
+                  <dt>Paid resets this month</dt>
+                  <dd id="val-resets">…</dd>
+                </div>
+                <div class="quota-fact">
+                  <dt>Reset Bandwidth</dt>
+                  <dd id="val-reset-eligibility">…</dd>
+                </div>
+              </dl>
+            </section>
           </div>
 
-          <div class="tab-content" id="cln-tab">
-            <p class="guide-intro">
-              <strong>StartOS 0.4.0 Zero-Hassle Core Lightning Setup:</strong><br />
-              When TunnelSats is enabled, StartOS automatically prompts you with a <strong>1-Click Task</strong>! Alternatively, open <strong>Core Lightning</strong> &rarr; <strong>Actions &amp; Config</strong> &rarr; <strong>Configuration</strong> &rarr; <strong>General Settings</strong>:
-            </p>
-            <div class="code-block-header">
-              <span>Enter into <strong>Custom External Host</strong>:</span>
-              <button
-                class="btn-copy-code"
-                onclick="copyCode('cln-code', this)"
+          <section
+            class="card glass-card reachability-card"
+            aria-labelledby="reachability-title"
+          >
+            <div class="card-header">
+              <h2 id="reachability-title">Connection check</h2>
+            </div>
+            <p class="caveat">
+              <strong
+                >Inbound TCP port check only; does not verify outbound VPN
+                egress.</strong
               >
-                Copy Value
+              TunnelSats opens a Lightning connection to your node through
+              <code id="reach-target">…</code>. The check sends your node public
+              key and that address to TunnelSats; the key is stored only in this
+              browser.
+            </p>
+            <div class="reach-form">
+              <label class="intent-field reach-field">
+                <span class="intent-field-label">Node public key</span>
+                <input
+                  id="reach-pubkey"
+                  class="reach-input"
+                  type="text"
+                  inputmode="text"
+                  autocomplete="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  maxlength="66"
+                  pattern="0[23][0-9a-fA-F]{64}"
+                  placeholder="02… or 03… (66 hex characters)"
+                />
+              </label>
+              <button
+                type="button"
+                id="btn-reachability"
+                class="btn-intent"
+                data-reachability
+              >
+                Check inbound reachability
               </button>
             </div>
-            <pre><code id="cln-code"><span class="highlight-ip">tunnelsats_ip</span>:<span class="highlight-port">tunnelsats_port</span></code></pre>
-            <div class="info-box" style="margin-top: 1rem; background: rgba(51, 153, 255, 0.1); border: 1px solid rgba(51, 153, 255, 0.3); border-radius: 8px; padding: 0.75rem 1rem; font-size: 0.875rem;">
-              <strong>Automatic Advertising:</strong> StartOS 0.4.0's Core Lightning package automatically advertises this address to the Lightning Network alongside your Tor address without needing manual <code>config</code> edits!
+            <p
+              id="reach-result"
+              class="reach-result"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></p>
+            <p class="note">
+              Outbound privacy has to be checked on the node: run the commands
+              under <a href="#privacy">Check your privacy on the node</a> (<code
+                >wg show</code
+              >, <code>ip rule</code>, <code>ip route</code> and an external
+              egress probe).
+            </p>
+          </section>
+
+          <section
+            class="card glass-card properties-card"
+            aria-labelledby="connection-title"
+          >
+            <div class="card-header">
+              <h2 id="connection-title">Connection</h2>
             </div>
+            <dl class="properties-grid">
+              <div class="prop-item">
+                <dt class="prop-label">Target Lightning node</dt>
+                <dd class="prop-value-group">
+                  <span class="prop-value" id="val-target-node">…</span>
+                </dd>
+              </div>
+              <div class="prop-item">
+                <dt class="prop-label">Routing handoff</dt>
+                <dd class="prop-value-group">
+                  <span class="prop-value" id="val-handoff">…</span>
+                </dd>
+              </div>
+              <div class="prop-item">
+                <dt class="prop-label">Public address (server:port)</dt>
+                <dd class="prop-value-group">
+                  <span class="prop-value" id="val-endpoint">…</span>
+                  <button
+                    type="button"
+                    class="btn-copy"
+                    data-copy="val-endpoint"
+                    aria-label="Copy public address"
+                  >
+                    Copy
+                  </button>
+                </dd>
+              </div>
+              <div class="prop-item">
+                <dt class="prop-label">WireGuard public key</dt>
+                <dd class="prop-value-group">
+                  <span class="prop-value truncated" id="val-pubkey">…</span>
+                  <button
+                    type="button"
+                    class="btn-copy"
+                    data-copy="val-pubkey"
+                    aria-label="Copy WireGuard public key"
+                  >
+                    Copy
+                  </button>
+                </dd>
+              </div>
+              <div class="prop-item">
+                <dt class="prop-label">Tunnel address</dt>
+                <dd class="prop-value-group">
+                  <span class="prop-value" id="val-vpn-ip">…</span>
+                </dd>
+              </div>
+              <div class="prop-item">
+                <dt class="prop-label">Last confirmed by TunnelSats</dt>
+                <dd class="prop-value-group">
+                  <span class="prop-value text-muted" id="val-last-sync"
+                    >…</span
+                  >
+                </dd>
+              </div>
+            </dl>
+          </section>
+        </section>
+
+        <!-- ══════════ Actions live in StartOS ══════════ -->
+        <section
+          id="manage"
+          class="card glass-card span-2 manage-card"
+          aria-labelledby="manage-title"
+        >
+          <div class="card-header">
+            <h2 id="manage-title">Manage in StartOS</h2>
           </div>
+          <p class="card-intro">
+            Buy, Renew and Reset Bandwidth can be started right from this
+            dashboard or from
+            <strong class="path">Services → TunnelSats → Actions</strong>. Every
+            payment raises a <strong>Pay Invoice</strong> task on your node and
+            shows the same invoice here.
+          </p>
+          <ul class="action-list">
+            <li class="action-item" id="action-buy">
+              <span class="action-name">Buy Subscription</span>
+              <span class="action-desc"
+                >A new tunnel on the configured node: pick a server region and a
+                plan.</span
+              >
+              <div class="action-controls" id="buy-controls">
+                <select
+                  id="manage-buy-server-select"
+                  class="intent-select intent-select-sm"
+                  aria-label="Server region"
+                >
+                  <option value="eu-de" selected>Europe (DE)</option>
+                  <option value="eu-ch">Europe (CH)</option>
+                  <option value="us-east">US East</option>
+                  <option value="us-west">US West</option>
+                  <option value="sa-br">South America (BR)</option>
+                  <option value="asia-sg">Asia (SG)</option>
+                  <option value="oc-au">Oceania (AU)</option>
+                </select>
+                <select
+                  id="manage-buy-duration-select"
+                  class="intent-select intent-select-sm"
+                  aria-label="Subscription duration"
+                >
+                  <option value="1m">1 mo ($3.00)</option>
+                  <option value="3m" selected>3 mo ($8.55)</option>
+                  <option value="6m">6 mo ($16.20)</option>
+                  <option value="12m">12 mo ($28.80)</option>
+                </select>
+                <button
+                  type="button"
+                  id="btn-manage-buy"
+                  class="btn-intent btn-intent-sm"
+                  data-submit-intent="buy-manage"
+                >
+                  Buy Subscription
+                </button>
+              </div>
+            </li>
+            <li class="action-item" id="action-renew">
+              <span class="action-name">Renew Subscription</span>
+              <span class="action-desc"
+                >Extends the current subscription. Your node and its
+                configuration stay as they are.</span
+              >
+              <div class="action-controls" id="renew-controls">
+                <select
+                  id="renew-duration-select"
+                  class="intent-select intent-select-sm"
+                  aria-label="Renewal duration"
+                >
+                  <option value="1m">1 month ($3.00)</option>
+                  <option value="3m" selected>
+                    3 months ($8.55 · save 5%)
+                  </option>
+                  <option value="6m">6 months ($16.20 · save 10%)</option>
+                  <option value="12m">12 months ($28.80 · save 20%)</option>
+                </select>
+                <button
+                  type="button"
+                  id="btn-intent-renew"
+                  class="btn-intent btn-intent-sm"
+                  data-submit-intent="renew"
+                >
+                  Renew Subscription
+                </button>
+              </div>
+            </li>
+            <li class="action-item" id="action-reset">
+              <span class="action-name">Reset Bandwidth</span>
+              <span class="action-desc" id="reset-desc"
+                >From 70% of this month's allowance: resets the counter for a
+                small fee (exact sats on the invoice), a limited number of times
+                per month.</span
+              >
+              <div class="action-controls" id="reset-controls">
+                <button
+                  type="button"
+                  id="btn-intent-reset"
+                  class="btn-intent btn-intent-sm"
+                  data-submit-intent="reset"
+                >
+                  Reset Bandwidth
+                </button>
+              </div>
+            </li>
+            <li class="action-item" id="action-connect-wallet">
+              <span class="action-name">Connect Wallet</span>
+              <span class="action-desc"
+                >Enable or disable automatic NWC (NIP-47) renewals, view the
+                1.2× recommended budget and optionally route relay traffic via
+                Tor.</span
+              >
+            </li>
+            <li class="action-item" id="action-import">
+              <span class="action-name">Import Subscription</span>
+              <span class="action-desc"
+                >Use an existing TunnelSats WireGuard configuration.</span
+              >
+            </li>
+            <li class="action-item" id="action-configure">
+              <span class="action-name">Configure</span>
+              <span class="action-desc"
+                >Switch TunnelSats off, change the target node or replace the
+                configuration.</span
+              >
+            </li>
+            <li class="action-item" id="action-export">
+              <span class="action-name">Export WireGuard Configuration</span>
+              <span class="action-desc"
+                >Shows the full configuration, including its private key.</span
+              >
+            </li>
+          </ul>
+        </section>
+
+        <!-- ══════════ Privacy: honest about what is verified ══════════ -->
+        <section
+          id="privacy"
+          class="card glass-card span-2 privacy-card"
+          aria-labelledby="privacy-title"
+        >
+          <div class="card-header">
+            <h2 id="privacy-title">Check your privacy on the node</h2>
+          </div>
+          <p class="caveat">
+            <strong>Kill switch caveat:</strong> The tunnel and its routing
+            belong to your Lightning node package, not to TunnelSats. With
+            current node builds, clearnet traffic can fall back to your home
+            connection if <code>wg0</code> goes down or is removed; a fix in the
+            node packages is pending. While <code>wg0</code> is up, clearnet
+            peer traffic uses the tunnel.
+          </p>
+          <p>
+            This dashboard runs in the TunnelSats container and cannot see
+            inside your node, so it never reports the tunnel as verified. Open a
+            shell on the node with
+            <code id="attach-command">start-cli package attach lnd</code> and
+            run:
+          </p>
+          <ul class="command-list">
+            <li>
+              <code>wg show wg0</code>
+              <span>a recent handshake and non-zero transfer</span>
+            </li>
+            <li>
+              <code>ip rule</code>
+              <span>a rule with <code>lookup 51820</code></span>
+            </li>
+            <li>
+              <code>ip route show table 51820</code>
+              <span><code>default dev wg0</code></span>
+            </li>
+            <li>
+              <code>curl -4 -s https://ifconfig.me</code>
+              <span
+                >must print the TunnelSats server IPv4, not your home IP</span
+              >
+            </li>
+            <li>
+              <code>curl -6 -s https://ifconfig.me</code>
+              <span
+                >must print the TunnelSats server IPv6 (or fail when IPv6 is
+                blocked), never your home IPv6</span
+              >
+            </li>
+          </ul>
+          <p class="note">
+            These checks show the tunnel while it is up; they do not test what
+            happens when it goes down.
+          </p>
         </section>
       </main>
 
       <footer class="dashboard-footer">
-        <div class="footer-links">
+        <nav class="footer-links" aria-label="More information">
           <a
             href="https://tunnelsats.com"
             target="_blank"
-            rel="noopener"
+            rel="noopener noreferrer"
             class="footer-link"
-            id="link-website"
           >
             <svg
               class="footer-link-icon"
@@ -242,9 +762,8 @@
           <a
             href="https://tunnelsats.com/status"
             target="_blank"
-            rel="noopener"
+            rel="noopener noreferrer"
             class="footer-link"
-            id="link-status"
           >
             <svg
               class="footer-link-icon"
@@ -262,9 +781,9 @@
           </a>
           <span class="footer-divider" aria-hidden="true">·</span>
           <button
+            type="button"
             class="footer-link footer-btn-faq"
-            id="btn-open-faq"
-            onclick="openFaqModal()"
+            data-open-dialog="faq-modal"
             aria-haspopup="dialog"
           >
             <svg
@@ -281,540 +800,286 @@
               <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
               <line x1="12" y1="17" x2="12.01" y2="17"></line>
             </svg>
-            FAQ &amp; Help
+            FAQ
           </button>
-        </div>
-        <div class="footer-meta" style="margin-top: 1rem; display: flex; align-items: center; justify-content: center; gap: 0.75rem; font-size: 0.8125rem; color: #94a3b8;">
-          <span>TunnelSats App <strong id="footer-version" style="color: #f8fafc;">v0.4.0:0</strong></span>
-          <span>&bull;</span>
-          <a href="https://github.com/Tunnelsats/tunnelsats-startos" target="_blank" rel="noopener" style="color: #3399ff; text-decoration: none; font-weight: 500;">GitHub Repository</a>
+        </nav>
+        <div class="footer-meta">
+          <span
+            >TunnelSats StartOS Package <strong id="footer-version"></strong
+          ></span>
+          <span aria-hidden="true">&bull;</span>
+          <a
+            href="https://github.com/Tunnelsats/tunnelsats-startos"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="github-link"
+            >GitHub Repository</a
+          >
         </div>
       </footer>
     </div>
 
-    <!-- ════════════════════════════════════════════ -->
-    <!-- FAQ Modal                                    -->
-    <!-- ════════════════════════════════════════════ -->
+    <!-- ══════════ Bandwidth dialog ══════════ -->
+    <dialog
+      id="bandwidth-modal"
+      class="app-modal"
+      aria-labelledby="bandwidth-modal-title"
+      closedby="any"
+    >
+      <div class="modal-dialog-inner">
+        <div class="modal-header">
+          <h2 id="bandwidth-modal-title">Monthly bandwidth allowance</h2>
+          <button
+            type="button"
+            class="modal-close-btn"
+            data-close-dialog
+            aria-label="Close"
+          >
+            ✕
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="bandwidth-visual-card">
+            <div class="bandwidth-stat-main">
+              <span class="stat-big-num" id="modal-bandwidth-used">…</span>
+              <span class="stat-unit" id="modal-bandwidth-limit"
+                >GB / 100 GB</span
+              >
+            </div>
+            <meter
+              id="modal-bandwidth-meter"
+              class="gauge gauge-bandwidth gauge-lg"
+              min="0"
+              max="100"
+              low="70"
+              high="90"
+              optimum="0"
+              value="0"
+              aria-label="Bandwidth used this month"
+            ></meter>
+          </div>
+          <ul class="bandwidth-facts">
+            <li>
+              <strong>100 GB per calendar month</strong> for your node's traffic
+              through the tunnel (peer connections, gossip, payments).
+            </li>
+            <li>
+              <strong>Automatic reset</strong> to 0 GB on the 1st of every month
+              (00:00 UTC).
+            </li>
+            <li>
+              <strong>Above 100 GB</strong> TunnelSats restricts the VPN
+              connection until the monthly reset.
+            </li>
+            <li>
+              <strong>Reset early:</strong> from 70% usage, the
+              <strong>Reset Bandwidth</strong> action buys a reset of the
+              counter for a small fee, paid through a Pay Invoice task on your
+              node. Resets per month are limited.
+            </li>
+          </ul>
+          <a
+            href="https://tunnelsats.com/faq"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="bandwidth-faq-link"
+          >
+            TunnelSats FAQ →
+          </a>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- ══════════ FAQ dialog ══════════ -->
     <dialog
       id="faq-modal"
-      class="faq-modal"
+      class="app-modal"
       aria-labelledby="faq-modal-title"
-      aria-modal="true"
+      closedby="any"
     >
-      <div class="faq-dialog-inner">
-        <div class="faq-modal-header">
-          <div class="faq-modal-title-row">
-            <svg
-              class="faq-title-icon"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <circle cx="12" cy="12" r="10"></circle>
-              <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
-              <line x1="12" y1="17" x2="12.01" y2="17"></line>
-            </svg>
-            <h2 id="faq-modal-title">Frequently Asked Questions</h2>
-          </div>
+      <div class="modal-dialog-inner faq-dialog-inner">
+        <div class="modal-header">
+          <h2 id="faq-modal-title">Frequently asked questions</h2>
           <button
-            class="faq-close-btn"
-            id="btn-close-faq"
-            onclick="closeFaqModal()"
+            type="button"
+            class="modal-close-btn"
+            data-close-dialog
             aria-label="Close FAQ"
           >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <line x1="18" y1="6" x2="6" y2="18"></line>
-              <line x1="6" y1="6" x2="18" y2="18"></line>
-            </svg>
+            ✕
           </button>
         </div>
 
         <div class="faq-body">
-          <!-- Q1 -->
-          <details class="faq-item">
+          <details class="faq-item" open>
             <summary class="faq-question">
-              How do I set up and activate TunnelSats on StartOS 0.4?
+              How does TunnelSats hide my home IP?
             </summary>
             <div class="faq-answer">
               <p>
-                Setup consists of five simple steps across TunnelSats, StartOS Gateways, and your Lightning node:
+                The WireGuard tunnel runs inside your Lightning node's own
+                container (<strong>LND</strong>,
+                <strong>Core Lightning</strong> or <strong>Eclair</strong>),
+                brought up by the node's clearnet VPN action:
               </p>
-              <ol>
-                <li>
-                  <strong>TunnelSats Configure:</strong> Go to ⚙ → Configure in TunnelSats. Paste your WireGuard <code>.conf</code> file, toggle <em>Enable TunnelSats</em> to <strong>On</strong>, select your target node, and click <strong>Save</strong>. Inbound markers (<code># StartTunnel</code> &amp; <code># inbound: yes</code>) are automatically added, and a copyable config is provided.
-                </li>
-                <li>
-                  <strong>StartOS Gateway:</strong> Go to <strong>System → Gateways</strong>, delete any existing TunnelSats gateway first (updating an existing gateway cannot change its classification type), and click <strong>Add Gateway</strong>. Choose <strong>WireGuard</strong>, paste the configuration, and connect the gateway.
-                </li>
-                <li>
-                  <strong>Target Node Announcement:</strong> Accept the automated <strong>1-Click Task</strong> prompt on your StartOS dashboard to advertise your endpoint, or enter it manually in your target node (e.g. <strong>LND → Config → Custom External Host</strong>).
-                </li>
-                <li>
-                  <strong>Firewall Port Toggle:</strong> Go to your target node (e.g. <strong>LND → Interfaces → Peer Interface</strong> or <strong>Core Lightning → Interfaces → Peer</strong>), find your TunnelSats public IP (<code>&lt;VPN_IP&gt;:9735</code>), and toggle it <strong>ON</strong>. When StartOS prompts to test port 9735 in <em>"Address Requirements"</em>, click <strong>"Later"</strong>.
-                </li>
-                <li>
-                  <strong>Set Outbound Gateway (Full Egress Privacy):</strong> Go to your target Lightning node (e.g. <strong>Services → LND → Actions → Set Outbound Gateway</strong> — <em>not the TunnelSats service page</em>), and select <strong>TunnelSats</strong>. StartOS defaults outbound traffic to Auto; setting this action pins all outbound peer connections, gossip, and ping/pong packets to the VPN tunnel, eliminating home IP leaks.
-                </li>
-              </ol>
-            </div>
-          </details>
-
-          <!-- Q2 -->
-          <details class="faq-item">
-            <summary class="faq-question">
-              I saved my config but the tunnel shows "Disconnected" or port closed — what do I do?
-            </summary>
-            <div class="faq-answer">
-              <p>
-                Work through these verification steps in order:
-              </p>
-              <ol>
-                <li>
-                  <strong>Check the Host Gateway:</strong> Ensure your WireGuard tunnel under <strong>System → Gateways</strong> is connected.
-                </li>
-                <li>
-                  <strong>Verify Peer Interface Public Address Toggle:</strong> In your target node (e.g. <strong>LND → Interfaces → Peer Interface</strong> or <strong>Core Lightning → Interfaces → Peer</strong>), verify that the toggle for <code>&lt;VPN_IP&gt;:9735</code> is switched <strong>ON</strong>. If this toggle is off, StartOS firewall blocks incoming traffic.
-                </li>
-                <li>
-                  <strong>Verify Multi-Node Port Allocation (9735):</strong> StartOS allocates the external host port per interface binding (container port is always 9735) and retains it across restarts. Inbound TunnelSats traffic forwards to host port 9735. Whichever node was installed first holds port 9735. If another node claimed 9735, uninstall that node and reinstall the target node so it rebinds to host port 9735.
-                </li>
-                <li>
-                  <strong>Check Custom External Host:</strong> Confirm your node advertises your TunnelSats external host and port under <strong>Config → Custom External Host</strong>.
-                </li>
-                <li>
-                  <strong>Restart Services:</strong> In StartOS, restart TunnelSats and your Lightning node after updating gateway bindings.
-                </li>
-              </ol>
-            </div>
-          </details>
-
-          <!-- Q3 -->
-          <details class="faq-item">
-            <summary class="faq-question">
-              How do I configure the Custom External Host and Peer Interface in StartOS?
-            </summary>
-            <div class="faq-answer">
-              <p>
-                StartOS handles external host announcement and firewall port forwarding cleanly via the UI:
-              </p>
-
-              <div
-                style="
-                  margin-top: 16px;
-                  border-left: 3px solid var(--accent-bitcoin);
-                  padding-left: 12px;
-                "
-              >
-                <h4
-                  style="
-                    color: var(--accent-bitcoin);
-                    font-size: 14px;
-                    margin-bottom: 8px;
-                  "
-                >
-                  1. Announce Endpoint (Custom External Host)
-                </h4>
-                <ol
-                  style="font-size: 12.5px; padding-left: 16px; margin-top: 4px"
-                >
-                  <li>
-                    In the StartOS dashboard, open your <strong>LND</strong> or <strong>Core Lightning</strong> service page.
-                  </li>
-                  <li>
-                    Navigate to <strong>Config</strong> &rarr; <strong>Custom External Host</strong> (for LND) or <strong>General Settings</strong> (for Core Lightning).
-                  </li>
-                  <li>
-                    Enter your TunnelSats endpoint:
-                    <code style="font-size: 12px"
-                      ><span class="highlight-ip">tunnelsats_ip</span>:<span
-                        class="highlight-port"
-                        >tunnelsats_port</span
-                      ></code
-                    >
-                  </li>
-                  <li>
-                    Click <strong>Save</strong>. StartOS advertises this address to Lightning peers so they can connect.
-                  </li>
-                </ol>
-              </div>
-
-              <div
-                style="
-                  margin-top: 16px;
-                  border-left: 3px solid var(--accent-bitcoin);
-                  padding-left: 12px;
-                "
-              >
-                <h4
-                  style="
-                    color: var(--accent-bitcoin);
-                    font-size: 14px;
-                    margin-bottom: 8px;
-                  "
-                >
-                  2. Open Firewall (Peer Interface Toggle)
-                </h4>
-                <ol
-                  style="font-size: 12.5px; padding-left: 16px; margin-top: 4px"
-                >
-                  <li>
-                    In your Lightning node service page, click <strong>Interfaces</strong> &rarr; <strong>Peer Interface</strong> (for LND) or <strong>Peer</strong> (for Core Lightning).
-                  </li>
-                  <li>
-                    Locate your TunnelSats public IP address (<code>&lt;VPN_IP&gt;:9735</code>) in the list of available addresses.
-                  </li>
-                  <li>
-                    Toggle the address to <strong>ON</strong>. When StartOS displays the <em>"Address Requirements"</em> modal asking to test port 9735, click <strong>"Later"</strong>. StartOS tests generic external port 9735, which is not open on the VPN server, but clicking "Later" successfully enables the firewall rule for your assigned TunnelSats port.
-                  </li>
-                </ol>
-              </div>
-
-              <div
-                style="
-                  margin-top: 16px;
-                  border-left: 3px solid var(--accent-bitcoin);
-                  padding-left: 12px;
-                "
-              >
-                <h4
-                  style="
-                    color: var(--accent-bitcoin);
-                    font-size: 14px;
-                    margin-bottom: 8px;
-                  "
-                >
-                  3. Set Outbound Gateway (Full Egress Privacy)
-                </h4>
-                <ol
-                  style="font-size: 12.5px; padding-left: 16px; margin-top: 4px"
-                >
-                  <li>
-                    In your Lightning node service page (<strong>Services &rarr; LND</strong> or <strong>Services &rarr; Core Lightning</strong> — <em>do not configure this on the TunnelSats service page</em>), click <strong>Actions</strong> &rarr; <strong>Set Outbound Gateway</strong>.
-                  </li>
-                  <li>
-                    Select your <strong>TunnelSats</strong> gateway and confirm.
-                  </li>
-                  <li>
-                    StartOS defaults outbound traffic to Auto; assigning TunnelSats ensures all outgoing peer connections, gossip, and ping/pong packets route through the VPN tunnel, eliminating home IP leaks.
-                  </li>
-                </ol>
-              </div>
-            </div>
-          </details>
-
-          <!-- Q3b -->
-          <details class="faq-item">
-            <summary class="faq-question">
-              Why does the StartOS "Address Requirements" port test fail when enabling the Public peer interface?
-            </summary>
-            <div class="faq-answer">
-              <p>
-                <strong>The StartOS built-in test probes external port 9735, which is not mapped to your node.</strong>
-              </p>
-              <p>
-                When you toggle the Public switch ON, StartOS assumes a 1:1 NAT model and attempts to test <code>&lt;VPN_IP&gt;:9735</code> from an external server. However, TunnelSats provides dedicated port mapping using a unique high port (e.g. <code>server.tunnelsats.com:24556</code> &rarr; internal <code>9735</code>).
-              </p>
-              <p>
-                Because external port 9735 is closed on the WireGuard server, clicking <strong>"Test"</strong> will report a failure. 
-              </p>
-              <p>
-                <strong>What to do:</strong> Click <strong>"Later"</strong>. This saves and enables the public interface forwarding rule in StartOS nftables. Your node is now fully reachable on your assigned TunnelSats port!
-              </p>
-            </div>
-          </details>
-
-          <!-- Q3c -->
-          <details class="faq-item">
-            <summary class="faq-question">
-              Why does port forwarding fail if both LND and Core Lightning are installed?
-            </summary>
-            <div class="faq-answer">
-              <p>
-                <strong>StartOS allocates the external host port per interface binding (the container port is always 9735) and retains it across restarts:</strong>
-              </p>
-              <p>
-                Standard Lightning communication occurs on port <strong>9735</strong>. TunnelSats WireGuard gateways forward incoming peer traffic specifically to host port 9735.
-              </p>
-              <p>
-                If multiple Lightning implementations are installed (e.g. both Core Lightning and LND), StartOS allocates external host port 9735 to whichever node was installed first. Any subsequent node is assigned an arbitrary high host port (e.g. 63989) while its container still listens on 9735. Inbound TunnelSats traffic will only reach the node holding host port 9735.
-              </p>
-              <p>
-                <strong>Guidance:</strong> Install the Lightning node you intend to use with TunnelSats before installing any other Lightning node. If another node was already installed first and claimed host port 9735, uninstall the other node <strong>and</strong> reinstall the target node so it rebinds to host port 9735.
-              </p>
-            </div>
-          </details>
-
-          <!-- Q4 -->
-          <details class="faq-item">
-            <summary class="faq-question">
-              Is TunnelSats a general VPN for all my StartOS traffic?
-            </summary>
-            <div class="faq-answer">
-              <p>
-                <strong>No.</strong> TunnelSats is purpose-built exclusively for
-                Lightning Network routing.
-              </p>
-              <p>
-                It tunnels only your Lightning node's
-                <strong>inbound peer connections</strong> (LND or CLN) — not
-                your Bitcoin node, not your other StartOS apps, and not your
-                general internet traffic. Your Bitcoin node (bitcoind) continues
-                to use Tor as normal.
-              </p>
-              <p>
-                This is by design: TunnelSats gives your Lightning node a
-                stable, reachable clearnet identity for channel gossip, without
-                exposing your home IP or routing all your traffic through a
-                third party.
-              </p>
-              <p class="faq-note">
-                If you need a general-purpose VPN for all StartOS system
-                traffic, look for WireGuard or OpenVPN packages in the StartOS
-                app store.
-              </p>
-            </div>
-          </details>
-
-          <!-- Q5 -->
-          <details class="faq-item">
-            <summary class="faq-question">
-              What happens if my subscription expires while the tunnel is
-              active?
-            </summary>
-            <div class="faq-answer">
-              <p>
-                This is the most important thing to plan for. When your
-                subscription expires:
-              </p>
-              <ol>
-                <li>
-                  The WireGuard tunnel drops — your node can no longer receive
-                  inbound connections via the TunnelSats IP.
-                </li>
-                <li>
-                  However, your Lightning node's <strong>Custom External Host</strong> setting in StartOS still points to that now-dead endpoint address.
-                </li>
-                <li>
-                  Your node will broadcast an
-                  <strong>unreachable address</strong> to the network, causing
-                  peers to fail to connect and potentially affecting channel
-                  health.
-                </li>
-              </ol>
-              <p><strong>What to do before expiry:</strong></p>
               <ul>
                 <li>
-                  Watch the countdown timer on this dashboard — it turns amber
-                  when under 30 days remain.
+                  <strong>Inbound:</strong> peers connect to the TunnelSats
+                  server address and forwarded port; the traffic arrives at your
+                  node through <code>wg0</code>.
                 </li>
                 <li>
-                  Renew at
-                  <a
-                    href="https://tunnelsats.com"
-                    target="_blank"
-                    rel="noopener"
-                    >tunnelsats.com</a
+                  <strong>Outbound:</strong> policy routing (table 51820) sends
+                  the node's clearnet traffic (handshakes, gossip, ping/pong)
+                  through the tunnel while it is up.
+                </li>
+                <li>
+                  <strong>Kill switch caveat:</strong> the tunnel and its
+                  routing belong to your Lightning node package. With current
+                  node builds, clearnet traffic can fall back to your home
+                  connection if <code>wg0</code> goes down; a fix in the node
+                  packages is pending.
+                </li>
+                <li>
+                  <strong>Tor keeps working:</strong> onion connections continue
+                  over the container network as before.
+                </li>
+              </ul>
+              <p class="faq-note">
+                Nothing is configured box-wide: no StartOS gateways, no
+                interface firewall changes. Only the target node uses the
+                tunnel.
+              </p>
+            </div>
+          </details>
+
+          <details class="faq-item">
+            <summary class="faq-question">How do I buy a subscription?</summary>
+            <div class="faq-answer">
+              <ol>
+                <li>
+                  Run
+                  <strong
+                    >Services → TunnelSats → Actions → Buy Subscription</strong
                   >
-                  and paste your new config before the old one expires.
+                  and pick your node (LND, Core Lightning or Eclair), a server
+                  region and a plan.
                 </li>
                 <li>
-                  Or, if you won't renew: disable TunnelSats via ⚙ → Configure
-                  (set Enable to Off), clear the <strong>Custom External Host</strong> field in your Lightning node (Actions &amp; Config &rarr; Configuration &rarr; Custom External Host), and save.
-                </li>
-              </ul>
-            </div>
-          </details>
-
-          <!-- Q6 -->
-          <details class="faq-item">
-            <summary class="faq-question">
-              Are my WireGuard config and settings preserved if I uninstall the
-              app?
-            </summary>
-            <div class="faq-answer">
-              <p>
-                <strong
-                  >No — uninstalling TunnelSats from StartOS will delete your
-                  configuration data</strong
-                >, including your pasted WireGuard config and the
-                enabled/disabled state.
-              </p>
-              <p>
-                This is a StartOS platform behaviour: when a package is
-                uninstalled, its data volume (<code>/data</code>) is removed
-                along with the container.
-              </p>
-              <p><strong>Before uninstalling, you should:</strong></p>
-              <ol>
-                <li>
-                  Copy your WireGuard <code>.conf</code> content from ⚙ →
-                  Configure → WireGuard Configuration and save it somewhere
-                  safe.
+                  The action generates the WireGuard keys on your server; the
+                  private key never leaves it.
                 </li>
                 <li>
-                  Disable the TunnelSats tunnel (set Enable to Off and save) so
-                  your Lightning node falls back to Tor/clearnet.
+                  Accept the <strong>Pay Invoice</strong> task on your node, or
+                  pay the invoice from the action result with any wallet.
                 </li>
                 <li>
-                  Clear the <strong>Custom External Host</strong> field in your Lightning node settings (<strong>Actions &amp; Config &rarr; Configuration &rarr; Custom External Host</strong>).
+                  Once paid, TunnelSats saves the configuration and asks your
+                  node to route through the tunnel. Accept that task on the
+                  node.
                 </li>
-                <li>Only then uninstall TunnelSats.</li>
               </ol>
-              <p class="faq-note">
-                ⚠ Your subscription itself (purchased at tunnelsats.com) is not
-                affected by uninstalling the StartOS app. If you reinstall,
-                simply paste your <code>.conf</code> file again.
+              <p>
+                This dashboard does not take payments: every purchase runs
+                through the action, is paid with your node's Pay Invoice task
+                and is finished by TunnelSats itself.
               </p>
             </div>
           </details>
 
-          <!-- Q7 -->
           <details class="faq-item">
             <summary class="faq-question">
-              Can I run LND and Core Lightning (CLN) simultaneously through the same tunnel? How does switching work?
+              How do renewals work? What happens when it expires?
             </summary>
             <div class="faq-answer">
-              <p>
-                <strong>No, running LND and CLN in parallel through the same TunnelSats subscription is not supported.</strong> A single WireGuard tunnel receives traffic on one assigned public port and forwards it to a single target container.
-              </p>
-              <p>
-                <strong>Real-Time Switching:</strong> You can switch between LND and Core Lightning at any time in ⚙ → Configure by selecting a different Target Lightning Node.
-              </p>
-              <p>
-                When you switch, TunnelSats updates StartOS native gateway routing in real-time. Inbound connections arriving on your TunnelSats VPN address are immediately re-routed to your newly selected target node without needing to reconfigure WireGuard keys or purchase a new subscription.
-              </p>
-            </div>
-          </details>
-
-          <!-- Q8 -->
-          <details class="faq-item">
-            <summary class="faq-question">
-              Where can I report a bug or ask a question?
-            </summary>
-            <div class="faq-answer">
-              <p>
-                The best place is the <strong>GitHub Issues</strong> tracker for
-                this package:
-              </p>
-              <p>
-                <a
-                  href="https://github.com/Tunnelsats/tunnelsats-startos/issues/new/choose"
-                  target="_blank"
-                  rel="noopener"
-                  class="faq-cta-link"
-                  id="link-github-issue"
-                >
-                  → Open a new issue on GitHub
-                </a>
-              </p>
-              <p>When reporting, please include:</p>
               <ul>
-                <li>Your StartOS version</li>
                 <li>
-                  The TunnelSats package version (shown in the StartOS app list)
+                  Run the <strong>Renew Subscription</strong> action at any
+                  time; the invoice is paid through a Pay Invoice task on your
+                  node. The WireGuard key and your node's configuration stay as
+                  they are.
                 </li>
-                <li>A screenshot of this dashboard's status section</li>
                 <li>
-                  Any error messages shown in the StartOS logs for TunnelSats
+                  TunnelSats raises a Renew Subscription task 7 days before
+                  expiry, updates it at 3 days and again once it has expired,
+                  and posts StartOS notifications at the same points.
+                </li>
+                <li>
+                  <strong>If it expires:</strong> TunnelSats disables the tunnel
+                  on its server, so your node's clearnet peer connections
+                  through TunnelSats stop until you renew or turn off the
+                  clearnet VPN on your node.
                 </li>
               </ul>
+            </div>
+          </details>
+
+          <details class="faq-item">
+            <summary class="faq-question">
+              Can renewals happen automatically?
+            </summary>
+            <div class="faq-answer">
               <p>
-                For subscription and account questions, contact
-                <a href="https://tunnelsats.com" target="_blank" rel="noopener"
-                  >tunnelsats.com</a
+                <strong>Yes, via Nostr Wallet Connect (NWC).</strong> Run
+                <strong
+                  >Services → TunnelSats → Actions → Connect Wallet</strong
                 >
-                support directly.
+                in StartOS and paste a <code>nostr+walletconnect://</code> URI
+                from Alby Hub, LNbits or Clams. Set a spending budget at least
+                <strong>1.2×</strong> your expected renewal price (in sats) on
+                your wallet to absorb BTC/USD rate swings, and optionally route
+                relay traffic through Tor. If auto-renewal ever fails or exceeds
+                your budget, TunnelSats automatically falls back to raising a
+                manual <strong>Pay Invoice</strong> task on your node.
               </p>
             </div>
           </details>
 
-          <!-- Q9 -->
           <details class="faq-item">
             <summary class="faq-question">
-              Does TunnelSats support IPv6? What happens if I advertise an IPv6 address?
+              How does the 100 GB monthly allowance work?
             </summary>
             <div class="faq-answer">
               <p>
-                <strong>No, TunnelSats is an IPv4-only WireGuard VPN service.</strong>
-              </p>
-              <p>
-                Because TunnelSats provides an IPv4-only WireGuard tunnel, any IPv6 traffic or IPv6 address advertised on your Lightning node will route directly through your home internet service provider (ISP), bypassing TunnelSats completely.
-              </p>
-              <p>
-                <strong>Security Recommendation:</strong> Keep your Lightning node configured with IPv4 / Tor only to protect your home location. If you explicitly want dual-stack connectivity and accept revealing your home IPv6 address to peers, turn <strong>ON</strong> <em>Allow Home IPv6 Coexistence</em> under <strong>⚙ → Configure</strong>.
+                Each subscription includes 100 GB of transfer per calendar
+                month, reset on the 1st (00:00 UTC). Above 100 GB, TunnelSats
+                restricts the VPN connection. From 70% usage, the
+                <strong>Reset Bandwidth</strong> action resets the counter for a
+                small fee; resets per month are limited.
               </p>
             </div>
           </details>
 
-          <!-- Q10 -->
+          <details class="faq-item">
+            <summary class="faq-question">How is IPv6 handled?</summary>
+            <div class="faq-answer">
+              <p>
+                Your Lightning node package decides how IPv6 is routed. Current
+                builds send IPv6 through the tunnel when the configuration's
+                <code>AllowedIPs</code> include <code>::/0</code> (TunnelSats
+                configurations do), and block it otherwise.
+              </p>
+              <p>
+                The <strong>Allow IPv6 Endpoint</strong> setting only lets
+                TunnelSats hand your node an IPv6 server endpoint to announce.
+              </p>
+            </div>
+          </details>
+
           <details class="faq-item">
             <summary class="faq-question">
-              How do I independently audit and verify my node's network endpoints via CLI?
+              How do I back up my configuration?
             </summary>
             <div class="faq-answer">
               <p>
-                You can independently audit your Lightning node's announced endpoints and active network interfaces directly from the StartOS host terminal using <code>start-cli</code>.
+                Run <strong>Export WireGuard Configuration</strong> in StartOS
+                to copy the full configuration. It is also part of StartOS
+                backups. The dashboard never shows the private key.
               </p>
-              
-              <h4 style="color: var(--accent-bitcoin); font-size: 13.5px; margin-top: 14px; margin-bottom: 6px;">1. Inbound Lightning Gossip Announcement Audit</h4>
-              <p style="font-size: 12.5px; margin-bottom: 4px;">Confirm your node persistently announces your TunnelSats external domain and port to network peers:</p>
-              <div class="code-block-header">
-                <span>LND Announcement Check:</span>
-                <button class="btn-copy-code" onclick="copyCode('cli-lnd-info', this)">Copy</button>
-              </div>
-              <pre><code id="cli-lnd-info">start-cli package attach lnd -- lncli --rpcserver=127.0.0.1:10009 getinfo</code></pre>
-              <div class="code-block-header" style="margin-top: 8px;">
-                <span>Core Lightning Announcement Check:</span>
-                <button class="btn-copy-code" onclick="copyCode('cli-cln-info', this)">Copy</button>
-              </div>
-              <pre><code id="cli-cln-info">start-cli package attach -i lightning c-lightning -- lightning-cli getinfo</code></pre>
-              <p style="font-size: 11.5px; color: #8b949e; margin-top: 2px;">Expected result: The <code>uris</code> (LND) or <code>binding</code>/<code>address</code> (CLN) list contains <code>&lt;your_pubkey&gt;@<span class="highlight-ip">tunnelsats_ip</span>:<span class="highlight-port">tunnelsats_port</span></code>.</p>
-
-              <h4 style="color: var(--accent-bitcoin); font-size: 13.5px; margin-top: 14px; margin-bottom: 6px;">2. Target Node Outbound IPv4 Route Audit</h4>
-              <p style="font-size: 12.5px; margin-bottom: 4px;">Inspect the active IPv4 egress route used by your target node container:</p>
-              <div class="code-block-header">
-                <span>LND IPv4 Egress:</span>
-                <button class="btn-copy-code" onclick="copyCode('cli-lnd-v4', this)">Copy</button>
-              </div>
-              <pre><code id="cli-lnd-v4">start-cli package attach lnd -- curl -s https://api.ipify.org</code></pre>
-              <div class="code-block-header" style="margin-top: 8px;">
-                <span>Core Lightning IPv4 Egress:</span>
-                <button class="btn-copy-code" onclick="copyCode('cli-cln-v4', this)">Copy</button>
-              </div>
-              <pre><code id="cli-cln-v4">start-cli package attach -i lightning c-lightning -- bash -c 'exec 3<>/dev/tcp/api.ipify.org/80; printf "GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\n\r\n" >&3; cat <&3 | tail -n 1'</code></pre>
-              <p style="font-size: 11.5px; color: #8b949e; margin-top: 2px;">Expected result: Returns your numeric TunnelSats server IP (e.g. <code>83.228.229.56</code>) when WireGuard gateway routing is configured. If your residential IP is returned, outbound peer traffic is routing directly via your home connection.</p>
-
-              <h4 style="color: var(--accent-bitcoin); font-size: 13.5px; margin-top: 14px; margin-bottom: 6px;">3. Target Node IPv6 Isolation Audit</h4>
-              <p style="font-size: 12.5px; margin-bottom: 4px;">Verify whether IPv6 connectivity is unroutable or accessible:</p>
-              <div class="code-block-header">
-                <span>LND IPv6 Egress:</span>
-                <button class="btn-copy-code" onclick="copyCode('cli-lnd-v6', this)">Copy</button>
-              </div>
-              <pre><code id="cli-lnd-v6">start-cli package attach lnd -- curl -6 -s --connect-timeout 5 https://api6.ipify.org</code></pre>
-              <div class="code-block-header" style="margin-top: 8px;">
-                <span>Core Lightning IPv6 Egress:</span>
-                <button class="btn-copy-code" onclick="copyCode('cli-cln-v6', this)">Copy</button>
-              </div>
-              <pre><code id="cli-cln-v6">start-cli package attach -i lightning c-lightning -- bash -c 'timeout 3 bash -c "exec 3<>/dev/tcp/api6.ipify.org/80" 2>/dev/null && echo "LEAK" || echo "BLOCKED"'</code></pre>
-              <p style="font-size: 11.5px; color: #8b949e; margin-top: 2px;">Expected result when Allow IPv6 is OFF: <code>Network unreachable</code> or connection timeout.</p>
             </div>
           </details>
         </div>
-        <!-- /faq-body -->
       </div>
-      <!-- /faq-dialog-inner -->
     </dialog>
 
     <script src="script.js"></script>

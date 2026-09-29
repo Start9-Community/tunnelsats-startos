@@ -1,454 +1,205 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# TunnelSats StartOS 0.4.0 Service Diagnostic Tool
+# TunnelSats StartOS Service Diagnostic Tool
 # ==============================================================================
-# Audits TunnelSats service status, WireGuard gateway reachability,
-# target Lightning node inbound reachability (port 9735), and Tor connectivity.
+# Checks what can really be checked from the TunnelSats container: the stored
+# configuration, the subscription health check and the web dashboard API.
 #
-# Usage:
-#   Inside subcontainer:  /app/verify.sh
-#   From StartOS host:    ./verify.sh OR start-cli package attach tunnelsats /app/verify.sh
+# The WireGuard tunnel itself runs on the Lightning node (its clearnet-vpn
+# action), not in this container. This script therefore cannot see wg0, the
+# node's policy routing or its egress. It prints the node-side commands as
+# MANUAL steps and never reports the tunnel, routing or egress as verified.
+#
+# Usage (inside the TunnelSats container):  /app/verify.sh
+#
+# Overrides (for tests): TUNNELSATS_APP_DIR (default /app), DATA_DIR (default
+# /data, same variable as bridge.py), TUNNELSATS_WEB_URL (default
+# http://127.0.0.1).
 # ==============================================================================
 
-set -euo pipefail
+set -uo pipefail
 
-# ANSI color codes
+APP_DIR="${TUNNELSATS_APP_DIR:-/app}"
+DATA_DIR="${DATA_DIR:-/data}"
+WEB_URL="${TUNNELSATS_WEB_URL:-http://127.0.0.1}"
+BRIDGE="$APP_DIR/bridge.py"
+CONF_PATH="$DATA_DIR/tunnelsatsv3.conf"
+APP_CONFIG_PATH="$DATA_DIR/config.json"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
-}
-
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-log_step() {
-    echo -e "\n${BLUE}==> $1${NC}"
-}
+NC='\033[0m'
 
 FAILED_CHECKS=0
 
-# 1. Environment & Container Status Check
-log_step "1. Environment & Container Status"
+log_ok() { echo -e "${GREEN}[ OK ]${NC} $1"; }
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_fail() {
+    echo -e "${RED}[FAIL]${NC} $1"
+    FAILED_CHECKS=$((FAILED_CHECKS + 1))
+}
+log_step() { echo -e "\n${BLUE}==> $1${NC}"; }
 
-ENGINE="standalone"
+# Prints field $2 of the JSON object in $1 (or in its last line), or nothing
+# if absent/unparseable.
+json_field() {
+    printf '%s' "$1" | python3 -c '
+import json, sys
+text = sys.stdin.read().strip()
+try:
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = json.loads(text.splitlines()[-1])
+    value = data.get(sys.argv[1])
+except Exception:
+    sys.exit(0)
+if value is not None:
+    print(value)
+' "$2" 2>/dev/null
+}
 
-if [ -f "/app/bridge.py" ]; then
-    ENGINE="inside"
-    log_info "Running diagnostic checks from inside the TunnelSats subcontainer namespace."
-elif command -v start-cli &> /dev/null && timeout 2 start-cli echo test &> /dev/null; then
-    ENGINE="host"
-    log_info "Running diagnostic checks from StartOS host with start-cli available."
+# 1. Environment
+log_step "1. Environment"
+if [ -f "$BRIDGE" ]; then
+    log_ok "Running inside the TunnelSats container ($BRIDGE)."
 else
-    ENGINE="standalone"
-    log_info "Running diagnostics in standalone local mode."
+    log_fail "bridge.py not found at $BRIDGE. Run this script inside the TunnelSats container; the checks below cannot pass elsewhere."
 fi
 
-# 2. Querying TunnelSats Gateway Status
-log_step "2. Querying TunnelSats Gateway Status"
-API_DATA=""
-if [ "$ENGINE" == "host" ]; then
-    API_DATA=$(start-cli package attach tunnelsats -- python3 -c "
-import urllib.request
-for path in ['/api/status', '/api/properties']:
-    try:
-        req = urllib.request.Request('http://127.0.0.1' + path, headers={'Host': 'localhost'})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            print(r.read().decode('utf-8'))
-            break
-    except Exception:
-        continue
-" 2>/dev/null | tr -d '\r' || true)
+# 2. TunnelSats configuration
+log_step "2. TunnelSats configuration"
+TARGET_NODE="lnd"
+ENABLED=""
+APP_CONFIG=""
+if [ -f "$CONF_PATH" ]; then
+    log_ok "Stored WireGuard configuration found."
+else
+    log_fail "No stored WireGuard configuration ($CONF_PATH). Run Buy Subscription or Import Subscription."
+fi
+if [ -f "$APP_CONFIG_PATH" ]; then
+    APP_CONFIG=$(cat "$APP_CONFIG_PATH" 2>/dev/null || true)
+    ENABLED=$(json_field "$APP_CONFIG" "enabled")
+    STORED_TARGET=$(json_field "$APP_CONFIG" "target-node")
+    case "$STORED_TARGET" in
+        lnd | cln | eclair) TARGET_NODE="$STORED_TARGET" ;;
+    esac
+    # Mirrors the package's config.json model (enabled: z.boolean().catch(false)),
+    # which drives the node task and the health check. bridge.py's legacy
+    # "enabled when a config file exists" default does not route anything.
+    if [ "$ENABLED" == "True" ]; then
+        log_ok "TunnelSats is enabled for target node: $TARGET_NODE."
+    elif [ -z "$ENABLED" ]; then
+        log_fail "TunnelSats settings have no 'enabled' flag (settings from an older version). StartOS treats this as switched off, so no node is asked to run the tunnel. Run Configure → Enable TunnelSats."
+    else
+        log_fail "TunnelSats is switched off (Configure → Enable TunnelSats)."
+    fi
+else
+    log_fail "No TunnelSats settings ($APP_CONFIG_PATH)."
 fi
 
-if [ -z "$API_DATA" ]; then
-    API_DATA=$(python3 -c "
-import urllib.request
-for path in ['/api/status', '/api/properties']:
-    try:
-        req = urllib.request.Request('http://127.0.0.1' + path, headers={'Host': 'localhost'})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            print(r.read().decode('utf-8'))
-            break
-    except Exception:
-        continue
-" 2>/dev/null | tr -d '\r' || true)
+case "$TARGET_NODE" in
+    cln) TARGET_PKG="c-lightning" ;;
+    eclair) TARGET_PKG="eclair" ;;
+    *) TARGET_PKG="lnd" ;;
+esac
+
+# 3. Subscription health (the same check StartOS runs)
+log_step "3. Subscription health"
+if [ -f "$BRIDGE" ]; then
+    # stdout carries the JSON result; bridge.py logs to stderr.
+    HEALTH_OUT=$(python3 "$BRIDGE" health subscription 2>/dev/null)
+    HEALTH_EXIT=$?
+    HEALTH_RESULT=$(json_field "$HEALTH_OUT" "result")
+    HEALTH_MSG=$(json_field "$HEALTH_OUT" "message")
+    if [ "$HEALTH_RESULT" == "ok" ] && [ ! -f "$CONF_PATH" ]; then
+        # bridge.py answers "ok" ("Unconfigured") when no config is stored.
+        log_fail "Subscription not checked: no stored WireGuard configuration (${HEALTH_MSG})."
+    elif [ "$HEALTH_EXIT" -eq 0 ] && [ "$HEALTH_RESULT" == "ok" ]; then
+        log_ok "Subscription confirmed by the TunnelSats API: ${HEALTH_MSG}"
+    elif [ "$HEALTH_RESULT" == "loading" ]; then
+        log_fail "Subscription not confirmed yet: ${HEALTH_MSG}"
+    elif [ "$HEALTH_RESULT" == "disabled" ]; then
+        log_fail "Subscription health skipped: ${HEALTH_MSG}"
+    elif [ -n "$HEALTH_RESULT" ]; then
+        log_fail "Subscription health check failed: ${HEALTH_MSG}"
+    else
+        log_fail "Subscription health check returned no result (exit ${HEALTH_EXIT})."
+    fi
+else
+    log_fail "Subscription health check cannot run without bridge.py."
 fi
 
-STATUS="unknown"
-SUB_ACTIVE="unknown"
-GW_MODE="host_managed"
-VPN_IP=""
-VPN_PORT=""
+# 4. Web dashboard API
+log_step "4. Web dashboard API"
 SERVER=""
-RESOLVED_SERVER_IP=""
-TARGET_HOST="lnd.embassy"
-TARGET_PORT="9735"
-ALLOW_IPV6="False"
-
-if [ -n "$API_DATA" ]; then
-    PARSED_VALUES=$(printf '%s\n' "$API_DATA" | python3 -c "
-import json, sys
-
-try:
-    data = json.loads(sys.stdin.read())
-    raw = data.get('raw', data)
-    status = raw.get('status', data.get('Status', {}).get('value', 'unknown'))
-    sub_active = str(raw.get('subscription_active', raw.get('status') == 'running'))
-    gw_mode = raw.get('gateway_mode', 'host_managed')
-    vpn_ip = raw.get('vpn_ip', raw.get('internal_octet', data.get('Internal IP (Last Octet)', {}).get('value', '')))
-    vpn_port = raw.get('vpn_port', data.get('Forwarding Port', {}).get('value', ''))
-    server = raw.get('server', raw.get('public_ip', data.get('TunnelSats Public IP', {}).get('value', '')))
-    target_h = raw.get('target_host', 'lnd.embassy')
-    target_p = str(raw.get('target_port', 9735))
-    allow_v6 = str(raw.get('allow_ipv6', False))
-    pubkey = raw.get('pubkey', '')
-    print('|'.join([str(v) for v in [status, sub_active, gw_mode, vpn_ip, vpn_port, server, target_h, target_p, allow_v6, pubkey]]))
-except Exception as e:
-    print('ERROR||||||||' + str(e))
-" 2>/dev/null | tr -d '\r' || true)
-    
-    IFS='|' read -r STATUS SUB_ACTIVE GW_MODE VPN_IP VPN_PORT SERVER TARGET_HOST TARGET_PORT ALLOW_IPV6 PUBKEY <<< "$PARSED_VALUES"
-
-    if [ -n "$SERVER" ] && [ "$SERVER" != "unknown" ]; then
-        RESOLVED_SERVER_IP=$(python3 -c 'import sys, socket; print(socket.gethostbyname(sys.argv[1]))' "$SERVER" 2>/dev/null || true)
-    fi
-    
-    log_info "Gateway Status Properties:"
-    echo "  - Status: ${STATUS:-unknown}"
-    echo "  - Subscription Active: ${SUB_ACTIVE:-unknown}"
-    echo "  - Gateway Mode: ${GW_MODE:-host_managed}"
-    echo "  - Internal VPN IP: ${VPN_IP:-unknown}"
-    echo "  - Forwarded Port: ${VPN_PORT:-unknown}"
-    echo "  - Server: ${SERVER:-unknown}"
-
-    if [ "$SUB_ACTIVE" != "True" ] && [ "$SUB_ACTIVE" != "true" ]; then
-        log_warn "TunnelSats subscription or configuration is inactive (status: $STATUS)."
-        FAILED_CHECKS=$((FAILED_CHECKS + 1))
-    fi
-
-    if [ "$ENGINE" == "host" ]; then
-        TS_WG_IFACE=""
-        if command -v wg &> /dev/null && sudo wg show interfaces &> /dev/null; then
-            for iface in $(sudo wg show interfaces); do
-                IFACE_PUBKEY=$(sudo wg show "$iface" public-key 2>/dev/null || true)
-                IFACE_ENDPOINTS=$(sudo wg show "$iface" endpoints 2>/dev/null || true)
-                if [ -n "$PUBKEY" ] && [ "$PUBKEY" != "None" ] && [ "$IFACE_PUBKEY" == "$PUBKEY" ]; then
-                    TS_WG_IFACE="$iface"
-                    break
-                elif [ -n "$RESOLVED_SERVER_IP" ] && [[ "$IFACE_ENDPOINTS" =~ "$RESOLVED_SERVER_IP" ]]; then
-                    TS_WG_IFACE="$iface"
-                    break
-                fi
-            done
-        fi
-
-        if [ -z "$TS_WG_IFACE" ] && command -v start-cli &> /dev/null; then
-            TS_WG_IFACE=$(start-cli net gateway list 2>/dev/null | awk -v ip="$VPN_IP" -v wan="$RESOLVED_SERVER_IP" '
-                ($0 ~ ip && ip != "") || ($0 ~ wan && wan != "") {
-                    for (i=1; i<=NF; i++) {
-                        if ($i ~ /^wg[0-9]+$/) {
-                            print $i
-                            exit
-                        }
-                    }
-                }' | head -n 1)
-        fi
-
-        if [ -n "$TS_WG_IFACE" ]; then
-            if command -v wg &> /dev/null && sudo wg show "$TS_WG_IFACE" &> /dev/null; then
-                WG_HANDSHAKE=$(sudo wg show "$TS_WG_IFACE" latest-handshakes 2>/dev/null | awk '{print $2}' || echo "0")
-                CURRENT_EPOCH=$(date +%s)
-                if [ -n "$WG_HANDSHAKE" ] && [ "$WG_HANDSHAKE" -gt 0 ]; then
-                    DIFF=$((CURRENT_EPOCH - WG_HANDSHAKE))
-                    if [ "$DIFF" -lt 300 ]; then
-                        log_info "Host WireGuard interface ($TS_WG_IFACE) confirmed active for TunnelSats with recent handshake (${DIFF}s ago) ✅"
-                    else
-                        log_error "Host WireGuard interface ($TS_WG_IFACE) handshake is stale (${DIFF}s ago)."
-                        FAILED_CHECKS=$((FAILED_CHECKS + 1))
-                    fi
-                else
-                    log_error "Host WireGuard interface ($TS_WG_IFACE) has never completed a handshake."
-                    FAILED_CHECKS=$((FAILED_CHECKS + 1))
-                fi
-            else
-                log_info "StartOS host WireGuard gateway ($TS_WG_IFACE) detected in gateway list ✅"
-            fi
-        else
-            log_error "No host WireGuard gateway matching TunnelSats configuration (IP: ${VPN_IP}, Endpoint: ${RESOLVED_SERVER_IP:-$SERVER}) was detected."
-            FAILED_CHECKS=$((FAILED_CHECKS + 1))
-        fi
-    fi
-else
-    log_warn "Could not retrieve /api/status or /api/properties. Web server may be initializing or unconfigured."
-    FAILED_CHECKS=$((FAILED_CHECKS + 1))
-fi
-
-TARGET_PKG="lnd"
-if [[ "$TARGET_HOST" =~ "c-lightning" ]] || [[ "$TARGET_HOST" =~ "cln" ]]; then
-    TARGET_PKG="c-lightning"
-fi
-
-# (RESOLVED_SERVER_IP resolved earlier during gateway discovery)
-
-# 3. Target Lightning Node Inbound Reachability Audit
-log_step "3. Target Lightning Node Inbound Reachability Audit"
-log_info "Testing internal TCP reachability to target node: ${TARGET_HOST}:${TARGET_PORT}"
-
-LN_REACHABLE="false"
-if python3 -c '
-import socket, sys
-s = socket.socket()
-s.settimeout(3)
-try:
-    s.connect((sys.argv[1], int(sys.argv[2])))
-    s.close()
-    sys.exit(0)
-except Exception:
-    sys.exit(1)
-' "$TARGET_HOST" "$TARGET_PORT" 2>/dev/null; then
-    LN_REACHABLE="true"
-    log_info "Target Lightning node is listening on ${TARGET_HOST}:${TARGET_PORT} (Container bridge reachability ✅)"
-else
-    log_warn "Target Lightning node (${TARGET_HOST}:${TARGET_PORT}) is currently unreachable or starting up."
-fi
-
-if [ "$ENGINE" == "host" ]; then
-    BINDING_JSON=$(start-cli package host "$TARGET_PKG" binding peer list --format json 2>/dev/null || true)
-    if [ -n "$BINDING_JSON" ]; then
-        ASSIGNED_PORT=$(printf "%s" "$BINDING_JSON" | python3 -c '
-import json, sys
-try:
-    data = json.loads(sys.stdin.read())
-    for k, v in data.items():
-        print(v.get("net", {}).get("assignedPort", ""))
-        break
-except Exception:
-    pass
-' 2>/dev/null || true)
-
-        ENABLED_ADDRS=$(printf "%s" "$BINDING_JSON" | python3 -c '
-import json, sys
-try:
-    data = json.loads(sys.stdin.read())
-    addrs = []
-    for k, v in data.items():
-        addrs.extend(v.get("addresses", {}).get("enabled", []))
-    print(",".join(addrs))
-except Exception:
-    pass
-' 2>/dev/null || true)
-
-        if [ "$ASSIGNED_PORT" == "9735" ]; then
-            log_info "Target node ($TARGET_PKG) holds internal port 9735 ✅"
-        elif [ -n "$ASSIGNED_PORT" ]; then
-            log_error "Target node ($TARGET_PKG) is bound to port $ASSIGNED_PORT instead of 9735! Inbound TunnelSats traffic is forwarded to port 9735. If another service holds 9735, release it."
-            FAILED_CHECKS=$((FAILED_CHECKS + 1))
-        fi
-
-        CLEAN_VPN_IP="${VPN_IP%%/*}"
-        MATCHING_ENABLED_ADDR=$(printf "%s" "$BINDING_JSON" | python3 -c '
-import json, sys
-vpn_ip = sys.argv[1]
-server = sys.argv[2]
-resolved_server = sys.argv[3]
-
-expected = set()
-if vpn_ip: expected.add(f"{vpn_ip}:9735")
-if server and server != "unknown": expected.add(f"{server}:9735")
-if resolved_server and resolved_server != "unknown": expected.add(f"{resolved_server}:9735")
-
-try:
-    data = json.loads(sys.stdin.read())
-    found = []
-    for k, v in data.items():
-        enabled = v.get("addresses", {}).get("enabled", [])
-        for addr in enabled:
-            if addr in expected:
-                found.append(addr)
-    print(",".join(found))
-except Exception:
-    pass
-' "$CLEAN_VPN_IP" "$SERVER" "$RESOLVED_SERVER_IP" 2>/dev/null || true)
-
-        if [ -n "$MATCHING_ENABLED_ADDR" ]; then
-            log_info "Target node ($TARGET_PKG) has public address toggle ENABLED in Peer Interface (${MATCHING_ENABLED_ADDR}) ✅"
-        else
-            log_error "Target node ($TARGET_PKG) does NOT have TunnelSats public address enabled in Peer Interface! Go to $TARGET_PKG -> Interfaces -> Peer Interface and toggle ON ${RESOLVED_SERVER_IP:-${SERVER:-$CLEAN_VPN_IP}}:9735 to open the firewall."
-            FAILED_CHECKS=$((FAILED_CHECKS + 1))
-        fi
-    fi
-
-    if [ -n "$SERVER" ] && [ "$SERVER" != "unknown" ] && [ -n "$VPN_PORT" ] && [ "$VPN_PORT" != "unknown" ]; then
-        if python3 -c '
-import socket, sys
-s = socket.socket()
-s.settimeout(3)
-try:
-    s.connect((sys.argv[1], int(sys.argv[2])))
-    s.close()
-    sys.exit(0)
-except Exception:
-    sys.exit(1)
-' "$SERVER" "$VPN_PORT" 2>/dev/null; then
-            log_info "External WAN ingress probe to ${SERVER}:${VPN_PORT} SUCCEEDED ✅"
-        else
-            log_warn "Direct probe to ${SERVER}:${VPN_PORT} did not connect from this host (may be blocked by NAT loopback). Test externally via https://portchecker.co."
-        fi
-    fi
-elif [ "$ENGINE" == "inside" ]; then
-    log_warn "Note: Internal container reachability does not guarantee external WAN ingress or firewall open state. Run './verify.sh' on the StartOS host to audit host bindings and WAN reachability."
-fi
-
-# 4. Tor Coexistence & SOCKS Proxy Check
-log_step "4. Tor Coexistence & SOCKS Proxy Check"
-TOR_FOUND=false
-for tor_host in "tor.embassy" "127.0.0.1" "localhost"; do
-    if python3 -c '
-import socket, sys
-s = socket.socket()
-s.settimeout(2)
-try:
-    s.connect((sys.argv[1], int(sys.argv[2])))
-    s.close()
-    sys.exit(0)
-except Exception:
-    sys.exit(1)
-' "$tor_host" 9050 2>/dev/null; then
-        TOR_FOUND=true
-        log_info "Tor proxy accessible ($tor_host:9050). Onion routing coexistence functional."
-        break
-    fi
-done
-
-if [ "$TOR_FOUND" = false ]; then
-    if [ -n "${BRIDGE_TOR:-}" ]; then
-        log_info "Tor proxy accessible (BRIDGE_TOR). Onion routing coexistence functional."
+VPN_PORT=""
+ALLOW_IPV6=""
+API_DATA=$(python3 -c '
+import sys, urllib.request
+req = urllib.request.Request(sys.argv[1] + "/api/status", headers={"Host": "localhost"})
+with urllib.request.urlopen(req, timeout=5) as r:
+    print(r.read().decode("utf-8"))
+' "$WEB_URL" 2>/dev/null || true)
+if [ -n "$(json_field "$API_DATA" "configured")" ]; then
+    log_ok "Web dashboard API reachable ($WEB_URL/api/status)."
+    SERVER=$(json_field "$API_DATA" "server")
+    VPN_PORT=$(json_field "$API_DATA" "vpn_port")
+    ALLOW_IPV6=$(json_field "$API_DATA" "allow_ipv6")
+    if [ "$(json_field "$API_DATA" "configured")" == "True" ] && [ -n "$SERVER" ] &&
+        [ "$SERVER" != "Unknown" ] && [ -n "$VPN_PORT" ]; then
+        log_ok "Configured TunnelSats server: ${SERVER}, forwarded port: ${VPN_PORT}"
     else
-        log_info "Tor SOCKS proxy (port 9050) not detected on local network. (Expected if Tor is uninstalled)."
-    fi
-fi
-
-# 5. Target Lightning Node Port Forwarding Profile
-log_step "5. Target Lightning Node Port Forwarding Profile"
-if [ -n "$SERVER" ] && [ "$SERVER" != "unknown" ] && [ -n "$VPN_PORT" ] && [ "$VPN_PORT" != "unknown" ]; then
-    log_info "Target Node Announcement Profile: ${SERVER}:${VPN_PORT}"
-    log_info "Lightning peer connection string: <your_node_pubkey>@${SERVER}:${VPN_PORT}"
-    echo -e "\n  To verify announced URIs on your Lightning node (run on StartOS host):"
-    if [ "$TARGET_PKG" == "lnd" ]; then
-        echo "  start-cli package attach lnd -- lncli --rpcserver=127.0.0.1:10009 getinfo"
-    else
-        echo "  start-cli package attach -i lightning c-lightning -- lightning-cli getinfo"
+        log_fail "The service reports no usable server/forwarded port."
     fi
 else
-    log_warn "Target announcement endpoint unconfigured or missing WireGuard port metadata."
-    FAILED_CHECKS=$((FAILED_CHECKS + 1))
+    log_fail "Web dashboard API unreachable or invalid at $WEB_URL/api/status."
 fi
 
-# 6. Host-Level CLI Audit Recipes & Live Egress Probing
-log_step "6. Host-Level CLI Audit Recipes & Live Egress Probing"
-log_info "Target Lightning Node: ${TARGET_PKG} (${TARGET_HOST})"
+# 5. Node-side checks: printed, never executed or claimed
+log_step "5. Node-side tunnel checks (MANUAL, not executed by this script)"
+log_info "The tunnel runs on ${TARGET_PKG}. Open a shell in that container, e.g."
+echo "    start-cli package attach ${TARGET_PKG}"
+echo "  and run:"
+echo "    wg show wg0                    # recent handshake, non-zero rx/tx"
+echo "    ip rule                        # a rule with 'lookup 51820' (fwmark 0xca6c = 51820)"
+echo "    ip route show table 51820      # 'default dev wg0'"
+echo "    curl -4 -s https://ifconfig.me # must print the TunnelSats server IP, not your home IP"
 if [ "$ALLOW_IPV6" == "True" ]; then
-    log_warn "Allow Home IPv6 Coexistence is ENABLED (IPv6 connections route via home ISP)."
+    echo "    (Allow Home IPv6 Coexistence is ON: IPv6 leaves via your home ISP by design.)"
 else
-    log_info "Allow Home IPv6 Coexistence is DISABLED (default IPv6 gossip suppression)."
+    echo "    ip -6 route show table 51820   # 'blackhole default': IPv6 cannot leave outside the tunnel"
+    echo "    curl -6 -sS --max-time 5 https://ifconfig.me; echo \" curl exit \$?\""
+    echo "      # prints an IP address: IPv6 LEAKS past the tunnel."
+    echo "      # 'Failed to connect' / 'Network is unreachable' (exit 7): no IPv6 egress."
+    echo "      # 'Could not resolve host' (exit 6), a timeout (exit 28) or any other error: NOT verified, the probe itself did not run."
 fi
-
-echo -e "\n  Run these commands on the StartOS host to independently audit target node traffic:"
-echo "  1. Audit Target Outbound IPv4:  start-cli package attach ${TARGET_PKG} -- curl -s https://api.ipify.org"
-if [ -n "$RESOLVED_SERVER_IP" ]; then
-    echo "     (Expected Output when VPN-routed: ${RESOLVED_SERVER_IP} / ${SERVER})"
-fi
-echo "     (If output matches your home ISP, set: Services → ${TARGET_PKG} → Actions → Set Outbound Gateway → TunnelSats)"
-echo "  2. Audit Target IPv6 Isolation: start-cli package attach ${TARGET_PKG} -- curl -6 -s --connect-timeout 5 https://api6.ipify.org"
-if [ "$ALLOW_IPV6" == "True" ]; then
-    echo "     (Allow IPv6 is ON: Expected Output: <Home_ISP_IPv6>)"
+# The node task announces the Endpoint host of the stored config with the
+# forwarded port (getAnnounceEndpoint), not the `# Server:` comment that
+# /api/status reports as the server.
+ENDPOINT=$(json_field "$APP_CONFIG" "tunnelsats-conf" | python3 -c '
+import re, sys
+m = re.search(r"^\s*Endpoint\s*=\s*([^\s#]+)", sys.stdin.read(), re.IGNORECASE | re.MULTILINE)
+if m:
+    print(m.group(1))
+' 2>/dev/null || true)
+if [ -n "$ENDPOINT" ] && [ -n "$VPN_PORT" ]; then
+    echo "  Public address: the node should announce the host of your WireGuard Endpoint (${ENDPOINT}) with the forwarded port ${VPN_PORT}."
+    echo "  The exact value TunnelSats requested is the 'Public Address' field of the ${TARGET_PKG} Clearnet VPN action."
 else
-    echo "     (Allow IPv6 is OFF: Expected Output: Network unreachable / Timeout)"
-fi
-
-# In-container note vs host live probe execution
-if [ "$ENGINE" == "inside" ]; then
-    log_warn "Target-node live egress probes cannot run from inside an isolated container namespace."
-    log_info "To audit live target egress, run ./verify.sh from the host or use the CLI commands above."
-elif [ "$ENGINE" == "host" ]; then
-    log_info "Executing live target node egress probe via host start-cli..."
-    ATTACH_CMD="start-cli package attach"
-    if [ "$TARGET_PKG" == "c-lightning" ]; then
-        ATTACH_CMD="start-cli package attach -i lightning c-lightning"
-    else
-        ATTACH_CMD="start-cli package attach $TARGET_PKG"
-    fi
-
-    TARGET_EGRESS=""
-    if [ "$TARGET_PKG" == "c-lightning" ]; then
-        TARGET_EGRESS=$($ATTACH_CMD -- perl -e 'use IO::Socket::INET; my $s = IO::Socket::INET->new(PeerAddr => "api.ipify.org", PeerPort => 80, Proto => "tcp", Timeout => 5); if ($s) { print $s "GET / HTTP/1.1
-Host: api.ipify.org
-Connection: close
-
-"; while(<$s>){ chomp; $ip = $_; } print $ip; }' 2>/dev/null || true)
-    else
-        TARGET_EGRESS=$($ATTACH_CMD -- curl -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || true)
-    fi
-    TARGET_EGRESS=$(printf '%s' "$TARGET_EGRESS" | tr -d '[:space:]')
-
-    if [ -n "$TARGET_EGRESS" ]; then
-        if [ "$TARGET_EGRESS" == "$RESOLVED_SERVER_IP" ] || [ "$TARGET_EGRESS" == "$SERVER" ]; then
-            log_info "Target node live IPv4 egress: $TARGET_EGRESS (Matches TunnelSats VPN IP ✅)"
-        else
-            log_error "Target node live IPv4 egress: $TARGET_EGRESS (Does not match TunnelSats VPN IP ${RESOLVED_SERVER_IP:-$SERVER})"
-            log_error "Remediation: In StartOS, navigate to Services → ${TARGET_PKG} → Actions → Set Outbound Gateway and select TunnelSats to prevent home IP leakage."
-            FAILED_CHECKS=$((FAILED_CHECKS + 1))
-        fi
-    else
-        log_error "Could not probe outbound IPv4 egress from ${TARGET_PKG} container."
-        FAILED_CHECKS=$((FAILED_CHECKS + 1))
-    fi
-
-    if [ "$ALLOW_IPV6" != "True" ]; then
-        RAW_V6_OUTPUT=""
-        if [ "$TARGET_PKG" == "c-lightning" ]; then
-            RAW_V6_OUTPUT=$($ATTACH_CMD -- perl -MSocket -e 'socket(my $s, AF_INET6, SOCK_STREAM, getprotobyname("tcp")); my $sin6 = Socket::pack_sockaddr_in6(443, Socket::inet_pton(AF_INET6, "2607:f2d8:1:3c::4")); if (connect($s, $sin6)) { print "CONNECTED"; } else { print "CONNECT_FAILED: $!"; }' 2>&1 || true)
-        else
-            RAW_V6_OUTPUT=$($ATTACH_CMD -- curl -6 -v -s --connect-timeout 5 https://api6.ipify.org 2>&1 || true)
-        fi
-        RAW_V6_OUTPUT=$(printf '%s' "$RAW_V6_OUTPUT" | tr -d '\r')
-
-        # Fail-Closed Verification:
-        # 1. Successful connection indicates active IPv6 egress (home IP leak)
-        # 2. Explicit kernel unreachable status indicates proper fail-closed isolation
-        # 3. Any ambiguous failure (timeout, connection refused, DNS error, empty output) must fail closed as unverified
-        if [[ "$RAW_V6_OUTPUT" =~ "CONNECTED" ]] || ([[ "$RAW_V6_OUTPUT" =~ "< HTTP/" ]] && [[ ! "$RAW_V6_OUTPUT" =~ "failed:" ]]); then
-            log_error "Target node live IPv6 is ACTIVE and leaking home ISP connection: $RAW_V6_OUTPUT"
-            FAILED_CHECKS=$((FAILED_CHECKS + 1))
-        elif [[ "$RAW_V6_OUTPUT" =~ "Network unreachable" ]] || [[ "$RAW_V6_OUTPUT" =~ "Network is unreachable" ]] || [[ "$RAW_V6_OUTPUT" =~ "ENETUNREACH" ]]; then
-            log_info "Target node live IPv6 isolation: BLOCKED / UNROUTABLE (Kernel route unreachable confirmed ✅)"
-        else
-            log_error "Could not verify IPv6 isolation from ${TARGET_PKG} container. Ambiguous probe output did not confirm unroutable network state: $RAW_V6_OUTPUT"
-            FAILED_CHECKS=$((FAILED_CHECKS + 1))
-        fi
-    fi
+    echo "  Public address: compare what the node announces with the 'Public Address' field of the ${TARGET_PKG} Clearnet VPN action."
 fi
 
 # Summary
 log_step "Verification Summary"
-if [ $FAILED_CHECKS -gt 0 ]; then
-    log_error "Diagnostic audit completed with $FAILED_CHECKS failure(s)."
+if [ "$FAILED_CHECKS" -gt 0 ]; then
+    log_fail "Diagnostics finished: $FAILED_CHECKS check(s) failed."
+    echo "Tunnel, routing and IPv4/IPv6 egress are NOT verified by this script."
     exit 1
-elif [ "$ENGINE" == "inside" ]; then
-    log_info "TunnelSats service diagnostics completed successfully."
-    log_warn "Note: Target-node live egress was unverified in container mode. Audit on host via: start-cli package attach ${TARGET_PKG} -- curl -s https://api.ipify.org"
-    exit 0
-else
-    log_info "All service and target node live diagnostic probes finished successfully."
-    exit 0
 fi
+log_ok "TunnelSats service checks passed."
+echo "Tunnel, routing and IPv4/IPv6 egress are NOT verified by this script; run the manual node-side checks above."
+exit 0

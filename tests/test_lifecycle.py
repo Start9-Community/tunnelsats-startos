@@ -1,6 +1,7 @@
 import unittest
 import os
 import sys
+import json
 from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -69,42 +70,34 @@ class TestBridgeLifecycle(unittest.TestCase):
         valid_conf = "[Interface]\nPrivateKey = hidden_key\nAddress = 10.x.x.x/32\n# Port Forwarding: 54321\n[Peer]\nEndpoint = 198.51.100.1:51820"
         bridge.validate_config(valid_conf)
 
-    @patch('os.replace')
     @patch('urllib.request.urlopen')
-    @patch('builtins.open', new_callable=unittest.mock.mock_open)
-    def test_lazy_sync_success(self, mock_open, mock_urlopen, mock_replace):
-        mock_response = MagicMock()
-        mock_response.status = 200
-        mock_response.read.return_value = b'{"expiry": "2026-12-31T23:59:59Z", "server_domain": "ch1.tunnelsats.com", "vpn_port": 24556}'
-        mock_response.__enter__ = lambda s: s
-        mock_response.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_response
-        
-        bridge.lazy_sync("mock_pubkey_123")
-        
-        mock_open.assert_called_with(bridge.META_FILE_PATH + ".tmp", 'w')
-        handle = mock_open()
-        written_data = "".join([call.args[0] for call in handle.write.call_args_list])
-        import json
-        parsed_written = json.loads(written_data)
-        self.assertEqual(parsed_written["expiresAt"], "2026-12-31T23:59:59Z")
-        self.assertEqual(parsed_written["serverDomain"], "ch1.tunnelsats.com")
-        self.assertEqual(parsed_written["vpnPort"], 24556)
-        self.assertTrue(parsed_written["syncSuccess"])
+    def test_lazy_sync_success(self, mock_urlopen):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_file = os.path.join(tmpdir, "tunnelsats-meta.json")
+            orig_meta = bridge.META_FILE_PATH
+            try:
+                bridge.META_FILE_PATH = meta_file
+                mock_response = MagicMock()
+                mock_response.status = 200
+                mock_response.read.return_value = b'{"expiry": "2026-12-31T23:59:59Z", "server_domain": "ch1.tunnelsats.com", "vpn_port": 24556}'
+                mock_response.__enter__ = lambda s: s
+                mock_response.__exit__ = MagicMock(return_value=False)
+                mock_urlopen.return_value = mock_response
 
-    @patch('builtins.open', new_callable=unittest.mock.mock_open, read_data='{"expiresAt": "2026-12-31T23:59:59Z"}')
-    @patch('os.path.exists')
-    @patch('bridge.datetime')
-    def test_format_subscription_expiry_active(self, mock_datetime, mock_exists, mock_open):
-        mock_exists.return_value = True
-        
-        from datetime import datetime, timezone
-        fixed_now = datetime(2026, 12, 20, 12, 0, 0, tzinfo=timezone.utc)
-        mock_datetime.now.return_value = fixed_now
-        mock_datetime.fromisoformat.side_effect = lambda s: datetime.fromisoformat(s)
-        
-        result = bridge.format_subscription_expiry()
-        self.assertEqual(result, "Active (Expires in 11d 11h)")
+                with patch('bridge.get_wg_pubkey', return_value="mock_pubkey_123"):
+                    self.assertEqual(bridge.lazy_sync("mock_pubkey_123"), "confirmed")
+
+                self.assertTrue(os.path.exists(meta_file))
+                with open(meta_file, "r") as f:
+                    parsed_written = json.load(f)
+                self.assertEqual(parsed_written["expiresAt"], "2026-12-31T23:59:59Z")
+                self.assertEqual(parsed_written["serverDomain"], "ch1.tunnelsats.com")
+                self.assertEqual(parsed_written["vpnPort"], 24556)
+                self.assertTrue(parsed_written["syncSuccess"])
+                self.assertEqual(os.stat(meta_file).st_mode & 0o777, 0o600)
+            finally:
+                bridge.META_FILE_PATH = orig_meta
 
 if __name__ == '__main__':
     unittest.main()

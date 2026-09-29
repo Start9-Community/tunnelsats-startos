@@ -2,53 +2,64 @@
 
 ## Getting Started
 
-1. **Obtain a Subscription**:
-   - Visit [TunnelSats.com](https://tunnelsats.com) and choose a subscription plan for your Lightning node.
-   - Download or copy your WireGuard configuration file (`.conf`).
+TunnelSats provides dedicated, privacy-focused WireGuard VPN infrastructure specifically designed for Lightning Network nodes (LND, Core Lightning and Eclair).
 
-2. **Configure TunnelSats Companion Service**:
-   - In StartOS, navigate to **Services** &rarr; **TunnelSats** &rarr; **Configure**.
-   - Select your **Target Lightning Node** (`LND` or `Core Lightning`).
-   - Paste your WireGuard configuration into **WireGuard Configuration**.
-   - Set **Enable TunnelSats** to **ON** and click **Save**.
-   - The package validates your configuration, automatically ensures gateway markers (`# StartTunnel` and `# inbound: yes`) under `[Interface]`, and displays the ready-to-copy configuration.
+### Option 1: Native Storefront (Recommended)
 
-3. **Add Gateway in StartOS**:
-   - In StartOS, navigate to **System** &rarr; **Gateways** &rarr; delete any existing TunnelSats gateway and add a new one with the configuration shown (updating an existing gateway cannot change its classification type).
-   - Select **WireGuard** and paste the configuration carrying the inbound markers.
-   - StartOS auto-classifies the gateway as **Inbound/Outbound**, enabling public port forwarding to port 9735 on your node.
-   - Connect the gateway.
+1. In StartOS, open **Services** &rarr; **TunnelSats** &rarr; **Actions** &rarr; **Buy Subscription**.
+2. Select your target Lightning node (`LND`, `Core Lightning` or `Eclair`) and your preferred plan duration.
+3. The package generates a fresh Curve25519 WireGuard keypair locally in-process on your device (your private key never leaves your server).
+4. Pay the Lightning invoice: through the **Pay Invoice** task the Buy Subscription action raises on your node, or by scanning / copying the BOLT11 invoice returned by the action with any Lightning wallet.
+5. Once settled, TunnelSats automatically provisions your configuration and emits a routing task to your Lightning node.
+6. **Activate Routing**:
+   - Open your target Lightning node in StartOS.
+   - Accept the 1-click prompt: **"Route [Node] through the TunnelSats tunnel"**.
+   - Your node brings up WireGuard internally (`wg0`), announces its public address, and routes its clearnet peer traffic through the encrypted tunnel (see the kill switch caveat below).
 
-4. **Target Node Host Announcement**:
-   - **Option A: 1-Click Automated Task (Recommended)**: When TunnelSats is enabled with a valid WireGuard configuration, StartOS automatically generates an **important** 1-Click task prompt on your server dashboard. Simply click and accept the prompt to populate your node's external host setting automatically.
-   - **Option B: Manual Configuration (Fallback)**: Alternatively, navigate to your target node (**Services** &rarr; **LND** or **Core Lightning**), open **Config** &rarr; **Custom External Host** (or **General Settings** for Core Lightning), and enter your TunnelSats endpoint (e.g. `ch1.tunnelsats.com:24556`).
+### Option 2: Bring Your Own Configuration
 
-5. **Enable Public Address Firewall Toggle**:
-   - In StartOS, open your target node (**LND** or **Core Lightning**).
-   - Go to **Interfaces** &rarr; **Peer Interface** (for LND) or **Peer** (for Core Lightning) &rarr; find your TunnelSats public IP (`<VPN_IP>:9735`).
-   - Toggle the switch to **ON**.
-   - 💡 **StartOS Port Check Prompt ("Address Requirements")**: StartOS will display an "Address Requirements" modal prompting to test port forwarding on port `9735:9735`. Because TunnelSats maps your dedicated external port (e.g. `24556`) rather than generic `9735`, clicking **"Test"** will fail. Simply **click "Later"** to save and proceed. This directs StartOS nftables to open the firewall and forward incoming peer connections from the VPN tunnel to your node.
+1. If you already have an active TunnelSats WireGuard configuration, open **Services** &rarr; **TunnelSats** &rarr; **Actions** &rarr; **Import Subscription**.
+2. Select your **Target Lightning Node** (`LND`, `Core Lightning` or `Eclair`) and paste your `.conf` file.
+3. Accept the 1-click routing prompt on your target Lightning node.
 
-6. **Set Outbound Policy Routing (Required for Full Egress Privacy)**:
-   - In StartOS, open your target node (**Services** &rarr; **LND** or **Core Lightning** — *do not configure this on the TunnelSats service page*).
-   - Go to **Actions** &rarr; **Set Outbound Gateway** &rarr; select your **TunnelSats** gateway.
-   - ⚠️ **Full Egress Privacy**: StartOS defaults outbound traffic to "Auto"; importing a gateway does not automatically bind your Lightning node's outbound connections to it. Without setting TunnelSats as the outbound gateway, outbound peer traffic, gossip, and ping/pong acknowledgments continue through your residential ISP clearnet IP while advertising your TunnelSats address. Setting the outbound gateway ensures full-egress encapsulation and zero residential IP leakage.
+### Switching Off or Changing the Node
 
-7. **Monitor & Manage**:
-   - Open the **Web Dashboard** to monitor subscription expiration, time remaining, and connection properties.
+Use the **Configure** action to switch TunnelSats off, pick a different target node, or replace the WireGuard configuration. When TunnelSats is switched off or moves to another node, the node that used the tunnel asks you to turn it off first; the new node is asked to take over afterwards.
 
-## ⚠️ Important Note on Multiple Lightning Nodes
+---
 
-StartOS allocates the external host port per interface binding (the container port is always 9735) and retains it across restarts:
-- The standard Lightning P2P port is **9735**. TunnelSats WireGuard gateways forward incoming peer traffic specifically to host port 9735.
-- If multiple Lightning implementations are installed (e.g. both Core Lightning and LND), StartOS allocates external host port 9735 to the node installed first, while subsequent nodes are assigned arbitrary high host ports (e.g. 63989).
-- **Inbound TunnelSats traffic will only reach the node holding host port 9735.**
-- **Guidance**: Install the Lightning node you intend to use with TunnelSats before installing any other Lightning node. If another node was already installed first and claimed port 9735, uninstall the other node AND reinstall the target node so it rebinds to host port 9735.
+## Routing & Full Egress Privacy
 
-## Network & Privacy Notice
+- **In-Container Egress Privacy**: The Lightning node owns the WireGuard tunnel directly inside its container (`wg0`). Policy routing (table 51820) sends all clearnet peer traffic (inbound connections, gossip, ping/pong acknowledgments) through the tunnel.
+- **Home IP Hidden While the Tunnel Is Up**: Clearnet peers see the TunnelSats server address, not your home ISP address.
+- **Kill Switch Caveat**: The tunnel and its routing belong to your Lightning node package, not to TunnelSats. With current node builds, clearnet traffic can fall back to your home connection if `wg0` goes down or is removed; a fix in the node packages is pending. While `wg0` is up, clearnet peer traffic uses the tunnel.
+- **Tor Hybrid Coexistence**: Onion peer connections continue to route normally over the Tor network across the container bridge, while clearnet peer traffic is routed through TunnelSats.
+- **IPv6**: How your node routes IPv6 is decided by the Lightning node package. Current builds send IPv6 through the tunnel when the configuration's `AllowedIPs` include `::/0` (TunnelSats configurations do), and block it otherwise. The **Allow IPv6 Endpoint** setting only lets TunnelSats hand your node an IPv6 server endpoint to announce.
+- **No Box-Wide Changes**: Nothing to set up in the StartOS system settings, no interface firewall toggling, and no port 9735 conflicts. Only the target node's own traffic uses the tunnel.
+- **Companion Package Egress**: TunnelSats's own control-plane calls to `https://tunnelsats.com/api/public/v1` (server list, order/renewal creation, invoice status, config claim, status sync, and the optional inbound port check) must work while the WireGuard tunnel is down or expired, so they leave your server through the StartOS outbound gateway configured for the TunnelSats service (or the system default connection). When NWC auto-renewal is enabled, Nostr relay traffic uses that same outbound gateway unless **Route wallet traffic through Tor** is enabled (or the relay is a `.onion` address), in which case relay traffic is routed through the StartOS Tor SOCKS5 proxy (`tor.embassy:9050`) and fails closed if Tor is unreachable.
 
-- **Outbound Synchronization**: The TunnelSats background daemon periodically checks `https://tunnelsats.com/api/public/v1/subscription/status` using your WireGuard public key to synchronize expiration status and alert you before your subscription expires.
-- **IPv4 vs IPv6**: TunnelSats routes IPv4 traffic. Outbound IPv6 traffic is blackholed by default under StartOS gateway policy routing to prevent home ISP leaks.
+---
+
+## Bandwidth & Renewals
+
+- **Monthly Allowance**: Subscriptions include 100 GB of transfer bandwidth per calendar month. Bandwidth counters reset automatically on the 1st of every month.
+- **Subscription & Bandwidth Telemetry**: Current bandwidth usage and subscription validity are synced by the TunnelSats daemon and displayed in the read-only Web Dashboard.
+- **Renewal Reminders**: TunnelSats raises a **Renew Subscription** task when the subscription expires in 7 days or less, updates it at 3 days or less, and again once it has expired. Run **Renew Subscription** at any time to extend it; the invoice is paid through a Pay Invoice task on your Lightning node.
+- **Automatic Renewal (NWC — Connect Wallet)**: Optionally open **Services** &rarr; **TunnelSats** &rarr; **Actions** &rarr; **Connect Wallet** and paste a `nostr+walletconnect://` (NIP-47) URI to enable unattended renewals (off by default). When the API-confirmed expiry is 7 days or less away, TunnelSats requests one renewal invoice for your chosen duration (matching your last purchase by default, or 1 / 3 / 6 / 12 months) and pays it via your connected wallet. Because BTC/fiat exchange rates cannot be foreseen over the next 12 months, we recommend setting a conservative wallet budget with a **1.2&times; buffer** above the current estimated satoshi cost (shown in the Connect Wallet action and dashboard). If the wallet reports insufficient budget/balance or if 3 renewal attempts fail across sync cycles, TunnelSats stops automatic retries for that period, raises the **Pay Invoice** task on your Lightning node (plus a **Connect Wallet** task if budget is insufficient), and posts a StartOS notification. Every successful auto-renewal also posts a StartOS notification with the amount paid and new expiry date.
+- **Lapsed Subscription**: When the subscription expires, TunnelSats disables the tunnel on its server, so your node's clearnet peer connections through TunnelSats stop until you renew or turn off the clearnet VPN on your node.
+- **Notifications**: TunnelSats also posts a StartOS notification 7 and 3 days before the subscription expires, once it has expired, and when TunnelSats has no subscription for the WireGuard key in your configuration (then an **Import Subscription** task asks you to import a valid configuration or buy a new one). Each notification is sent once per subscription period; none are sent while TunnelSats is stopped.
+- **Bandwidth Reset**: Once this month's usage reaches 70% of the allowance, the **Reset Bandwidth** action (Subscription group) buys a reset of the monthly counter for a small fee, paid through a Pay Invoice task on your Lightning node. Resets per month are limited, and every requested invoice holds one of them until it is paid or expires, so running the action again while an invoice is still payable shows the same invoice instead of requesting a new one. The reset is confirmed automatically once the payment settles.
+
+---
+
+## Sovereign Config Export
+
+You retain full ownership and sovereignty over your cryptographic keys and WireGuard tunnel:
+
+- Copy your active `.conf` anytime via **Services** &rarr; **TunnelSats** &rarr; **Actions** &rarr; **Export WireGuard Configuration**.
+- WireGuard configurations and subscription metadata are securely preserved in encrypted StartOS system backups. For security, the NWC spending credential (`/data/nwc-wallet.json`) is excluded from StartOS backups; restoring from a backup raises a **Connect Wallet** task prompting you to reconnect your wallet.
+
+---
 
 ## Documentation
 

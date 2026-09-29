@@ -4,15 +4,15 @@ export const current = VersionInfo.of({
   version: '0.4.0:5',
   releaseNotes: {
     en_US:
-      'Adds dual inbound gateway markers (# StartTunnel and # inbound: yes), documents full setup flow with Peer Interface firewall activation, Outbound Gateway policy routing for full egress privacy, multi-node port 9735 allocation, and enhanced WAN ingress diagnostics.',
+      'Native storefront (Buy, Renew and Reset Bandwidth actions with on-device Curve25519 key generation and Lightning node Pay Invoice settlement), in-container clearnet-vpn routing handoff for LND, Core Lightning and Eclair, optional NIP-47 NWC automatic renewal with Tor SOCKS5 support and backup secret exclusion, and a read-only telemetry dashboard.',
     es_ES:
-      'Añade marcadores de puerta de enlace dual (# StartTunnel e # inbound: yes), documenta el flujo de configuración con activación de firewall en Interfaz de Pares, enrutamiento de puerta de enlace de salida para privacidad total de egreso, asignación del puerto 9735 y diagnósticos WAN mejorados.',
+      'Tienda integrada (acciones Comprar, Renovar y Restablecer ancho de banda con generación local de claves Curve25519 y pago mediante la tarea Pay Invoice del nodo), traspaso de enrutamiento clearnet-vpn en contenedor para LND, Core Lightning y Eclair, renovación automática opcional NWC (NIP-47) con soporte Tor SOCKS5 y exclusión de secretos en copias de seguridad, y panel de telemetría de solo lectura.',
     de_DE:
-      'Fügt duale Inbound-Gateway-Marker (# StartTunnel und # inbound: yes) hinzu, dokumentiert den vollständigen Einrichtungsablauf inkl. Peer-Interface-Firewall-Aktivierung, Outbound-Gateway-Routing für vollständigen Egress-Datenschutz, Multi-Node-Port-9735-Zuweisung und erweiterte WAN-Ingress-Diagnose.',
+      'Integrierter Storefront (Aktionen für Kauf, Verlängerung und Bandbreiten-Reset mit lokaler Curve25519-Schlüsselerzeugung und Bezahlung über die Pay-Invoice-Aufgabe der Node), In-Container-clearnet-vpn-Routing-Übergabe für LND, Core Lightning und Eclair, optionale automatische NIP-47-NWC-Verlängerung mit Tor-SOCKS5-Unterstützung und Backup-Ausschluss des Geheimnisses sowie ein schreibgeschütztes Telemetrie-Dashboard.',
     pl_PL:
-      'Dodaje podwójne znaczniki bramki wejściowej (# StartTunnel i # inbound: yes), dokumentuje pełny proces konfiguracji z przełącznikiem zapory Interfejsu Peerów, routing bramki wyjściowej dla pełnej prywatności egress, alokację portu 9735 i ulepszoną diagnostykę WAN.',
+      'Wbudowany sklep (akcje zakupu, odnowienia i resetu transferu z lokalnym generowaniem kluczy Curve25519 oraz rozliczeniem przez zadanie Pay Invoice węzła), przekazywanie routingu clearnet-vpn w kontenerze dla LND, Core Lightning i Eclair, opcjonalne automatyczne odnawianie NIP-47 NWC z obsługą Tor SOCKS5 i wykluczeniem sekretu z kopii zapasowych oraz panel telemetrii tylko do odczytu.',
     fr_FR:
-      'Ajoute les marqueurs de passerelle entrants doubles (# StartTunnel et # inbound: yes), documente le flux de configuration complet avec pare-feu de l’Interface Peer, routage de passerelle sortante pour une confidentialité totale du trafic sortant, allocation du port 9735 et diagnostics WAN améliorés.',
+      'Boutique intégrée (actions Acheter, Renouveler et Réinitialiser la bande passante avec génération locale de clés Curve25519 et règlement via la tâche Pay Invoice du nœud), transfert de routage clearnet-vpn en conteneur pour LND, Core Lightning et Eclair, renouvellement automatique optionnel NIP-47 NWC avec prise en charge Tor SOCKS5 et exclusion du secret des sauvegardes, et tableau de bord de télémétrie en lecture seule.',
   },
   migrations: {
     up: async ({ effects }) => {},

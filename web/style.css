@@ -1832,6 +1832,68 @@ code {
   }
 }
 
+/* ── NWC Auto-Renew status row ── */
+.nwc-status-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: var(--radius-inner);
+  background: var(--surface-sunken);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.nwc-status-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.nwc-status-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.nwc-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+}
+
+.nwc-badge.active {
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--accent-signal);
+  border-color: rgba(34, 197, 94, 0.32);
+}
+
+.nwc-badge.pending {
+  background: rgba(250, 204, 21, 0.1);
+  color: var(--accent-bitcoin);
+  border-color: rgba(250, 204, 21, 0.32);
+}
+
+.nwc-badge.alert {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--accent-alert);
+  border-color: rgba(239, 68, 68, 0.32);
+}
+
+.nwc-budget-note {
+  font-size: 12px !important;
+  line-height: 1.45;
+  color: var(--text-muted) !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

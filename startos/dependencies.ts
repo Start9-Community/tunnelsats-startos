@@ -1,6 +1,7 @@
 import { sdk } from './sdk'
 import { configJson } from './fileModels/config.json'
 import { tunnelsatsMeta } from './fileModels/tunnelsatsMeta'
+import { nwcWallet } from './fileModels/nwcWallet'
 import { vpnHandoff } from './fileModels/vpnHandoff'
 import { handoffRecheck } from './fileModels/handoffRecheck'
 import { readNodeVpnStates } from './handoffIO'
@@ -11,6 +12,10 @@ export { getAnnounceEndpoint } from './utils'
 import { derivePublicKey } from './keygen'
 import { renewSubscription } from './actions/renewSubscription'
 import { importSubscription } from './actions/importSubscription'
+import { connectWallet } from './actions/connectWallet'
+import { resolvePayInvoice } from './actions/resolvePayInvoice'
+import { payTaskReplayId } from './settlement'
+import { metaLockFor, type MetaLock } from './metaLock'
 import {
   type PackageId,
   planClearnetVpnTasks,
@@ -46,6 +51,8 @@ export const EXPIRY_TASK_KEY = 'tunnelsats:renew-subscription'
  * retired key that is cleared on every run.
  */
 export const UNKNOWN_KEY_TASK_KEY = 'tunnelsats:unknown-key'
+/** Replay key of the Connect Wallet own-task (post-restore or budget/fallback warning). */
+export const NWC_WALLET_TASK_KEY = 'tunnelsats:connect-wallet'
 /**
  * Task keys raised by earlier versions: expiry tasks that pointed at
  * Configure / Import Subscription, and the external-host announcement tasks
@@ -67,6 +74,24 @@ export interface TargetVpnConfig {
   wgConf: string
 }
 
+export interface NwcAutoRenewMetaState {
+  periodExpiry?: string
+  attempts?: number
+  lastAttemptAt?: string
+  lastError?: string
+  lastErrorCode?: string
+  fallbackTaskRaised?: boolean
+  budgetWarning?: boolean
+  remainingBudgetSats?: number
+  requiredSats?: number
+  restoreReconnectNeeded?: boolean
+  lastPaidHash?: string
+  lastPaidAt?: string
+  lastPaidDuration?: number
+  lastPaidAmountSats?: number
+  lastPaidNewExpiry?: string
+}
+
 export interface SubscriptionMeta {
   expiresAt?: string
   expirySource?: 'api'
@@ -81,6 +106,18 @@ export interface SubscriptionMeta {
   bandwidth_resets_this_month?: number
   max_resets_per_month?: number
   keyUnknown?: boolean
+  nwcConnected?: boolean
+  nwcRelayHost?: string
+  nwcRouteViaTor?: boolean
+  nwcAutoRenewDuration?: 'match' | '1m' | '3m' | '6m' | '12m'
+  nwcAutoRenewState?: NwcAutoRenewMetaState | null
+  pendingRenewal?: {
+    paymentHash: string
+    invoice?: string
+    targetNode?: TargetNode
+    publicKey?: string
+    raisePayTask?: boolean
+  } | null
 }
 
 export interface SubscriptionExpiryTask {
@@ -91,6 +128,12 @@ export interface SubscriptionExpiryTask {
 }
 
 export interface UnknownKeyTask {
+  shouldCreateTask: boolean
+  reason?: string
+  clearTaskKey: string
+}
+
+export interface NwcWalletTask {
   shouldCreateTask: boolean
   reason?: string
   clearTaskKey: string
@@ -225,6 +268,97 @@ export function getUnknownKeyTask(
 }
 
 /**
+ * Whether NWC period-specific failure flags (fallbackTaskRaised or
+ * budgetWarning) belong to the current confirmed subscription period.
+ * Once a manual or external renewal advances `meta.expiresAt` past
+ * `st.periodExpiry`, the old period's failure no longer blocks NWC.
+ */
+export function isCurrentPeriodNwcFailure(
+  meta: SubscriptionMeta | null | undefined,
+): boolean {
+  const st = meta?.nwcAutoRenewState
+  if (!st?.fallbackTaskRaised && !st?.budgetWarning) return false
+  if (st.periodExpiry && meta?.expiresAt) {
+    const periodMs = new Date(st.periodExpiry).getTime()
+    const currentMs = new Date(meta.expiresAt).getTime()
+    if (!isNaN(periodMs) && !isNaN(currentMs) && currentMs > periodMs) {
+      return false
+    }
+  }
+  return true
+}
+
+/**
+ * Whether NWC automatic renewal is connected, has its secret file present, and
+ * has not tripped a budget warning or fallback for the current period.
+ */
+export function isNwcAutoRenewHealthy(
+  meta: SubscriptionMeta | null | undefined,
+  walletExists = true,
+): boolean {
+  if (meta?.nwcConnected !== true || !walletExists) return false
+  const st = meta.nwcAutoRenewState
+  if (st?.restoreReconnectNeeded || isCurrentPeriodNwcFailure(meta)) {
+    return false
+  }
+  return true
+}
+
+/**
+ * The own-task pointing at Connect Wallet when:
+ * 1. NWC was connected prior to a backup restore, and /data/nwc-wallet.json is
+ *    missing (since NWC secrets are excluded from StartOS backups).
+ * 2. NWC automatic renewal detected insufficient wallet budget/balance or
+ *    failed and fell back to manual intervention for the current period.
+ */
+export function getNwcWalletTask(
+  config:
+    | {
+        enabled?: boolean
+        'tunnelsats-conf'?: string | null
+      }
+    | null
+    | undefined,
+  meta?: SubscriptionMeta | null,
+  walletExists = true,
+): NwcWalletTask {
+  const clearTaskKey = NWC_WALLET_TASK_KEY
+  if (
+    !config?.enabled ||
+    !config['tunnelsats-conf'] ||
+    meta?.nwcConnected !== true
+  ) {
+    return { shouldCreateTask: false, clearTaskKey }
+  }
+
+  const st = meta.nwcAutoRenewState
+  if (!walletExists || st?.restoreReconnectNeeded === true) {
+    return {
+      shouldCreateTask: true,
+      reason: i18n(
+        'Reconnect your NWC wallet after backup restore. For security, NWC wallet secrets are excluded from StartOS backups; run Connect Wallet to restore automatic renewals or disconnect NWC.',
+      ),
+      clearTaskKey,
+    }
+  }
+
+  if (isCurrentPeriodNwcFailure(meta)) {
+    const reasonDetail =
+      st?.lastError || 'insufficient wallet budget or relay failure'
+    return {
+      shouldCreateTask: true,
+      reason: i18n(
+        'NWC automatic renewal requires attention (${reason}). Run Connect Wallet to update your NWC wallet budget/connection, or approve the Pay Invoice task on your Lightning node.',
+        { reason: reasonDetail },
+      ),
+      clearTaskKey,
+    }
+  }
+
+  return { shouldCreateTask: false, clearTaskKey }
+}
+
+/**
  * What the subscription notices (see notifications.ts) act on, or null while
  * TunnelSats is disabled or unconfigured: the same confirmed expiry and
  * unknown-key verdict as the tasks, bound to the stored key.
@@ -238,13 +372,43 @@ export function noticeInputsFor(
     | null
     | undefined,
   meta: SubscriptionMeta | null | undefined,
+  walletExists?: boolean,
 ): NoticeInputs | null {
   if (!config?.enabled || !config['tunnelsats-conf']) return null
   const wgConf = config['tunnelsats-conf']
+  const publicKey = currentPublicKey(wgConf)
+  const expiry = getConfirmedExpiry(wgConf, meta)
+  const keyUnknown = isKeyUnknown(wgConf, meta)
+
+  const st = meta?.nwcAutoRenewState
+  const nwcRestoreNeeded =
+    meta?.nwcConnected === true &&
+    (walletExists === false || st?.restoreReconnectNeeded === true)
+  const nwcRenewed =
+    st?.lastPaidHash && st.lastPaidNewExpiry
+      ? {
+          paymentHash: st.lastPaidHash,
+          duration: st.lastPaidDuration ?? 1,
+          amountSats: st.lastPaidAmountSats ?? 0,
+          newExpiry: st.lastPaidNewExpiry,
+        }
+      : undefined
+  const nwcFallback =
+    meta?.nwcConnected === true && isCurrentPeriodNwcFailure(meta)
+      ? {
+          key: `${st?.periodExpiry ?? ''}:${st?.lastErrorCode ?? 'fallback'}`,
+          reason:
+            st?.lastError || 'insufficient wallet budget or relay failure',
+        }
+      : undefined
+
   return {
-    publicKey: currentPublicKey(wgConf),
-    expiry: getConfirmedExpiry(wgConf, meta),
-    keyUnknown: isKeyUnknown(wgConf, meta),
+    publicKey,
+    expiry,
+    keyUnknown,
+    ...(nwcRestoreNeeded ? { nwcRestoreNeeded: true } : {}),
+    ...(nwcRenewed ? { nwcRenewed } : {}),
+    ...(nwcFallback ? { nwcFallback } : {}),
   }
 }
 
@@ -253,6 +417,11 @@ export function noticeInputsFor(
  * StartOS stops the owning service while an own task is active and critical.
  * That would halt the subscription sync that confirms a renewal and clears
  * the task, which is a deadlock.
+ *
+ * When NWC automatic renewal is connected and healthy, the manual
+ * renew-subscription task is suppressed during the 7d/3d pre-expiry window so
+ * NWC can renew without nagging the operator; if NWC trips fallback or budget
+ * warning (or the subscription lapses without renewal), the task is raised.
  */
 export function getSubscriptionExpiryTask(
   config:
@@ -264,6 +433,7 @@ export function getSubscriptionExpiryTask(
     | undefined,
   meta?: SubscriptionMeta | null,
   currentDate = new Date(),
+  walletExists = true,
 ): SubscriptionExpiryTask {
   const clearTaskKey = EXPIRY_TASK_KEY
 
@@ -276,7 +446,15 @@ export function getSubscriptionExpiryTask(
     return { shouldCreateTask: false, clearTaskKey }
   }
 
-  switch (expiryStage(expiryDate, currentDate)) {
+  const stage = expiryStage(expiryDate, currentDate)
+  if (
+    (stage === '7d' || stage === '3d') &&
+    isNwcAutoRenewHealthy(meta, walletExists)
+  ) {
+    return { shouldCreateTask: false, clearTaskKey }
+  }
+
+  switch (stage) {
     case 'lapsed':
       return {
         shouldCreateTask: true,
@@ -321,14 +499,18 @@ const NODE_HEALTH_CHECKS = {
   eclair: 'eclair',
 } as const
 
+const TOR_VERSION_RANGE = '>=0.4.0:0' as const
+
 /**
  * The target node is a running dependency. Nodes that still owe us a
  * confirmed "off" stay declared (as `exists`), because StartOS hides tasks on
- * packages that are not current dependencies.
+ * packages that are not current dependencies. When NWC is connected with Tor
+ * routing enabled, `tor` is also declared as a running dependency.
  */
 export function getDependenciesForConfig(
   config: { enabled?: boolean; 'target-node'?: TargetNode } | null | undefined,
   pendingOff: readonly PackageId[] = [],
+  meta?: { nwcConnected?: boolean; nwcRouteViaTor?: boolean } | null,
 ) {
   const deps: Partial<
     Record<
@@ -342,7 +524,13 @@ export function getDependenciesForConfig(
           kind: 'exists'
           versionRange: (typeof NODE_VERSION_RANGES)[PackageId]
         }
-    >
+    > & {
+      tor: {
+        kind: 'running'
+        versionRange: typeof TOR_VERSION_RANGE
+        healthChecks: string[]
+      }
+    }
   > = {}
 
   if (config?.enabled) {
@@ -357,6 +545,14 @@ export function getDependenciesForConfig(
   for (const p of pendingOff) {
     if (!deps[p]) {
       deps[p] = { kind: 'exists', versionRange: NODE_VERSION_RANGES[p] }
+    }
+  }
+
+  if (meta?.nwcConnected && meta?.nwcRouteViaTor) {
+    deps.tor = {
+      kind: 'running',
+      versionRange: TOR_VERSION_RANGE,
+      healthChecks: [],
     }
   }
 
@@ -394,11 +590,12 @@ export interface OwnTaskOps {
     reason: string,
   ) => Promise<unknown>
   raiseUnknownKey: (reason: string) => Promise<unknown>
+  raiseNwcWallet?: (reason: string) => Promise<unknown>
   clear: (...keys: string[]) => Promise<unknown>
 }
 
 export interface OwnTaskFailure {
-  op: 'expiry' | 'unknown-key' | 'retired'
+  op: 'expiry' | 'unknown-key' | 'nwc-wallet' | 'retired'
   error: string
 }
 
@@ -408,15 +605,16 @@ const NO_UNKNOWN_KEY_TASK: UnknownKeyTask = {
 }
 
 /**
- * Raises or clears the Renew reminder and the unknown-key task, and clears
- * retired task keys. Never throws: a failure here must not keep the
- * clearnet-vpn handoff from running. Failures are returned so the caller
- * records them for a retry.
+ * Raises or clears the Renew reminder, the unknown-key task, and the NWC
+ * Connect Wallet task, and clears retired task keys. Never throws: a failure
+ * here must not keep the clearnet-vpn handoff from running. Failures are
+ * returned so the caller records them for a retry.
  */
 export async function updateOwnTasks(
   expiryTask: SubscriptionExpiryTask,
   ops: OwnTaskOps,
   unknownKeyTask: UnknownKeyTask = NO_UNKNOWN_KEY_TASK,
+  nwcWalletTask?: NwcWalletTask,
 ): Promise<OwnTaskFailure[]> {
   const failures: OwnTaskFailure[] = []
   const attempt = async (
@@ -439,8 +637,55 @@ export async function updateOwnTasks(
       ? ops.raiseUnknownKey(unknownKeyTask.reason)
       : ops.clear(unknownKeyTask.clearTaskKey),
   )
+  if (nwcWalletTask && ops.raiseNwcWallet) {
+    const raiseNwc = ops.raiseNwcWallet
+    await attempt('nwc-wallet', () =>
+      nwcWalletTask.shouldCreateTask && nwcWalletTask.reason
+        ? raiseNwc(nwcWalletTask.reason)
+        : ops.clear(nwcWalletTask.clearTaskKey),
+    )
+  }
   await attempt('retired', () => ops.clear(...RETIRED_TASK_KEYS))
   return failures
+}
+
+/**
+ * When NWC auto-renewal creates a renewal invoice and falls back to manual
+ * payment (insufficient wallet budget/balance or after K=3 transient failures),
+ * raises the target Lightning node's Pay Invoice task via resolvePayInvoice
+ * and clears `pendingRenewal.raisePayTask` under meta_lock.
+ */
+export async function raiseFallbackRenewalPayTask(params: {
+  config: { 'target-node'?: TargetNode } | null | undefined
+  meta: SubscriptionMeta | null | undefined
+  lockMeta: MetaLock
+  createTask: (task: {
+    packageId: PackageId
+    payInvoiceAction: ReturnType<typeof resolvePayInvoice>['payInvoiceAction']
+    replayId: string
+    invoice: string
+    reason: string
+  }) => Promise<unknown>
+  clearRaiseFlag: (paymentHash: string) => Promise<unknown>
+}): Promise<boolean> {
+  const pending = params.meta?.pendingRenewal
+  if (!pending?.raisePayTask || !pending.invoice || !pending.paymentHash) {
+    return false
+  }
+  const targetNode: TargetNode =
+    pending.targetNode ?? params.config?.['target-node'] ?? 'lnd'
+  const { packageId, payInvoiceAction } = resolvePayInvoice(targetNode)
+  await params.createTask({
+    packageId: packageId as PackageId,
+    payInvoiceAction,
+    replayId: payTaskReplayId('renewal', targetNode, pending.paymentHash),
+    invoice: pending.invoice,
+    reason: i18n('Pay TunnelSats VPN subscription renewal invoice'),
+  })
+  await params.lockMeta(async () => {
+    await params.clearRaiseFlag(pending.paymentHash)
+  })
+  return true
 }
 
 async function handOffClearnetVpn(
@@ -550,14 +795,19 @@ export const setDependencies = sdk.setupDependencies(async ({ effects }) => {
         .read()
         .once()
         .catch(() => null),
+      wallet: await nwcWallet
+        .read()
+        .once()
+        .catch(() => null),
     }),
-    async ({ config, meta }) => {
-      // 1. Own tasks: the Renew reminder, driven only by the API-confirmed
-      // expiry, the unknown-key task, and retired task keys. Guarded so a
-      // failure never skips the handoff; it is recorded and retried via the
-      // handoff health check.
+    async ({ config, meta, wallet }) => {
+      const walletExists = Boolean(wallet?.uri)
+      // 1. Own tasks: the Renew reminder, the unknown-key task, the NWC
+      // Connect Wallet task, and retired task keys. Guarded so a failure
+      // never skips the handoff; it is recorded and retried via the handoff
+      // health check.
       const ownTaskFailures = await updateOwnTasks(
-        getSubscriptionExpiryTask(config, meta),
+        getSubscriptionExpiryTask(config, meta, new Date(), walletExists),
         {
           raiseExpiry: (severity, reason) =>
             sdk.action.createOwnTask(effects, renewSubscription, severity, {
@@ -568,9 +818,15 @@ export const setDependencies = sdk.setupDependencies(async ({ effects }) => {
               reason,
               replayId: UNKNOWN_KEY_TASK_KEY,
             }),
+          raiseNwcWallet: (reason) =>
+            sdk.action.createOwnTask(effects, connectWallet, 'important', {
+              reason,
+              replayId: NWC_WALLET_TASK_KEY,
+            }),
           clear: (...keys) => sdk.action.clearTask(effects, ...keys),
         },
         getUnknownKeyTask(config, meta),
+        getNwcWalletTask(config, meta, walletExists),
       )
       for (const f of ownTaskFailures) {
         console.error(
@@ -578,10 +834,66 @@ export const setDependencies = sdk.setupDependencies(async ({ effects }) => {
         )
       }
 
-      // 2. Clearnet-VPN handoff: on-task for the target, off-task for the rest.
-      return handOffClearnetVpn(effects, config, ownTaskFailures.length > 0)
+      // 2. If NWC auto-renewal fell back on a pending renewal invoice, raise
+      // the target node's Pay Invoice task via resolvePayInvoice.
+      let fallbackFailed = false
+      if (meta?.pendingRenewal?.raisePayTask) {
+        await raiseFallbackRenewalPayTask({
+          config,
+          meta,
+          lockMeta: metaLockFor(effects),
+          createTask: ({ packageId, payInvoiceAction, replayId, invoice, reason }) =>
+            sdk.action.createTask(
+              effects,
+              packageId,
+              payInvoiceAction,
+              'important',
+              {
+                replayId,
+                input: {
+                  kind: 'partial',
+                  accept: [],
+                  set: {
+                    invoice,
+                    amount: { selection: 'invoice', value: {} },
+                    'max-fee-percent': 1,
+                    confirmed: false,
+                  },
+                },
+                reason,
+              },
+            ),
+          clearRaiseFlag: async (paymentHash) => {
+            const latest = await tunnelsatsMeta
+              .read()
+              .once()
+              .catch(() => null)
+            if (latest?.pendingRenewal?.paymentHash === paymentHash) {
+              await tunnelsatsMeta.merge(effects, {
+                pendingRenewal: {
+                  ...latest.pendingRenewal,
+                  raisePayTask: undefined,
+                },
+              })
+            }
+          },
+        }).catch((e) => {
+          fallbackFailed = true
+          console.error(
+            `TunnelSats: raising fallback Pay Invoice task failed (will retry): ${e}`,
+          )
+        })
+      }
+
+      // 3. Clearnet-VPN handoff: on-task for the target, off-task for the rest.
+      return handOffClearnetVpn(
+        effects,
+        config,
+        ownTaskFailures.length > 0 || fallbackFailed,
+      )
     },
   )
 
-  return getDependenciesForConfig(config.config, pendingOff)
+  return getDependenciesForConfig(config.config, pendingOff, config.meta)
 })
+

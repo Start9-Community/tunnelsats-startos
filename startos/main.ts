@@ -5,6 +5,7 @@ import { checkHandoffProgress } from './handoffIO'
 import { NODE_TITLES } from './vpnHandoff'
 import { runSettlementTick } from './settlement'
 import { tunnelsatsMeta } from './fileModels/tunnelsatsMeta'
+import { nwcWallet } from './fileModels/nwcWallet'
 import { subscriptionNotices } from './fileModels/subscriptionNotices'
 import { dashboardIntents } from './fileModels/dashboardIntents'
 import { processDashboardIntents } from './intentRunner'
@@ -46,16 +47,23 @@ export const main = sdk.setupMain(async ({ effects }) => {
   )
 
   // 5. Subscription notices (7 and 3 days before expiry, lapse, unknown
-  // key), driven by the Subscription health check. See notifications.ts.
+  // key, and NWC auto-renewal events), driven by the Subscription and
+  // Settlement health checks. See notifications.ts.
   const runNotices = createNoticeRunner({
-    readInputs: async () =>
-      noticeInputsFor(
-        await configJson.read().once(),
-        await tunnelsatsMeta
+    readInputs: async () => {
+      const [cfg, meta, wallet] = await Promise.all([
+        configJson.read().once(),
+        tunnelsatsMeta
           .read()
           .once()
           .catch(() => null),
-      ),
+        nwcWallet
+          .read()
+          .once()
+          .catch(() => null),
+      ])
+      return noticeInputsFor(cfg, meta, Boolean(wallet?.uri))
+    },
     // An unreadable record counts as missing: at worst one notice repeats,
     // and the next write replaces the broken file.
     readState: async () =>
@@ -280,6 +288,13 @@ export const main = sdk.setupMain(async ({ effects }) => {
             case 'waiting':
               return { result: 'waiting', message: status.message }
             case 'settled':
+              if (config?.enabled) {
+                await runNotices().catch((e) =>
+                  console.warn(
+                    `TunnelSats post-settlement notice not sent: ${e}`,
+                  ),
+                )
+              }
               return { result: 'success', message: status.message }
             case 'failed':
               return {

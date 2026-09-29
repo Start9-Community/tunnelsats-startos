@@ -17,5 +17,9 @@ export const subscriptionNotices = FileHelper.json(
     seen: z.array(z.string()).optional().catch(undefined),
     announcedFor: z.array(z.string()).optional().catch(undefined),
     unknownKey: z.string().optional().catch(undefined),
+    nwcRenewedHash: z.string().optional().catch(undefined),
+    nwcFallbackKey: z.string().optional().catch(undefined),
+    nwcRestoreNotified: z.boolean().optional().catch(undefined),
   }),
 )
+

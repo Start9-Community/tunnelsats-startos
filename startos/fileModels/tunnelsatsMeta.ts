@@ -69,6 +69,12 @@ export const metaShape = z.object({
       targetNode: z.enum(['lnd', 'cln', 'eclair']).optional().catch(undefined),
       lastError: z.string().optional().catch(undefined),
       nextAttemptAt: z.string().optional().catch(undefined),
+      /** True when paid automatically via NWC. */
+      paidViaNwc: z.boolean().optional().catch(undefined),
+      /** True when an NWC pay_invoice attempt has been dispatched for this invoice. */
+      nwcAttempted: z.boolean().optional().catch(undefined),
+      /** True when NWC fell back and the node's Pay Invoice task must be raised. */
+      raisePayTask: z.boolean().optional().catch(undefined),
     })
     .optional()
     .nullable(),
@@ -103,6 +109,41 @@ export const metaShape = z.object({
    * the settlement health check has cleared them.
    */
   payTasksToClear: z.array(z.string()).optional().catch(undefined),
+  /** Duration in months (1, 3, 6, 12) of the most recent Buy/Renew invoice. */
+  lastDuration: z.number().optional().catch(undefined),
+  /** Satoshi amount of the most recent Buy/Renew invoice, used for 1.2x NWC budget guidance. */
+  lastAmountSats: z.number().optional().catch(undefined),
+  /** Non-secret NWC status mirrored from nwc-wallet.json. */
+  nwcConnected: z.boolean().optional().catch(undefined),
+  nwcRelayHost: z.string().optional().catch(undefined),
+  nwcRouteViaTor: z.boolean().optional().catch(undefined),
+  nwcAutoRenewDuration: z
+    .enum(['match', '1m', '3m', '6m', '12m'])
+    .optional()
+    .catch(undefined),
+  /** NWC auto-renewal state machine persisted by bridge.py under meta_lock. */
+  nwcAutoRenewState: z
+    .object({
+      periodExpiry: z.string().optional().catch(undefined),
+      attempts: z.number().optional().catch(undefined),
+      lastAttemptAt: z.string().optional().catch(undefined),
+      nextAttemptAt: z.string().optional().catch(undefined),
+      lastError: z.string().optional().catch(undefined),
+      lastErrorCode: z.string().optional().catch(undefined),
+      fallbackTaskRaised: z.boolean().optional().catch(undefined),
+      budgetWarning: z.boolean().optional().catch(undefined),
+      remainingBudgetSats: z.number().optional().catch(undefined),
+      requiredSats: z.number().optional().catch(undefined),
+      restoreReconnectNeeded: z.boolean().optional().catch(undefined),
+      lastPaidHash: z.string().optional().catch(undefined),
+      lastPaidAt: z.string().optional().catch(undefined),
+      lastPaidDuration: z.number().optional().catch(undefined),
+      lastPaidAmountSats: z.number().optional().catch(undefined),
+      lastPaidNewExpiry: z.string().optional().catch(undefined),
+    })
+    .optional()
+    .nullable()
+    .catch(undefined),
 })
 
 export const tunnelsatsMeta = FileHelper.json(

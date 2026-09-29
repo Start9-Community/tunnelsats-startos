@@ -317,7 +317,15 @@ export function startRenewal(
           paymentReceivedFor: undefined,
           lastError: undefined,
           nextAttemptAt: undefined,
+          paidViaNwc: undefined,
+          raisePayTask: undefined,
         },
+        ...(typeof entry.duration === 'number'
+          ? { lastDuration: entry.duration }
+          : {}),
+        ...(typeof entry.amountSats === 'number' && entry.amountSats > 0
+          ? { lastAmountSats: entry.amountSats }
+          : {}),
         ...patch,
       }),
     raiseTask: ({ invoice, paymentHash, targetNode }) => {

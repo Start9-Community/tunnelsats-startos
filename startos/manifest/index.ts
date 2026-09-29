@@ -53,5 +53,14 @@ export const manifest = setupManifest({
         icon: 'https://raw.githubusercontent.com/Start9Labs/eclair-startos/refs/heads/master/icon.png',
       },
     },
+    tor: {
+      description:
+        'Tor SOCKS5 Proxy. Required when routing NWC wallet connections through Tor or connecting to a .onion NWC relay.',
+      optional: true,
+      metadata: {
+        title: 'Tor',
+        icon: 'https://raw.githubusercontent.com/Start9Labs/tor-startos/refs/heads/master/icon.svg',
+      },
+    },
   },
 })

@@ -801,7 +801,14 @@ function buildNotices(m) {
       sub.active &&
       typeof sub.daysRemaining === 'number' &&
       sub.daysRemaining < 7 &&
-      !pending.renewal
+      !pending.renewal &&
+      !(
+        m.nwc &&
+        m.nwc.connected &&
+        !m.nwc.restoreReconnectNeeded &&
+        !m.nwc.budgetWarning &&
+        !m.nwc.fallbackTaskRaised
+      )
     ) {
       notices.push({
         level: 'warning',
@@ -823,6 +830,28 @@ function buildNotices(m) {
     }
   }
 
+  if (m.nwc && m.nwc.connected) {
+    if (m.nwc.restoreReconnectNeeded) {
+      notices.push({
+        level: 'warning',
+        title: 'NWC wallet reconnect needed',
+        text: 'NWC wallet credentials are not included in StartOS backups. Run Services → TunnelSats → Actions → Connect Wallet to re-enter your NWC URI.',
+      })
+    } else if (m.nwc.budgetWarning) {
+      notices.push({
+        level: 'warning',
+        title: 'NWC auto-renewal budget exceeded',
+        text: 'Your NWC wallet budget or balance was below the renewal invoice. Accept the Pay Invoice task on your node or increase your NWC budget in Connect Wallet.',
+      })
+    } else if (m.nwc.fallbackTaskRaised) {
+      notices.push({
+        level: 'warning',
+        title: 'NWC auto-renewal fell back to manual payment',
+        text: 'Automatic renewal via NWC could not complete. Accept the Pay Invoice task on your node or check Connect Wallet.',
+      })
+    }
+  }
+
   if (m.connection && m.connection.allowIpv6) {
     notices.push({
       level: 'info',
@@ -831,6 +860,54 @@ function buildNotices(m) {
     })
   }
   return notices
+}
+
+/** Read-only NWC auto-renewal status badge and 1.2x budget note. */
+function nwcStatusView(m) {
+  const nwc = m && m.nwc
+  if (!nwc || !nwc.connected) {
+    return {
+      cls: 'neutral',
+      badge: 'Disabled',
+      note: 'Connect a wallet in Services → TunnelSats → Actions → Connect Wallet.',
+    }
+  }
+  const rec =
+    typeof nwc.recommendedBudgetSats === 'number'
+      ? formatSats(nwc.recommendedBudgetSats)
+      : '5,400 sats'
+  const annual =
+    typeof nwc.recommendedAnnualSats === 'number'
+      ? formatSats(nwc.recommendedAnnualSats)
+      : '64,800 sats'
+  if (nwc.restoreReconnectNeeded) {
+    return {
+      cls: 'alert',
+      badge: 'Reconnect needed',
+      note: 'NWC credentials are excluded from backups. Re-enter your NWC URI in Services → TunnelSats → Actions → Connect Wallet.',
+    }
+  }
+  if (nwc.budgetWarning) {
+    return {
+      cls: 'alert',
+      badge: 'Budget too low',
+      note: `${nwc.lastError ? `${nwc.lastError} ` : ''}Set your wallet budget to at least ${rec} (1.2× buffer) in Connect Wallet or accept the Pay Invoice task.`,
+    }
+  }
+  if (nwc.fallbackTaskRaised) {
+    return {
+      cls: 'alert',
+      badge: 'Manual fallback',
+      note: `${nwc.lastError ? `${nwc.lastError} ` : ''}Accept the Pay Invoice task on your node or check Services → TunnelSats → Actions → Connect Wallet.`,
+    }
+  }
+  const relay = nwc.relayHost || 'connected'
+  const dur = nwc.resolvedDuration || '1m'
+  return {
+    cls: 'active',
+    badge: nwc.routeViaTor ? 'Enabled · Tor' : 'Enabled',
+    note: `Relay ${relay} (${dur} plan). Recommended 1.2× wallet budget: ${rec} per renewal (~${annual}/yr). Manage in Services → TunnelSats → Actions → Connect Wallet.`,
+  }
 }
 
 /** The StartOS actions that fit the current state (highlighted in the list). */
@@ -845,14 +922,31 @@ function suggestedActions(m) {
   }
   if (!m.enabled) return ['configure']
   if (sub.keyUnknown) return ['import', 'buy']
+  const nwcHealthy = Boolean(
+    m.nwc &&
+    m.nwc.connected &&
+    !m.nwc.restoreReconnectNeeded &&
+    !m.nwc.budgetWarning &&
+    !m.nwc.fallbackTaskRaised,
+  )
   if (
     !pending.renewal &&
     (m.status === 'expired' ||
-      (sub.active &&
+      (!nwcHealthy &&
+        sub.active &&
         typeof sub.daysRemaining === 'number' &&
         sub.daysRemaining < 7))
   ) {
     suggested.push('renew')
+  }
+  if (
+    m.nwc &&
+    m.nwc.connected &&
+    (m.nwc.restoreReconnectNeeded ||
+      m.nwc.budgetWarning ||
+      m.nwc.fallbackTaskRaised)
+  ) {
+    suggested.push('connect-wallet')
   }
   const pct = bandwidthPercent(m)
   if (pct !== null && pct >= BANDWIDTH_WARN_PCT && !pending.reset) {
@@ -1533,10 +1627,28 @@ function renderBadge() {
 
 function renderActions(m) {
   const suggested = suggestedActions(m)
-  for (const id of ['buy', 'renew', 'reset', 'import', 'configure', 'export']) {
+  for (const id of [
+    'buy',
+    'renew',
+    'reset',
+    'connect-wallet',
+    'import',
+    'configure',
+    'export',
+  ]) {
     const item = byId(`action-${id}`)
     if (item) item.classList.toggle('is-suggested', suggested.includes(id))
   }
+}
+
+function renderNwcStatus(m) {
+  const view = nwcStatusView(m)
+  const badge = byId('nwc-badge')
+  if (badge) {
+    badge.className = `nwc-badge ${view.cls}`
+    badge.textContent = view.badge
+  }
+  setText('nwc-budget-note', view.note)
 }
 
 function renderCountdown() {
@@ -1608,6 +1720,7 @@ function renderOverview(m) {
   setGauge('bandwidth-meter', usedValue, limit, levels)
   setGauge('modal-bandwidth-meter', usedValue, limit, levels)
   renderCountdown()
+  renderNwcStatus(m)
   renderTimeline(m)
   renderQuota(m)
   renderReachability(m)

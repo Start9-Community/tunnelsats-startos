@@ -312,6 +312,18 @@
                   value="0"
                   aria-label="Time left of a one-month term"
                 ></progress>
+                <div class="nwc-status-row" id="nwc-status-row">
+                  <div class="nwc-status-header">
+                    <span class="nwc-status-label">NWC Auto-Renew</span>
+                    <span class="nwc-badge neutral" id="nwc-badge"
+                      >Disabled</span
+                    >
+                  </div>
+                  <p class="nwc-budget-note" id="nwc-budget-note">
+                    Connect a wallet in Services → TunnelSats → Actions →
+                    Connect Wallet.
+                  </p>
+                </div>
                 <div class="metric-footer">
                   <span class="metric-footer-text"
                     >Extend it with the
@@ -631,6 +643,14 @@
                   Reset Bandwidth
                 </button>
               </div>
+            </li>
+            <li class="action-item" id="action-connect-wallet">
+              <span class="action-name">Connect Wallet</span>
+              <span class="action-desc"
+                >Enable or disable automatic NWC (NIP-47) renewals, view the
+                1.2× recommended budget and optionally route relay traffic via
+                Tor.</span
+              >
             </li>
             <li class="action-item" id="action-import">
               <span class="action-name">Import Subscription</span>
@@ -1000,10 +1020,17 @@
             </summary>
             <div class="faq-answer">
               <p>
-                <strong>Not yet.</strong> Automatic renewals through Nostr
-                Wallet Connect (NWC) are planned. Until then, renew with the
-                <strong>Renew Subscription</strong> action when the reminder
-                task appears.
+                <strong>Yes, via Nostr Wallet Connect (NWC).</strong> Run
+                <strong
+                  >Services → TunnelSats → Actions → Connect Wallet</strong
+                >
+                in StartOS and paste a <code>nostr+walletconnect://</code> URI
+                from Alby Hub, LNbits or Clams. Set a spending budget at least
+                <strong>1.2×</strong> your expected renewal price (in sats) on
+                your wallet to absorb BTC/USD rate swings, and optionally route
+                relay traffic through Tor. If auto-renewal ever fails or exceeds
+                your budget, TunnelSats automatically falls back to raising a
+                manual <strong>Pay Invoice</strong> task on your node.
               </p>
             </div>
           </details>

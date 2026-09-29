@@ -576,10 +576,11 @@ test('index.html obeys the strict CSP and includes Eclair, NWC and kill-switch h
   assert.match(html, /LND, Core Lightning or Eclair/)
   assert.match(
     html,
-    /<strong>Not yet\.<\/strong> Automatic renewals through Nostr\s+Wallet Connect \(NWC\) are planned\./,
+    /<strong>Yes, via Nostr Wallet Connect \(NWC\)\.<\/strong>\s+Run\s+<strong\s*>Services → TunnelSats → Actions → Connect Wallet<\/strong\s*>/,
   )
   assert.match(html, /Kill switch caveat:/)
   assert.match(html, /Services → TunnelSats → Actions → Buy Subscription/)
+  assert.match(html, /Services → TunnelSats → Actions →\s+Connect Wallet/)
 })
 
 test('createInvoiceQrSvg builds a valid pure-DOM SVG QR code and rejects non-BOLT11 strings', () => {

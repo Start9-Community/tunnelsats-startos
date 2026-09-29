@@ -24,6 +24,9 @@ DATA_DIR = os.getenv("DATA_DIR", "/data")
 CONFIG_PATH = os.path.join(DATA_DIR, "tunnelsatsv3.conf")
 APP_CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 META_FILE_PATH = os.path.join(DATA_DIR, "tunnelsats-meta.json")
+# Written ONLY by the Connect Wallet action (startos/actions/connectWallet.ts);
+# excluded from StartOS backups and never read by get_dashboard().
+NWC_WALLET_FILE_PATH = os.path.join(DATA_DIR, "nwc-wallet.json")
 # Written by the TypeScript side (startos/fileModels); only read here, by the
 # dashboard read model (get_dashboard).
 HANDOFF_FILE_PATH = os.path.join(DATA_DIR, "vpn-handoff.json")
@@ -632,8 +635,24 @@ def lazy_sync(wg_pubkey, require_usage=False):
             # Merge into a fresh read: the request can take a minute, and
             # other writers may have updated the file meanwhile.
             meta = read_meta()
+            old_expiry = meta.get("expiresAt") if meta.get("publicKey") == wg_pubkey else None
             _bind_meta_to_key(meta, wg_pubkey)
             meta.update(fields)
+            nwc_state = meta.get("nwcAutoRenewState")
+            if isinstance(nwc_state, dict):
+                period_exp = nwc_state.get("periodExpiry")
+                if _nwc_period_advanced(period_exp or old_expiry, expiry):
+                    nwc_state = dict(nwc_state)
+                    nwc_state.update({
+                        "periodExpiry": expiry,
+                        "attempts": 0,
+                        "nextAttemptAt": None,
+                        "lastError": None,
+                        "lastErrorCode": None,
+                        "budgetWarning": False,
+                        "fallbackTaskRaised": False,
+                    })
+                    meta["nwcAutoRenewState"] = nwc_state
             for name in dropped_quota:
                 meta.pop(name, None)
             meta["lastSync"] = datetime.now(timezone.utc).isoformat()
@@ -811,6 +830,11 @@ def subscription_sync_loop():
         try:
             pubkey = get_wg_pubkey()
             outcome = sync_wait_outcome(lazy_sync(pubkey), pubkey)
+            if is_enabled() and pubkey and pubkey not in ("Unknown", "Not available"):
+                try:
+                    maybe_nwc_auto_renew(pubkey)
+                except Exception as nwc_err:
+                    print(f"Error during NWC auto-renewal check: {nwc_err}", file=sys.stderr)
         except Exception as e:
             print(f"Error in subscription sync loop: {e}", file=sys.stderr)
             outcome = "failed"
@@ -1054,7 +1078,7 @@ def assemble_claimed_config(claim, pending):
     return "\n".join(lines) + "\n"
 
 
-def _clear_pending(meta, key, payment_hash):
+def _clear_pending(meta, key, payment_hash, confirmed_expiry=None):
     """Drops meta[key] if it still belongs to payment_hash and queues its pay
     task for clearing. Caller holds meta_lock and writes meta afterwards."""
     pending = meta.get(key)
@@ -1069,13 +1093,46 @@ def _clear_pending(meta, key, payment_hash):
         if replay_id not in tasks:
             tasks.append(replay_id)
         meta["payTasksToClear"] = tasks
+    if key == "pendingRenewal" and confirmed_expiry is not None:
+        nwc_state = dict(meta.get("nwcAutoRenewState")) if isinstance(meta.get("nwcAutoRenewState"), dict) else {}
+        if pending.get("paidViaNwc") is True or nwc_state.get("lastPaidHash") == payment_hash:
+            raw_dur = pending.get("duration") or nwc_state.get("lastPaidDuration")
+            dur_str = _dashboard_duration(raw_dur) or "1m"
+            dur_months = int(dur_str[:-1])
+            amt = pending.get("amountSats")
+            if isinstance(amt, bool) or not isinstance(amt, (int, float)):
+                amt = _bolt11_amount_sats(pending.get("invoice")) if isinstance(pending.get("invoice"), str) else None
+            nwc_state.update({
+                "attempts": 0,
+                "nextAttemptAt": None,
+                "lastError": None,
+                "lastErrorCode": None,
+                "budgetWarning": False,
+                "fallbackTaskRaised": False,
+                "lastPaidHash": payment_hash,
+                "lastPaidAt": nwc_state.get("lastPaidAt") or _iso(datetime.now(timezone.utc)),
+                "lastPaidDuration": dur_months,
+                "lastPaidAmountSats": amt,
+                "lastPaidNewExpiry": confirmed_expiry,
+            })
+            meta["nwcAutoRenewState"] = nwc_state
+        elif nwc_state:
+            nwc_state.update({
+                "attempts": 0,
+                "nextAttemptAt": None,
+                "lastError": None,
+                "lastErrorCode": None,
+                "budgetWarning": False,
+                "fallbackTaskRaised": False,
+            })
+            meta["nwcAutoRenewState"] = nwc_state
     return True
 
 
-def _finish_pending(key, payment_hash):
+def _finish_pending(key, payment_hash, confirmed_expiry=None):
     with meta_lock():
         meta = read_meta()
-        if _clear_pending(meta, key, payment_hash):
+        if _clear_pending(meta, key, payment_hash, confirmed_expiry=confirmed_expiry):
             atomic_write_json(META_FILE_PATH, meta)
 
 
@@ -1174,7 +1231,7 @@ def _settle_renewal(pending, now):
         confirmed = _parse_iso(read_meta().get("expiresAt"))
         old = _parse_iso(pending.get("oldExpiry"))
         if confirmed is not None and (old is None or confirmed > old):
-            _finish_pending("pendingRenewal", payment_hash)
+            _finish_pending("pendingRenewal", payment_hash, confirmed_expiry=_iso(confirmed))
             return _outcome("renewal", "renewed", "The subscription was extended.", payment_hash)
         return _outcome("renewal", "waiting", "Renewal paid; waiting for the extended expiry to be confirmed.",
                         payment_hash)
@@ -2695,6 +2752,1364 @@ def _bandwidth_summary(meta, public_key, now):
     }
 
 
+_NWC_DEFAULT_ESTIMATED_SATS = {1: 4500, 3: 12000, 6: 22500, 12: 42000}
+
+
+def _nwc_recommended_budget(resolved_months, last_amount_sats=None, last_months=1):
+    if (
+        isinstance(last_amount_sats, (int, float))
+        and not isinstance(last_amount_sats, bool)
+        and math.isfinite(last_amount_sats)
+        and last_amount_sats > 0
+    ):
+        if not last_months or last_months == resolved_months:
+            estimated_sats = max(1, round(last_amount_sats))
+        else:
+            estimated_sats = max(1, math.ceil((last_amount_sats / last_months) * resolved_months))
+    else:
+        estimated_sats = _NWC_DEFAULT_ESTIMATED_SATS.get(resolved_months, 4500)
+    recommended_sats = math.ceil(estimated_sats * 1.2)
+    annual_sats = math.ceil((12 / resolved_months) * estimated_sats * 1.2)
+    return {
+        "estimatedRenewalSats": estimated_sats,
+        "recommendedBudgetSats": recommended_sats,
+        "recommendedAnnualSats": annual_sats,
+    }
+
+
+def _nwc_period_advanced(period_expiry_iso, current_expiry_iso):
+    """True only when the confirmed expiry strictly advanced past periodExpiry
+    (indicating a completed renewal into a new period, rather than a server-side
+    shortening or timestamp format difference)."""
+    p_dt = _parse_iso(period_expiry_iso)
+    c_dt = _parse_iso(current_expiry_iso)
+    if p_dt is None or c_dt is None:
+        return False
+    return c_dt > p_dt
+
+
+def _is_current_nwc_period_failure(meta, state):
+    if not isinstance(state, dict):
+        return False
+    if not state.get("fallbackTaskRaised") and not state.get("budgetWarning") and not state.get("lastError"):
+        return False
+    if _nwc_period_advanced(state.get("periodExpiry"), meta.get("expiresAt")):
+        return False
+    return True
+
+
+def _nwc_summary(meta):
+    """Read-only NWC auto-renewal status for the dashboard. Derived strictly
+    from tunnelsats-meta.json (never reads /data/nwc-wallet.json or exposes
+    the nostr+walletconnect:// URI or secret)."""
+    connected = meta.get("nwcConnected") is True
+    duration_setting = meta.get("nwcAutoRenewDuration")
+    if duration_setting not in ("match", "1m", "3m", "6m", "12m"):
+        duration_setting = "match"
+    last_duration = _dashboard_duration(meta.get("lastDuration"))
+    resolved_duration = (last_duration or "1m") if duration_setting == "match" else duration_setting
+    resolved_months = int(resolved_duration[:-1])
+    last_amount = _dashboard_amount(meta.get("lastAmountSats"))
+    last_months = int(last_duration[:-1]) if last_duration else 1
+    recommended = _nwc_recommended_budget(resolved_months, last_amount, last_months)
+    state = meta.get("nwcAutoRenewState") if isinstance(meta.get("nwcAutoRenewState"), dict) else {}
+    restore_needed = bool(state.get("restoreReconnectNeeded")) if connected else False
+    period_fail = connected and _is_current_nwc_period_failure(meta, state)
+    return {
+        "connected": connected,
+        "relayHost": _dashboard_text(meta.get("nwcRelayHost"), 253) if connected else None,
+        "routeViaTor": bool(meta.get("nwcRouteViaTor")) if connected else False,
+        "autoRenewDuration": duration_setting,
+        "resolvedDuration": resolved_duration,
+        "resolvedDurationMonths": resolved_months,
+        "recommendedBudgetSats": recommended["recommendedBudgetSats"],
+        "recommendedAnnualSats": recommended["recommendedAnnualSats"],
+        "budgetWarning": bool(state.get("budgetWarning")) if period_fail else False,
+        "fallbackTaskRaised": bool(state.get("fallbackTaskRaised")) if period_fail else False,
+        "restoreReconnectNeeded": restore_needed,
+        "lastError": _dashboard_error_text(state.get("lastError")) if (period_fail or restore_needed) else None,
+        "lastPaidAt": _dashboard_time(state.get("lastPaidAt")) if connected else None,
+        "lastPaidDuration": _dashboard_duration(state.get("lastPaidDuration")) if connected else None,
+        "lastPaidAmountSats": _dashboard_amount(state.get("lastPaidAmountSats")) if connected else None,
+    }
+
+
+# ─── NIP-47 NWC Auto-Renew Engine ────────────────────────────────────────────
+# Executes automatic subscription renewals via Nostr Wallet Connect (NIP-47).
+# Secret material lives exclusively in /data/nwc-wallet.json (mode 0600,
+# excluded from StartOS backups) and is never written to tunnelsats-meta.json
+# or logged.
+
+NWC_MAX_RENEWAL_SATS = 500_000
+NWC_MAX_ATTEMPTS = 3
+NWC_RETRY_DELAY = timedelta(hours=1)
+NWC_TRIGGER_WINDOW = timedelta(days=7)
+NWC_GRACE_WINDOW = timedelta(days=7)
+TOR_SOCKS_HOST = os.getenv("TOR_SOCKS_HOST", "tor.embassy")
+TOR_SOCKS_PORT = int(os.getenv("TOR_SOCKS_PORT", "9050"))
+
+_NWC_PUBKEY_RE = re.compile(r"^[0-9a-f]{64}$")
+_NWC_PERMANENT_ERROR_CODES = frozenset({
+    "QUOTA_EXCEEDED",
+    "INSUFFICIENT_BALANCE",
+    "UNAUTHORIZED",
+    "RESTRICTED",
+    "NOT_IMPLEMENTED",
+})
+_NWC_BUDGET_ERROR_CODES = frozenset({"QUOTA_EXCEEDED", "INSUFFICIENT_BALANCE"})
+_BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+_BECH32_CHARSET_MAP = {c: i for i, c in enumerate(_BECH32_CHARSET)}
+
+
+class NwcError(Exception):
+    def __init__(self, message, code="INTERNAL", permanent=False, budget=False):
+        super().__init__(message)
+        self.code = code
+        self.permanent = permanent
+        self.budget = budget
+
+
+class NwcVerificationError(NwcError):
+    def __init__(self, message):
+        super().__init__(message, code="VERIFICATION_FAILED", permanent=True, budget=False)
+
+
+def _redact_nwc_secrets(text, secret=None):
+    if not isinstance(text, str):
+        return "NWC operation failed"
+    cleaned = re.sub(r"nostr(?:\+walletconnect|walletconnect)://\S+", "[redacted-nwc-uri]", text, flags=re.IGNORECASE)
+    if isinstance(secret, str) and len(secret) >= 8:
+        cleaned = cleaned.replace(secret, "[redacted]")
+        cleaned = cleaned.replace(secret.lower(), "[redacted]")
+    cleaned = _HEX64_RE.sub("[redacted]", cleaned)
+    return cleaned[:240]
+
+
+def parse_nwc_uri(raw_input):
+    """Validates a nostr+walletconnect:// URI and returns its parsed fields.
+    Raises ValueError with a secret-free message on invalid input."""
+    if not isinstance(raw_input, str) or not raw_input.strip():
+        raise ValueError("NWC Connection URI must not be empty.")
+    trimmed = raw_input.strip()
+    lower = trimmed.lower()
+    if lower.startswith("nostr+walletconnect://"):
+        rest = trimmed[len("nostr+walletconnect://"):]
+    elif lower.startswith("nostrwalletconnect://"):
+        rest = trimmed[len("nostrwalletconnect://"):]
+    else:
+        raise ValueError("NWC Connection URI must start with nostr+walletconnect://")
+
+    pubkey_part, sep, query_part = rest.partition("?")
+    wallet_pubkey = pubkey_part.strip().rstrip("/").lower()
+    if not _NWC_PUBKEY_RE.match(wallet_pubkey):
+        raise ValueError("NWC Connection URI must contain a 64-character hex wallet pubkey.")
+    if not sep or not query_part:
+        raise ValueError("NWC Connection URI is missing query parameters (?relay=...&secret=...).")
+
+    from urllib.parse import parse_qsl, urlparse, quote
+    params = parse_qsl(query_part, keep_blank_values=True)
+    raw_relays = [v.strip() for k, v in params if k == "relay" and v.strip()]
+    if not raw_relays:
+        raise ValueError("NWC Connection URI must include at least one relay= parameter.")
+
+    relays = []
+    relay_hosts = []
+    has_onion_relay = False
+    for raw_relay in raw_relays:
+        parsed_relay = urlparse(raw_relay)
+        scheme = (parsed_relay.scheme or "").lower()
+        hostname = (parsed_relay.hostname or "").lower()
+        if not hostname:
+            raise ValueError("Invalid relay URL in NWC Connection URI.")
+        is_onion = hostname.endswith(".onion")
+        if scheme == "ws":
+            if not is_onion:
+                raise ValueError(f"Plaintext ws:// relay ({hostname}) is only allowed for .onion hidden services.")
+        elif scheme != "wss":
+            raise ValueError(f"Relay URL ({hostname}) must use wss:// (or ws:// for .onion).")
+        try:
+            port = parsed_relay.port
+        except ValueError:
+            raise ValueError(f"Invalid port in relay URL ({hostname}).")
+        if is_onion:
+            has_onion_relay = True
+        host_literal = f"[{hostname}]" if ":" in hostname else hostname
+        path = parsed_relay.path if parsed_relay.path and parsed_relay.path != "/" else ""
+        query_suffix = f"?{parsed_relay.query}" if parsed_relay.query else ""
+        if query_suffix and not path:
+            path = "/"
+        port_suffix = f":{port}" if port else ""
+        normalized_relay = f"{scheme}://{host_literal}{port_suffix}{path}{query_suffix}"
+        if normalized_relay not in relays:
+            relays.append(normalized_relay)
+        if host_literal not in relay_hosts:
+            relay_hosts.append(host_literal)
+
+    secrets_list = [v.strip().lower() for k, v in params if k == "secret" and v.strip()]
+    if not secrets_list:
+        raise ValueError("NWC Connection URI is missing the secret= parameter.")
+    secret = secrets_list[0]
+    if not _NWC_PUBKEY_RE.match(secret):
+        raise ValueError("NWC Connection URI secret must be a 64-character hex string.")
+
+    relay_query = "&".join(f"relay={quote(r, safe='')}" for r in relays)
+    normalized_uri = f"nostr+walletconnect://{wallet_pubkey}?{relay_query}&secret={secret}"
+    return {
+        "uri": normalized_uri,
+        "walletPubkey": wallet_pubkey,
+        "relays": relays,
+        "relayHost": relay_hosts[0],
+        "secret": secret,
+        "hasOnionRelay": has_onion_relay,
+    }
+
+
+def _bech32_polymod(values):
+    gen = (0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3)
+    chk = 1
+    for v in values:
+        b = chk >> 25
+        chk = ((chk & 0x1FFFFFF) << 5) ^ v
+        for i in range(5):
+            if (b >> i) & 1:
+                chk ^= gen[i]
+    return chk
+
+
+def _bech32_hrp_expand(hrp):
+    return [ord(x) >> 5 for x in hrp] + [0] + [ord(x) & 31 for x in hrp]
+
+
+def _bech32_verify_checksum(hrp, data):
+    return _bech32_polymod(_bech32_hrp_expand(hrp) + data) == 1
+
+
+def _verify_bolt11_invoice(bolt11, expected_payment_hash, max_sats=NWC_MAX_RENEWAL_SATS):
+    """Verifies a BOLT11 invoice in pure Python before paying via NWC:
+    1. Valid BOLT11 HRP and Bech32 checksum.
+    2. Positive satoshi amount <= max_sats (500,000 sats).
+    3. Embedded tagged field 'p' (type 1, length 52 words = 256-bit hash)
+       matches expected_payment_hash.
+    Returns the verified amount in satoshis or raises NwcVerificationError."""
+    if not isinstance(bolt11, str) or not bolt11.strip():
+        raise NwcVerificationError("Renewal invoice is empty or missing.")
+    if not isinstance(expected_payment_hash, str) or not _NWC_PUBKEY_RE.match(expected_payment_hash.lower()):
+        raise NwcVerificationError("Expected payment hash is invalid.")
+    inv = bolt11.strip().lower()
+    amount_sats = _bolt11_amount_sats(inv)
+    if amount_sats is None or amount_sats <= 0:
+        raise NwcVerificationError("Renewal invoice does not specify a valid positive satoshi amount.")
+    if amount_sats > max_sats:
+        raise NwcVerificationError(
+            f"Renewal invoice amount ({amount_sats} sats) exceeds the NWC safety ceiling ({max_sats} sats)."
+        )
+    sep = inv.rfind("1")
+    if sep < 4:
+        raise NwcVerificationError("Renewal invoice is missing the Bech32 separator.")
+    hrp = inv[:sep]
+    data_part = inv[sep + 1:]
+    # 7 words timestamp + 104 words signature + 6 words checksum = 117 words minimum
+    if len(data_part) < 117:
+        raise NwcVerificationError("Renewal invoice data section is too short.")
+    try:
+        words = [_BECH32_CHARSET_MAP[c] for c in data_part]
+    except KeyError:
+        raise NwcVerificationError("Renewal invoice contains invalid Bech32 characters.")
+    if not _bech32_verify_checksum(hrp, words):
+        raise NwcVerificationError("Renewal invoice Bech32 checksum verification failed.")
+
+    tagged = words[7 : len(words) - 110]
+    idx = 0
+    embedded_hash = None
+    while idx + 3 <= len(tagged):
+        tag_type = tagged[idx]
+        data_len = (tagged[idx + 1] << 5) | tagged[idx + 2]
+        idx += 3
+        if idx + data_len > len(tagged):
+            raise NwcVerificationError("Renewal invoice has truncated BOLT11 tagged field.")
+        field_words = tagged[idx : idx + data_len]
+        idx += data_len
+        # Tag 'p' is index 1 in Bech32 charset ("qpzry9...") and holds 52 5-bit words (256 bits + 4 zero pad bits)
+        if tag_type == 1 and data_len == 52 and embedded_hash is None:
+            acc = 0
+            for w in field_words:
+                acc = (acc << 5) | w
+            embedded_hash = (acc >> 4).to_bytes(32, "big").hex()
+
+    if embedded_hash is None:
+        raise NwcVerificationError("Renewal invoice does not contain a BOLT11 payment hash ('p' tag).")
+    if embedded_hash != expected_payment_hash.lower():
+        raise NwcVerificationError("Renewal invoice payment hash does not match the TunnelSats renewal paymentHash.")
+    return amount_sats
+
+
+# ─── Pure-Python secp256k1 / BIP-340 Schnorr / NIP-04 Crypto ─────────────────
+
+_SECP_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+_SECP_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+_SECP_GX = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+_SECP_GY = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+_SECP_G = (_SECP_GX, _SECP_GY)
+
+
+def _secp_point_add(p1, p2):
+    if p1 is None:
+        return p2
+    if p2 is None:
+        return p1
+    x1, y1 = p1
+    x2, y2 = p2
+    if x1 == x2 and y1 != y2:
+        return None
+    if x1 == x2:
+        lam = (3 * x1 * x1 * pow(2 * y1, _SECP_P - 2, _SECP_P)) % _SECP_P
+    else:
+        lam = ((y2 - y1) * pow(x2 - x1, _SECP_P - 2, _SECP_P)) % _SECP_P
+    x3 = (lam * lam - x1 - x2) % _SECP_P
+    y3 = (lam * (x1 - x3) - y1) % _SECP_P
+    return (x3, y3)
+
+
+def _secp_point_mul(k, point=_SECP_G):
+    if k <= 0 or k >= _SECP_N:
+        raise ValueError("Invalid secp256k1 scalar")
+    result = None
+    addend = point
+    while k:
+        if k & 1:
+            result = _secp_point_add(result, addend)
+        addend = _secp_point_add(addend, addend)
+        k >>= 1
+    return result
+
+
+def _secp_lift_x(x):
+    if x <= 0 or x >= _SECP_P:
+        raise ValueError("Invalid x-only public key coordinate")
+    c = (pow(x, 3, _SECP_P) + 7) % _SECP_P
+    y = pow(c, (_SECP_P + 1) // 4, _SECP_P)
+    if pow(y, 2, _SECP_P) != c:
+        raise ValueError("Point is not on secp256k1 curve")
+    return (x, y if y % 2 == 0 else _SECP_P - y)
+
+
+def _tagged_hash(tag, msg_bytes):
+    import hashlib
+    tag_hash = hashlib.sha256(tag.encode("utf-8")).digest()
+    return hashlib.sha256(tag_hash + tag_hash + msg_bytes).digest()
+
+
+def _nostr_pubkey_from_secret(secret_hex):
+    d = int(secret_hex, 16)
+    pt = _secp_point_mul(d)
+    return pt[0].to_bytes(32, "big").hex()
+
+
+def _schnorr_sign(secret_hex, msg_bytes):
+    if len(msg_bytes) != 32:
+        raise ValueError("BIP-340 message must be 32 bytes")
+    d0 = int(secret_hex, 16)
+    P = _secp_point_mul(d0)
+    d = d0 if (P[1] % 2 == 0) else (_SECP_N - d0)
+    px_bytes = P[0].to_bytes(32, "big")
+    aux = _tagged_hash("BIP0340/aux", os.urandom(32))
+    t = (d ^ int.from_bytes(aux, "big")).to_bytes(32, "big")
+    k0 = int.from_bytes(_tagged_hash("BIP0340/nonce", t + px_bytes + msg_bytes), "big") % _SECP_N
+    if k0 == 0:
+        raise ValueError("Invalid Schnorr nonce")
+    R = _secp_point_mul(k0)
+    k = k0 if (R[1] % 2 == 0) else (_SECP_N - k0)
+    rx_bytes = R[0].to_bytes(32, "big")
+    e = int.from_bytes(_tagged_hash("BIP0340/challenge", rx_bytes + px_bytes + msg_bytes), "big") % _SECP_N
+    s = (k + e * d) % _SECP_N
+    return (rx_bytes + s.to_bytes(32, "big")).hex()
+
+
+def _schnorr_verify(pubkey_hex, msg_bytes, sig_hex):
+    try:
+        if len(msg_bytes) != 32 or len(sig_hex) != 128:
+            return False
+        P = _secp_lift_x(int(pubkey_hex, 16))
+        sig_bytes = bytes.fromhex(sig_hex)
+        r = int.from_bytes(sig_bytes[:32], "big")
+        s = int.from_bytes(sig_bytes[32:], "big")
+        if r >= _SECP_P or s >= _SECP_N:
+            return False
+        e = int.from_bytes(
+            _tagged_hash("BIP0340/challenge", sig_bytes[:32] + P[0].to_bytes(32, "big") + msg_bytes),
+            "big",
+        ) % _SECP_N
+        R = _secp_point_add(_secp_point_mul(s), _secp_point_mul(_SECP_N - e, P)) if e != 0 else _secp_point_mul(s)
+        if R is None or R[1] % 2 != 0 or R[0] != r:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _nip04_shared_secret(secret_hex, peer_pubkey_hex):
+    d = int(secret_hex, 16)
+    W = _secp_lift_x(int(peer_pubkey_hex, 16))
+    S = _secp_point_mul(d, W)
+    return S[0].to_bytes(32, "big")
+
+
+def _aes_xtime(a):
+    return (((a << 1) ^ 0x11B) & 0xFF) if (a & 0x80) else (a << 1)
+
+
+def _aes_gf_mul(a, b):
+    res = 0
+    for _ in range(8):
+        if b & 1:
+            res ^= a
+        a = _aes_xtime(a)
+        b >>= 1
+    return res
+
+
+def _build_aes_sboxes():
+    sbox = [0] * 256
+    inv_sbox = [0] * 256
+    for x in range(256):
+        # Multiplicative inverse in GF(2^8): x^254 (0 maps to 0)
+        inv = 0
+        if x != 0:
+            inv = 1
+            base = x
+            exp = 254
+            while exp:
+                if exp & 1:
+                    inv = _aes_gf_mul(inv, base)
+                base = _aes_gf_mul(base, base)
+                exp >>= 1
+        s = inv
+        for _ in range(4):
+            s = ((s << 1) | (s >> 7)) & 0xFF
+            inv ^= s
+        val = (inv ^ 0x63) & 0xFF
+        sbox[x] = val
+        inv_sbox[val] = x
+    return bytes(sbox), bytes(inv_sbox)
+
+
+_AES_SBOX, _AES_INV_SBOX = _build_aes_sboxes()
+_AES_SHIFT_ROWS = (0, 5, 10, 15, 4, 9, 14, 3, 8, 13, 2, 7, 12, 1, 6, 11)
+_AES_INV_SHIFT_ROWS = (0, 13, 10, 7, 4, 1, 14, 11, 8, 5, 2, 15, 12, 9, 6, 3)
+
+
+def _aes256_expand_key(key32):
+    if len(key32) != 32:
+        raise ValueError("AES-256 key must be 32 bytes")
+    w = [int.from_bytes(key32[4 * i : 4 * (i + 1)], "big") for i in range(8)]
+    rcon = 1
+    for i in range(8, 60):
+        temp = w[i - 1]
+        if i % 8 == 0:
+            temp = ((temp << 8) | (temp >> 24)) & 0xFFFFFFFF
+            temp = (
+                (_AES_SBOX[(temp >> 24) & 0xFF] << 24)
+                | (_AES_SBOX[(temp >> 16) & 0xFF] << 16)
+                | (_AES_SBOX[(temp >> 8) & 0xFF] << 8)
+                | _AES_SBOX[temp & 0xFF]
+            ) ^ (rcon << 24)
+            rcon = _aes_xtime(rcon)
+        elif i % 8 == 4:
+            temp = (
+                (_AES_SBOX[(temp >> 24) & 0xFF] << 24)
+                | (_AES_SBOX[(temp >> 16) & 0xFF] << 16)
+                | (_AES_SBOX[(temp >> 8) & 0xFF] << 8)
+                | _AES_SBOX[temp & 0xFF]
+            )
+        w.append(w[i - 8] ^ temp)
+    round_keys = []
+    for r in range(15):
+        rk = bytearray(16)
+        for c in range(4):
+            rk[4 * c : 4 * (c + 1)] = w[4 * r + c].to_bytes(4, "big")
+        round_keys.append(bytes(rk))
+    return round_keys
+
+
+def _aes256_encrypt_block(block16, round_keys):
+    rk0 = round_keys[0]
+    s = [block16[i] ^ rk0[i] for i in range(16)]
+    for r in range(1, 14):
+        s = [_AES_SBOX[s[i]] for i in _AES_SHIFT_ROWS]
+        rk = round_keys[r]
+        for c in range(0, 16, 4):
+            a0, a1, a2, a3 = s[c], s[c + 1], s[c + 2], s[c + 3]
+            t = a0 ^ a1 ^ a2 ^ a3
+            s[c] = a0 ^ t ^ _aes_xtime(a0 ^ a1) ^ rk[c]
+            s[c + 1] = a1 ^ t ^ _aes_xtime(a1 ^ a2) ^ rk[c + 1]
+            s[c + 2] = a2 ^ t ^ _aes_xtime(a2 ^ a3) ^ rk[c + 2]
+            s[c + 3] = a3 ^ t ^ _aes_xtime(a3 ^ a0) ^ rk[c + 3]
+    rk14 = round_keys[14]
+    return bytes(_AES_SBOX[s[_AES_SHIFT_ROWS[i]]] ^ rk14[i] for i in range(16))
+
+
+def _aes256_decrypt_block(block16, round_keys):
+    rk14 = round_keys[14]
+    s = [block16[i] ^ rk14[i] for i in range(16)]
+    for r in range(13, 0, -1):
+        rk = round_keys[r]
+        s = [_AES_INV_SBOX[s[_AES_INV_SHIFT_ROWS[i]]] ^ rk[i] for i in range(16)]
+        for c in range(0, 16, 4):
+            a0, a1, a2, a3 = s[c], s[c + 1], s[c + 2], s[c + 3]
+            u = _aes_xtime(_aes_xtime(a0 ^ a2))
+            v = _aes_xtime(_aes_xtime(a1 ^ a3))
+            b0, b1, b2, b3 = a0 ^ u, a1 ^ v, a2 ^ u, a3 ^ v
+            t = b0 ^ b1 ^ b2 ^ b3
+            s[c] = b0 ^ t ^ _aes_xtime(b0 ^ b1)
+            s[c + 1] = b1 ^ t ^ _aes_xtime(b1 ^ b2)
+            s[c + 2] = b2 ^ t ^ _aes_xtime(b2 ^ b3)
+            s[c + 3] = b3 ^ t ^ _aes_xtime(b3 ^ b0)
+    rk0 = round_keys[0]
+    return bytes(_AES_INV_SBOX[s[_AES_INV_SHIFT_ROWS[i]]] ^ rk0[i] for i in range(16))
+
+
+def _nip04_encrypt(shared_key_bytes, plaintext):
+    import base64
+    iv = os.urandom(16)
+    raw = plaintext.encode("utf-8")
+    pad_len = 16 - (len(raw) % 16)
+    padded = raw + bytes([pad_len] * pad_len)
+    round_keys = _aes256_expand_key(shared_key_bytes)
+    out = bytearray()
+    prev = iv
+    for offset in range(0, len(padded), 16):
+        blk = bytes(padded[offset + i] ^ prev[i] for i in range(16))
+        prev = _aes256_encrypt_block(blk, round_keys)
+        out.extend(prev)
+    return f"{base64.b64encode(bytes(out)).decode('ascii')}?iv={base64.b64encode(iv).decode('ascii')}"
+
+
+def _nip04_decrypt(shared_key_bytes, content):
+    import base64
+    if not isinstance(content, str) or "?iv=" not in content:
+        raise ValueError("Invalid NIP-04 encrypted content")
+    ct_b64, _, iv_b64 = content.partition("?iv=")
+    ciphertext = base64.b64decode(ct_b64)
+    iv = base64.b64decode(iv_b64)
+    if len(iv) != 16 or len(ciphertext) == 0 or len(ciphertext) % 16 != 0:
+        raise ValueError("Invalid NIP-04 ciphertext or IV length")
+    round_keys = _aes256_expand_key(shared_key_bytes)
+    padded = bytearray()
+    prev = iv
+    for offset in range(0, len(ciphertext), 16):
+        ct_blk = ciphertext[offset : offset + 16]
+        dec_blk = _aes256_decrypt_block(ct_blk, round_keys)
+        padded.extend(dec_blk[i] ^ prev[i] for i in range(16))
+        prev = ct_blk
+    pad_len = padded[-1]
+    if pad_len < 1 or pad_len > 16 or bytes(padded[-pad_len:]) != bytes([pad_len] * pad_len):
+        raise ValueError("Invalid NIP-04 PKCS#7 padding")
+    return bytes(padded[:-pad_len]).decode("utf-8")
+
+
+def _build_nip47_request_event(secret_hex, wallet_pubkey_hex, method, params, created_at=None):
+    import hashlib
+    client_pubkey = _nostr_pubkey_from_secret(secret_hex)
+    shared_key = _nip04_shared_secret(secret_hex, wallet_pubkey_hex)
+    payload_str = json.dumps({"method": method, "params": params}, separators=(",", ":"))
+    content = _nip04_encrypt(shared_key, payload_str)
+    ts = int(created_at if created_at is not None else time.time())
+    tags = [["p", wallet_pubkey_hex]]
+    commitment = json.dumps([0, client_pubkey, ts, 23194, tags, content], separators=(",", ":"), ensure_ascii=False)
+    event_id_bytes = hashlib.sha256(commitment.encode("utf-8")).digest()
+    sig = _schnorr_sign(secret_hex, event_id_bytes)
+    return {
+        "id": event_id_bytes.hex(),
+        "pubkey": client_pubkey,
+        "created_at": ts,
+        "kind": 23194,
+        "tags": tags,
+        "content": content,
+        "sig": sig,
+    }, shared_key
+
+
+def _parse_nip47_response_event(resp_event, request_event_id, wallet_pubkey_hex, shared_key):
+    import hashlib
+    if not isinstance(resp_event, dict):
+        raise ValueError("Invalid Nostr event object")
+    if resp_event.get("kind") != 23195:
+        raise ValueError("Unexpected Nostr event kind")
+    if str(resp_event.get("pubkey") or "").lower() != wallet_pubkey_hex.lower():
+        raise ValueError("Response event pubkey does not match wallet pubkey")
+    tags = resp_event.get("tags")
+    if not isinstance(tags, list):
+        raise ValueError("Response event has invalid tags")
+    e_tags = [t[1] for t in tags if isinstance(t, list) and len(t) >= 2 and t[0] == "e"]
+    if request_event_id not in e_tags:
+        raise ValueError("Response event does not reference our request event ID")
+    commitment = json.dumps(
+        [
+            0,
+            resp_event.get("pubkey"),
+            resp_event.get("created_at"),
+            resp_event.get("kind"),
+            tags,
+            resp_event.get("content"),
+        ],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    expected_id_bytes = hashlib.sha256(commitment.encode("utf-8")).digest()
+    if resp_event.get("id") != expected_id_bytes.hex():
+        raise ValueError("Response event ID does not match commitment hash")
+    if not _schnorr_verify(wallet_pubkey_hex, expected_id_bytes, str(resp_event.get("sig") or "")):
+        raise ValueError("Response event Schnorr signature verification failed")
+    decrypted = _nip04_decrypt(shared_key, resp_event.get("content"))
+    body = json.loads(decrypted)
+    if not isinstance(body, dict):
+        raise ValueError("Decrypted NIP-47 response is not a JSON object")
+    return body
+
+
+# ─── Minimal RFC 6455 WebSocket + SOCKS5h Client ─────────────────────────────
+
+def _recv_exact(sock, length, deadline=None):
+    buf = bytearray()
+    while len(buf) < length:
+        if deadline is not None:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                raise TimeoutError("Timed out reading from NWC relay")
+            sock.settimeout(min(rem, 15.0))
+        chunk = sock.recv(length - len(buf))
+        if not chunk:
+            raise ConnectionError("Socket closed prematurely")
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def _connect_socks5h(target_host, target_port, timeout=15):
+    """Connects to (target_host, target_port) through the local Tor SOCKS5h
+    proxy (ATYP=0x03 domain name resolution on the proxy). Fails closed if the
+    SOCKS5 proxy is unreachable or rejects the connection."""
+    host_bytes = target_host.encode("idna")
+    if not (1 <= len(host_bytes) <= 255):
+        raise NwcError("Invalid relay hostname for SOCKS5h proxy")
+    deadline = time.monotonic() + timeout
+    try:
+        sock = socket.create_connection((TOR_SOCKS_HOST, TOR_SOCKS_PORT), timeout=timeout)
+        sock.settimeout(timeout)
+        # RFC 1928 Greeting: VER=5, NMETHODS=1, METHOD=0 (No Auth)
+        sock.sendall(b"\x05\x01\x00")
+        ver, method = _recv_exact(sock, 2, deadline=deadline)
+        if ver != 5 or method != 0:
+            sock.close()
+            raise NwcError("Tor SOCKS5 proxy rejected authentication method")
+        # CONNECT command with ATYP=3 (Domain Name -> SOCKS5h)
+        req = (
+            b"\x05\x01\x00\x03"
+            + bytes([len(host_bytes)])
+            + host_bytes
+            + int(target_port).to_bytes(2, "big")
+        )
+        sock.sendall(req)
+        ver, rep, _rsv, atyp = _recv_exact(sock, 4, deadline=deadline)
+        if ver != 5 or rep != 0:
+            sock.close()
+            raise NwcError(f"Tor SOCKS5 proxy could not connect to relay (SOCKS code {rep})")
+        if atyp == 1:
+            _recv_exact(sock, 4 + 2, deadline=deadline)
+        elif atyp == 3:
+            addr_len = _recv_exact(sock, 1, deadline=deadline)[0]
+            _recv_exact(sock, addr_len + 2, deadline=deadline)
+        elif atyp == 4:
+            _recv_exact(sock, 16 + 2, deadline=deadline)
+        else:
+            sock.close()
+            raise NwcError("Tor SOCKS5 proxy returned unknown address type")
+        return sock
+    except NwcError:
+        raise
+    except Exception as e:
+        raise NwcError(f"Tor SOCKS5 proxy ({TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}) connection failed: {e}")
+
+
+def _ws_send_frame(sock, opcode, payload_bytes):
+    mask_key = os.urandom(4)
+    header = bytearray([0x80 | (opcode & 0x0F)])
+    length = len(payload_bytes)
+    if length < 126:
+        header.append(0x80 | length)
+    elif length < 65536:
+        header.append(0x80 | 126)
+        header.extend(length.to_bytes(2, "big"))
+    else:
+        header.append(0x80 | 127)
+        header.extend(length.to_bytes(8, "big"))
+    header.extend(mask_key)
+    masked = bytes(b ^ mask_key[i & 3] for i, b in enumerate(payload_bytes))
+    sock.sendall(bytes(header) + masked)
+
+
+def _ws_read_single_frame(sock, max_bytes=262144, deadline=None):
+    b0, b1 = _recv_exact(sock, 2, deadline=deadline)
+    fin = bool(b0 & 0x80)
+    opcode = b0 & 0x0F
+    masked = bool(b1 & 0x80)
+    length = b1 & 0x7F
+    if length == 126:
+        length = int.from_bytes(_recv_exact(sock, 2, deadline=deadline), "big")
+    elif length == 127:
+        length = int.from_bytes(_recv_exact(sock, 8, deadline=deadline), "big")
+    if length > max_bytes:
+        raise NwcError("Relay WebSocket frame exceeds size limit")
+    mask_key = _recv_exact(sock, 4, deadline=deadline) if masked else None
+    payload = _recv_exact(sock, length, deadline=deadline) if length > 0 else b""
+    if mask_key:
+        payload = bytes(b ^ mask_key[i & 3] for i, b in enumerate(payload))
+    return fin, opcode, payload
+
+
+def _ws_recv_frame(sock, max_bytes=262144, deadline=None):
+    fin, opcode, payload = _ws_read_single_frame(sock, max_bytes=max_bytes, deadline=deadline)
+    if fin or opcode >= 0x8:
+        return opcode, payload
+    if opcode == 0x0:
+        raise NwcError("Unexpected WebSocket continuation frame without initial frame")
+    assembled = bytearray(payload)
+    while True:
+        c_fin, c_opcode, c_payload = _ws_read_single_frame(sock, max_bytes=max_bytes, deadline=deadline)
+        if c_opcode == 0x8:
+            return 0x8, c_payload
+        if c_opcode == 0x9:
+            _ws_send_frame(sock, 0xA, c_payload)
+            continue
+        if c_opcode == 0xA:
+            continue
+        if c_opcode != 0x0:
+            raise NwcError("Expected WebSocket continuation frame (opcode 0x0)")
+        if len(assembled) + len(c_payload) > max_bytes:
+            raise NwcError("Reassembled WebSocket message exceeds size limit")
+        assembled.extend(c_payload)
+        if c_fin:
+            return opcode, bytes(assembled)
+
+
+def _ws_open(relay_url, route_via_tor=False, timeout=15):
+    import base64
+    import hashlib
+    import ssl
+    from urllib.parse import urlparse
+
+    parsed = urlparse(relay_url)
+    scheme = (parsed.scheme or "").lower()
+    hostname = (parsed.hostname or "").lower()
+    is_onion = hostname.endswith(".onion")
+    if scheme == "ws" and not is_onion:
+        raise NwcError("Refusing plaintext ws:// connection to non-onion relay", permanent=True)
+    port = parsed.port or (443 if scheme == "wss" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    deadline = time.monotonic() + timeout
+    use_tor = bool(route_via_tor or is_onion)
+    if use_tor:
+        raw_sock = _connect_socks5h(hostname, port, timeout=timeout)
+    else:
+        try:
+            raw_sock = socket.create_connection((hostname, port), timeout=timeout)
+            raw_sock.settimeout(timeout)
+        except Exception as e:
+            raise NwcError(f"Could not connect to NWC relay {hostname}: {e}")
+
+    sock = raw_sock
+    try:
+        if scheme == "wss":
+            ctx = ssl.create_default_context()
+            sock = ctx.wrap_socket(raw_sock, server_hostname=hostname)
+            sock.settimeout(timeout)
+
+        ws_key = base64.b64encode(os.urandom(16)).decode("ascii")
+        default_port = (scheme == "wss" and port == 443) or (scheme == "ws" and port == 80)
+        host_literal = f"[{hostname}]" if ":" in hostname else hostname
+        host_hdr = host_literal if default_port else f"{host_literal}:{port}"
+        handshake = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host_hdr}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {ws_key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            f"User-Agent: TunnelSats-StartOS/{get_package_version()}\r\n\r\n"
+        )
+        sock.sendall(handshake.encode("ascii"))
+
+        resp_buf = bytearray()
+        while b"\r\n\r\n" not in resp_buf:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                raise NwcError(f"Timed out waiting for WebSocket handshake from relay {hostname}")
+            sock.settimeout(min(rem, 15.0))
+            chunk = sock.recv(1)
+            if not chunk:
+                raise NwcError(f"Relay {hostname} closed connection during WebSocket handshake")
+            resp_buf.extend(chunk)
+            if len(resp_buf) > 16384:
+                raise NwcError(f"Relay {hostname} sent oversized WebSocket handshake")
+
+        header_text = resp_buf.decode("latin1", errors="replace")
+        lines = header_text.split("\r\n")
+        status_line = lines[0] if lines else ""
+        if not status_line.startswith("HTTP/1.1 101"):
+            raise NwcError(f"Relay {hostname} rejected WebSocket upgrade: {status_line[:80]}")
+        expected_accept = base64.b64encode(
+            hashlib.sha1((ws_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+        ).decode("ascii")
+        headers = {}
+        for line in lines[1:]:
+            if ":" in line:
+                k, _, v = line.partition(":")
+                headers[k.strip().lower()] = v.strip()
+        if headers.get("sec-websocket-accept") != expected_accept:
+            raise NwcError(f"Relay {hostname} returned invalid Sec-WebSocket-Accept")
+        return sock
+    except Exception:
+        try:
+            sock.close()
+        except Exception:
+            pass
+        raise
+
+
+def nwc_execute_command(parsed_uri, method, params, route_via_tor=False, timeout=20):
+    """Executes a single NIP-47 command (e.g. get_budget, get_balance,
+    lookup_invoice, pay_invoice) against the wallet's relays. Returns the
+    NIP-47 `result` dict or raises NwcError."""
+    import secrets
+    req_event, shared_key = _build_nip47_request_event(
+        parsed_uri["secret"],
+        parsed_uri["walletPubkey"],
+        method,
+        params,
+    )
+    sub_id = f"ts-{secrets.token_hex(6)}"
+    relays = parsed_uri.get("relays") or []
+    last_err = None
+
+    for relay_url in relays:
+        sock = None
+        try:
+            sock = _ws_open(
+                relay_url,
+                route_via_tor=bool(route_via_tor or parsed_uri.get("hasOnionRelay")),
+                timeout=timeout,
+            )
+            req_filter = {
+                "kinds": [23195],
+                "#e": [req_event["id"]],
+                "authors": [parsed_uri["walletPubkey"]],
+            }
+            _ws_send_frame(sock, 0x1, json.dumps(["REQ", sub_id, req_filter]).encode("utf-8"))
+            _ws_send_frame(sock, 0x1, json.dumps(["EVENT", req_event]).encode("utf-8"))
+
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                opcode, payload = _ws_recv_frame(sock, deadline=deadline)
+                if opcode == 0x8:  # Close
+                    break
+                if opcode == 0x9:  # Ping -> Pong
+                    _ws_send_frame(sock, 0xA, payload)
+                    continue
+                if opcode != 0x1:
+                    continue
+                msg = json.loads(payload.decode("utf-8"))
+                if not isinstance(msg, list) or len(msg) < 2:
+                    continue
+                if msg[0] == "OK" and len(msg) >= 3 and msg[1] == req_event["id"] and msg[2] is False:
+                    reason = str(msg[3]) if len(msg) >= 4 else "Relay rejected request event"
+                    raise NwcError(f"NWC relay rejected request: {reason}")
+                if msg[0] == "EVENT" and len(msg) >= 3 and msg[1] == sub_id:
+                    body = _parse_nip47_response_event(
+                        msg[2],
+                        req_event["id"],
+                        parsed_uri["walletPubkey"],
+                        shared_key,
+                    )
+                    err_obj = body.get("error")
+                    if isinstance(err_obj, dict) and err_obj.get("code"):
+                        code = str(err_obj.get("code")).upper()
+                        err_msg = str(err_obj.get("message") or f"Wallet returned {code}")
+                        raise NwcError(
+                            _redact_nwc_secrets(err_msg, parsed_uri["secret"]),
+                            code=code,
+                            permanent=(code in _NWC_PERMANENT_ERROR_CODES),
+                            budget=(code in _NWC_BUDGET_ERROR_CODES),
+                        )
+                    result = body.get("result")
+                    if not isinstance(result, dict):
+                        raise NwcError(f"Wallet returned an invalid or empty result for {method}")
+                    if method == "pay_invoice":
+                        preimage = result.get("preimage")
+                        if not isinstance(preimage, str) or not preimage.strip():
+                            raise NwcError("Wallet pay_invoice response did not include a payment preimage")
+                    return result
+            raise NwcError(f"Timed out waiting for NIP-47 {method} response from wallet")
+        except NwcError as e:
+            last_err = e
+            if e.permanent or e.budget:
+                raise
+        except Exception as e:
+            last_err = NwcError(_redact_nwc_secrets(str(e), parsed_uri.get("secret")))
+        finally:
+            if sock is not None:
+                try:
+                    _ws_send_frame(sock, 0x8, b"")
+                except Exception:
+                    pass
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    if last_err is not None:
+        raise last_err
+    raise NwcError("No usable NWC relay available")
+
+
+@contextmanager
+def nwc_renew_lock():
+    """Non-blocking cross-process lock around maybe_nwc_auto_renew so the
+    background sync loop and the subscription health check never concurrently
+    create or pay two renewal invoices."""
+    fd = os.open(META_FILE_PATH + ".nwc.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    acquired = False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except BlockingIOError:
+            pass
+        yield acquired
+    finally:
+        os.close(fd)
+
+
+def _nwc_preflight_budget_check(parsed_uri, required_sats, route_via_tor=False):
+    """Queries NIP-47 get_budget (and get_balance as a secondary check) before
+    paying. Returns (ok: bool, error_code: str|None, message: str|None).
+    Wallets that do not implement get_budget/get_balance are allowed to proceed
+    to pay_invoice."""
+    try:
+        budget_res = nwc_execute_command(parsed_uri, "get_budget", {}, route_via_tor=route_via_tor, timeout=10)
+        rem_msat = budget_res.get("remaining_budget")
+        if isinstance(rem_msat, (int, float)) and not isinstance(rem_msat, bool) and rem_msat >= 0:
+            rem_sats = int(rem_msat // 1000)
+            if rem_sats < required_sats:
+                return (
+                    False,
+                    "QUOTA_EXCEEDED",
+                    f"NWC wallet remaining budget ({rem_sats} sats) is below the renewal invoice ({required_sats} sats).",
+                )
+    except NwcError:
+        pass
+
+    try:
+        bal_res = nwc_execute_command(parsed_uri, "get_balance", {}, route_via_tor=route_via_tor, timeout=10)
+        bal_msat = bal_res.get("balance")
+        if isinstance(bal_msat, (int, float)) and not isinstance(bal_msat, bool) and bal_msat >= 0:
+            bal_sats = int(bal_msat // 1000)
+            if bal_sats < required_sats:
+                return (
+                    False,
+                    "INSUFFICIENT_BALANCE",
+                    f"NWC wallet balance ({bal_sats} sats) is below the renewal invoice ({required_sats} sats).",
+                )
+    except NwcError:
+        pass
+
+    return True, None, None
+
+
+def _nwc_lookup_already_paid(parsed_uri, payment_hash, route_via_tor=False):
+    """Asks the wallet via NIP-47 lookup_invoice whether payment_hash was
+    already settled. Returns True only on a positive settled answer."""
+    try:
+        res = nwc_execute_command(
+            parsed_uri,
+            "lookup_invoice",
+            {"payment_hash": payment_hash},
+            route_via_tor=route_via_tor,
+            timeout=10,
+        )
+        if not isinstance(res, dict):
+            return False
+        if res.get("settled_at") or res.get("preimage"):
+            return True
+        if str(res.get("state") or "").lower() == "settled":
+            return True
+    except NwcError:
+        pass
+    return False
+
+
+def _record_nwc_failure(wg_pubkey, payment_hash, err, now, force_fallback=False, budget_warning=False):
+    """Updates nwcAutoRenewState (and sets pendingRenewal.raisePayTask = True
+    when tripping fallback on a saved pendingRenewal) under meta_lock."""
+    with meta_lock():
+        meta = read_meta()
+        nwc_state = dict(meta.get("nwcAutoRenewState")) if isinstance(meta.get("nwcAutoRenewState"), dict) else {}
+        current_exp = meta.get("expiresAt")
+        if _nwc_period_advanced(nwc_state.get("periodExpiry"), current_exp):
+            attempts = 1
+        else:
+            attempts = int(nwc_state.get("attempts") or 0) + 1
+        trip_fallback = bool(
+            force_fallback
+            or budget_warning
+            or attempts >= NWC_MAX_ATTEMPTS
+        )
+        if meta.get("nwcConnected") is True:
+            nwc_state.update({
+                "periodExpiry": current_exp,
+                "attempts": attempts,
+                "lastAttemptAt": _iso(now),
+                "nextAttemptAt": None if trip_fallback else _iso(now + NWC_RETRY_DELAY),
+                "lastError": _dashboard_error_text(str(err)),
+                "lastErrorCode": getattr(err, "code", "INTERNAL"),
+                "budgetWarning": bool(budget_warning),
+                "fallbackTaskRaised": trip_fallback,
+            })
+            meta["nwcAutoRenewState"] = nwc_state
+        pending = meta.get("pendingRenewal")
+        if trip_fallback and payment_hash and isinstance(pending, dict) and pending.get("paymentHash") == payment_hash:
+            pending["raisePayTask"] = True
+        atomic_write_json(META_FILE_PATH, meta)
+    return trip_fallback
+
+
+def maybe_nwc_auto_renew(wg_pubkey, now=None):
+    """Checks if the current subscription is within the NWC auto-renewal window
+    (-7 days < remaining <= 7 days) and executes idempotent NIP-47 renewal.
+    Serialized across processes via nwc_renew_lock()."""
+    now = now or datetime.now(timezone.utc)
+    if not wg_pubkey or wg_pubkey in ("Unknown", "Not available"):
+        return {"result": "skipped", "message": "No configured WireGuard key."}
+
+    with nwc_renew_lock() as acquired:
+        if not acquired:
+            return {"result": "busy", "message": "Another NWC auto-renewal check is already in progress."}
+
+        with meta_lock():
+            meta = read_meta()
+            if meta.get("nwcConnected") is True and not os.path.exists(NWC_WALLET_FILE_PATH):
+                nwc_state = dict(meta.get("nwcAutoRenewState")) if isinstance(meta.get("nwcAutoRenewState"), dict) else {}
+                if nwc_state.get("restoreReconnectNeeded") is not True:
+                    nwc_state["restoreReconnectNeeded"] = True
+                    nwc_state["lastError"] = (
+                        "NWC wallet credentials are not included in backups. Re-enter your NWC URI in Connect Wallet."
+                    )
+                    meta["nwcAutoRenewState"] = nwc_state
+                    atomic_write_json(META_FILE_PATH, meta)
+                return {"result": "restore-reconnect-needed", "message": "NWC wallet credentials missing after restore."}
+
+            # Reset period-specific failure flags if confirmed expiresAt strictly advanced to a new period
+            current_exp = meta.get("expiresAt")
+            raw_state = meta.get("nwcAutoRenewState")
+            if isinstance(raw_state, dict) and _nwc_period_advanced(raw_state.get("periodExpiry"), current_exp):
+                cleaned_state = dict(raw_state)
+                cleaned_state.update({
+                    "periodExpiry": current_exp,
+                    "attempts": 0,
+                    "nextAttemptAt": None,
+                    "lastError": None,
+                    "lastErrorCode": None,
+                    "budgetWarning": False,
+                    "fallbackTaskRaised": False,
+                })
+                meta["nwcAutoRenewState"] = cleaned_state
+                atomic_write_json(META_FILE_PATH, meta)
+
+        if meta.get("nwcConnected") is not True or not os.path.exists(NWC_WALLET_FILE_PATH):
+            return {"result": "disabled", "message": "NWC auto-renew is not enabled."}
+
+        if meta.get("publicKey") != wg_pubkey or meta.get("expirySource") != "api":
+            return {"result": "unconfirmed", "message": "Subscription expiry is not yet confirmed for this key."}
+
+        expires_dt = _parse_iso(meta.get("expiresAt"))
+        if expires_dt is None:
+            return {"result": "unconfirmed", "message": "No valid confirmed expiry."}
+
+        remaining = expires_dt - now
+        if remaining > NWC_TRIGGER_WINDOW:
+            return {"result": "not-due", "message": "Subscription has more than 7 days remaining."}
+        if remaining <= -NWC_GRACE_WINDOW:
+            return {"result": "past-grace", "message": "Subscription expired more than 7 days ago."}
+
+        nwc_state = meta.get("nwcAutoRenewState") if isinstance(meta.get("nwcAutoRenewState"), dict) else {}
+        if nwc_state.get("fallbackTaskRaised") is True or nwc_state.get("budgetWarning") is True:
+            return {"result": "fallback-active", "message": "Fallback manual renewal is active."}
+
+        next_attempt_dt = _parse_iso(nwc_state.get("nextAttemptAt"))
+        if next_attempt_dt is not None and now < next_attempt_dt:
+            return {"result": "backoff", "message": f"Waiting until {_iso(next_attempt_dt)} before next NWC retry."}
+
+        wallet_doc = _read_json_object(NWC_WALLET_FILE_PATH)
+        if not isinstance(wallet_doc, dict) or not isinstance(wallet_doc.get("uri"), str):
+            err = NwcError("Stored NWC wallet file is unreadable or malformed", code="UNAUTHORIZED", permanent=True)
+            _record_nwc_failure(wg_pubkey, None, err, now, force_fallback=True)
+            return {"result": "failed", "message": str(err)}
+
+        try:
+            parsed_uri = parse_nwc_uri(wallet_doc["uri"])
+        except ValueError as e:
+            err = NwcError(str(e), code="UNAUTHORIZED", permanent=True)
+            _record_nwc_failure(wg_pubkey, None, err, now, force_fallback=True)
+            return {"result": "failed", "message": str(err)}
+
+        route_via_tor = bool(
+            wallet_doc.get("routeViaTor")
+            or meta.get("nwcRouteViaTor")
+            or parsed_uri.get("hasOnionRelay")
+        )
+        duration_setting = wallet_doc.get("autoRenewDuration") or meta.get("nwcAutoRenewDuration") or "match"
+        if duration_setting not in ("match", "1m", "3m", "6m", "12m"):
+            duration_setting = "match"
+        last_dur = _dashboard_duration(meta.get("lastDuration")) or "1m"
+        resolved_duration = last_dur if duration_setting == "match" else duration_setting
+        months = int(resolved_duration[:-1])
+
+        # Check if there is already a pendingRenewal for this key
+        pending = meta.get("pendingRenewal")
+        reusable_pending = None
+        if (
+            isinstance(pending, dict)
+            and pending.get("publicKey") == wg_pubkey
+            and isinstance(pending.get("paymentHash"), str)
+            and pending.get("paymentHash")
+        ):
+            payment_hash = pending["paymentHash"]
+            if pending.get("paymentReceivedFor") == payment_hash:
+                settle_pending(now=now)
+                return {"result": "already-paid", "paymentHash": payment_hash}
+            try:
+                api_state = _payment_state(payment_hash)
+            except Exception:
+                api_state = "unknown"
+            if api_state in ("processing", "paid"):
+                _mark_payment_received("pendingRenewal", pending, payment_hash)
+                settle_pending(now=now)
+                return {"result": "already-paid", "paymentHash": payment_hash}
+            nwc_was_attempted = bool(pending.get("paidViaNwc") or pending.get("nwcAttempted"))
+            if nwc_was_attempted and _nwc_lookup_already_paid(
+                parsed_uri, payment_hash, route_via_tor=route_via_tor
+            ):
+                with meta_lock():
+                    fresh_meta = read_meta()
+                    cur_p = fresh_meta.get("pendingRenewal")
+                    if isinstance(cur_p, dict) and cur_p.get("paymentHash") == payment_hash:
+                        cur_p["paidViaNwc"] = True
+                        cur_p["paymentReceivedFor"] = payment_hash
+                        atomic_write_json(META_FILE_PATH, fresh_meta)
+                settle_pending(now=now)
+                return {"result": "already-paid", "paymentHash": payment_hash}
+
+            inv = pending.get("invoice")
+            created_dt = _parse_iso(pending.get("createdAt"))
+            inv_exp_dt = _parse_iso(pending.get("expiresAt")) or (
+                created_dt + INVOICE_DEFAULT_TTL if created_dt is not None else None
+            )
+            if api_state == "unknown" and nwc_was_attempted:
+                return {
+                    "result": "deferred-unknown-status",
+                    "paymentHash": payment_hash,
+                    "message": "TunnelSats payment status is temporarily unavailable; keeping existing invoice.",
+                }
+            if (
+                api_state in ("unpaid", "unknown")
+                and isinstance(inv, str)
+                and inv_exp_dt is not None
+                and now < inv_exp_dt
+            ):
+                reusable_pending = dict(pending)
+
+        if reusable_pending is None:
+            raw_server = meta.get("serverDomain")
+            if not isinstance(raw_server, str) or not raw_server.strip() or raw_server.strip() in ("Unknown", "None"):
+                cfg_host = None
+                try:
+                    with open(CONFIG_PATH, "r") as f:
+                        cfg_host = extract_server_host(f.read())
+                except OSError:
+                    cfg_host = None
+                raw_server = (
+                    cfg_host
+                    if isinstance(cfg_host, str) and cfg_host.strip() and cfg_host.strip() not in ("Unknown", "None")
+                    else "eu-de"
+                )
+            server_id = raw_server.strip()
+            try:
+                _status, renew_data = _api_call(
+                    "POST",
+                    "/subscription/renew",
+                    {"serverId": server_id, "wgPublicKey": wg_pubkey, "duration": months},
+                )
+            except Exception as e:
+                err = NwcError(f"Could not create TunnelSats renewal invoice: {e}", code="API_ERROR", permanent=False)
+                _record_nwc_failure(wg_pubkey, None, err, now)
+                return {"result": "failed", "message": str(err)}
+
+            payment_hash = str(renew_data.get("paymentHash") or "").strip().lower()
+            invoice = str(renew_data.get("invoice") or "").strip()
+            try:
+                verified_sats = _verify_bolt11_invoice(invoice, payment_hash)
+            except NwcVerificationError as e:
+                _record_nwc_failure(wg_pubkey, None, e, now, force_fallback=True)
+                return {"result": "verification-failed", "message": str(e)}
+
+            reusable_pending = {
+                "renewalId": str(renew_data.get("renewalId") or payment_hash),
+                "paymentHash": payment_hash,
+                "invoice": invoice,
+                "amountSats": verified_sats,
+                "duration": months,
+                "publicKey": wg_pubkey,
+                "targetNode": get_target_node(),
+                "createdAt": _iso(now),
+                "expiresAt": renew_data.get("expiresAt") or _iso(now + INVOICE_DEFAULT_TTL),
+                "oldExpiry": meta.get("expiresAt") or "",
+                "newExpiry": renew_data.get("newExpiry") or "",
+                "paidViaNwc": False,
+                "nwcAttempted": False,
+                "raisePayTask": False,
+            }
+            # Persist pendingRenewal under meta_lock BEFORE attempting payment,
+            # checking that no concurrent manual Renew wrote a pendingRenewal first.
+            used_concurrent = False
+            with meta_lock():
+                fresh_meta = read_meta()
+                concurrent_pending = fresh_meta.get("pendingRenewal")
+                if (
+                    isinstance(concurrent_pending, dict)
+                    and concurrent_pending.get("publicKey") == wg_pubkey
+                    and isinstance(concurrent_pending.get("paymentHash"), str)
+                    and concurrent_pending.get("paymentHash")
+                    and isinstance(concurrent_pending.get("invoice"), str)
+                ):
+                    reusable_pending = dict(concurrent_pending)
+                    used_concurrent = True
+                else:
+                    fresh_meta["pendingRenewal"] = reusable_pending
+                    atomic_write_json(META_FILE_PATH, fresh_meta)
+            if used_concurrent:
+                payment_hash = reusable_pending["paymentHash"]
+                invoice = reusable_pending["invoice"]
+                try:
+                    verified_sats = _verify_bolt11_invoice(invoice, payment_hash)
+                except NwcVerificationError as e:
+                    _record_nwc_failure(wg_pubkey, None, e, now, force_fallback=True)
+                    return {"result": "verification-failed", "message": str(e)}
+        else:
+            payment_hash = reusable_pending["paymentHash"]
+            invoice = reusable_pending["invoice"]
+            try:
+                verified_sats = _verify_bolt11_invoice(invoice, payment_hash)
+            except NwcVerificationError as e:
+                _record_nwc_failure(wg_pubkey, None, e, now, force_fallback=True)
+                return {"result": "verification-failed", "message": str(e)}
+
+        # Pre-flight budget/balance check before calling pay_invoice
+        budget_ok, budget_code, budget_msg = _nwc_preflight_budget_check(
+            parsed_uri,
+            verified_sats,
+            route_via_tor=route_via_tor,
+        )
+        if not budget_ok:
+            err = NwcError(budget_msg, code=budget_code or "QUOTA_EXCEEDED", permanent=True, budget=True)
+            _record_nwc_failure(wg_pubkey, payment_hash, err, now, force_fallback=True, budget_warning=True)
+            return {"result": "budget-insufficient", "paymentHash": payment_hash, "message": budget_msg}
+
+        # Re-verify under meta_lock that the wallet was not disconnected or
+        # replaced during invoice creation / budget preflight, and mark
+        # nwcAttempted = True before sending pay_invoice.
+        with meta_lock():
+            pre_pay_meta = read_meta()
+            latest_wallet_doc = _read_json_object(NWC_WALLET_FILE_PATH)
+            if (
+                pre_pay_meta.get("nwcConnected") is not True
+                or not isinstance(latest_wallet_doc, dict)
+                or latest_wallet_doc.get("uri") != wallet_doc["uri"]
+            ):
+                return {
+                    "result": "disabled",
+                    "message": "NWC wallet was disconnected or updated before payment.",
+                }
+            cur_pending = pre_pay_meta.get("pendingRenewal")
+            if isinstance(cur_pending, dict) and cur_pending.get("paymentHash") == payment_hash:
+                cur_pending["nwcAttempted"] = True
+                atomic_write_json(META_FILE_PATH, pre_pay_meta)
+
+        try:
+            nwc_execute_command(
+                parsed_uri,
+                "pay_invoice",
+                {"invoice": invoice},
+                route_via_tor=route_via_tor,
+            )
+        except NwcError as e:
+            tripped = _record_nwc_failure(
+                wg_pubkey,
+                payment_hash,
+                e,
+                now,
+                force_fallback=e.permanent,
+                budget_warning=e.budget,
+            )
+            return {
+                "result": "fallback-raised" if tripped else "retry-scheduled",
+                "paymentHash": payment_hash,
+                "message": str(e),
+            }
+
+        # Payment succeeded! Mark received and record NWC payment metadata.
+        # Note: lastPaidNewExpiry stays None until _settle_renewal confirms the
+        # extended expiry via lazy_sync and calls _clear_pending, so the
+        # nwc-renewed notification is never emitted before confirmation.
+        with meta_lock():
+            fresh_meta = read_meta()
+            current_pending = fresh_meta.get("pendingRenewal")
+            if isinstance(current_pending, dict) and current_pending.get("paymentHash") == payment_hash:
+                current_pending["paymentReceivedFor"] = payment_hash
+                current_pending["paidViaNwc"] = True
+                current_pending["raisePayTask"] = False
+            fresh_meta["lastDuration"] = months
+            fresh_meta["lastAmountSats"] = verified_sats
+            post_pay_wallet = _read_json_object(NWC_WALLET_FILE_PATH)
+            if (
+                fresh_meta.get("nwcConnected") is True
+                and isinstance(post_pay_wallet, dict)
+                and post_pay_wallet.get("uri") == wallet_doc["uri"]
+            ):
+                nwc_state = dict(fresh_meta.get("nwcAutoRenewState")) if isinstance(fresh_meta.get("nwcAutoRenewState"), dict) else {}
+                nwc_state.update({
+                    "periodExpiry": fresh_meta.get("expiresAt"),
+                    "attempts": 0,
+                    "lastAttemptAt": _iso(now),
+                    "nextAttemptAt": None,
+                    "lastError": None,
+                    "lastErrorCode": None,
+                    "budgetWarning": False,
+                    "fallbackTaskRaised": False,
+                    "restoreReconnectNeeded": False,
+                    "lastPaidHash": payment_hash,
+                    "lastPaidAt": _iso(now),
+                    "lastPaidDuration": months,
+                    "lastPaidAmountSats": verified_sats,
+                    "lastPaidNewExpiry": None,
+                })
+                fresh_meta["nwcAutoRenewState"] = nwc_state
+            atomic_write_json(META_FILE_PATH, fresh_meta)
+
+        settle_pending(now=now)
+        return {"result": "paid", "paymentHash": payment_hash, "amountSats": verified_sats}
+
+
 def get_dashboard():
     """The dashboard read model. See the section comment above: an explicit
     allow-list, never a secret."""
@@ -2740,6 +4155,7 @@ def get_dashboard():
         "intents": _intents_summary(now=now),
         "handoff": _handoff_summary(),
         "notices": _notices_summary(public_key),
+        "nwc": _nwc_summary(meta),
     }
 
 def main():
@@ -2814,6 +4230,15 @@ def main():
                 except Exception as e:
                     print(json.dumps({"result": "failure", "message": f"Subscription synchronization failed: {e}"}))
                     sys.exit(1)
+
+        if pubkey and pubkey not in ("Unknown", "Not available"):
+            try:
+                nwc_res = maybe_nwc_auto_renew(pubkey)
+                if nwc_res.get("result") in ("paid", "already-paid"):
+                    sub_info = get_subscription_info(pubkey)
+                    confirmed = bool(sub_info.get("linked"))
+            except Exception as nwc_err:
+                print(f"NWC auto-renewal check failed: {nwc_err}", file=sys.stderr)
 
         if sub_info.get("keyUnknown"):
             # A definitive answer, not a failed sync: the key has no subscription.

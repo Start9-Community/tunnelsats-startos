@@ -33,7 +33,12 @@
 import { i18n } from './i18n'
 
 export type ExpiryStage = '7d' | '3d' | 'lapsed'
-export type NoticeKind = ExpiryStage | 'unknown-key'
+export type NoticeKind =
+  | ExpiryStage
+  | 'unknown-key'
+  | 'nwc-renewed'
+  | 'nwc-fallback'
+  | 'nwc-restore'
 
 /** Mildest first. */
 const STAGES: readonly ExpiryStage[] = ['7d', '3d', 'lapsed']
@@ -71,6 +76,20 @@ export interface NoticeInputs {
   expiry: Date | null
   /** TunnelSats has no subscription for publicKey. */
   keyUnknown: boolean
+  /** Set when an NWC auto-renewal payment has been settled. */
+  nwcRenewed?: {
+    paymentHash: string
+    duration: number
+    amountSats: number
+    newExpiry: string
+  }
+  /** Set when NWC auto-renewal tripped fallback or detected insufficient budget. */
+  nwcFallback?: {
+    key: string
+    reason: string
+  }
+  /** Set when nwcConnected is true in meta but /data/nwc-wallet.json is missing after restore. */
+  nwcRestoreNeeded?: boolean
 }
 
 export interface NoticeState {
@@ -90,11 +109,17 @@ export interface NoticeState {
   announcedFor?: readonly string[]
   /** The key the unknown-key notice was sent for. */
   unknownKey?: string
+  /** Payment hash of the last NWC auto-renewal announced. */
+  nwcRenewedHash?: string
+  /** Deduplication key of the last NWC fallback/budget warning announced. */
+  nwcFallbackKey?: string
+  /** True while the post-restore reconnect notice has been sent. */
+  nwcRestoreNotified?: boolean
 }
 
 export interface Notice {
   kind: NoticeKind
-  level: 'warning' | 'error'
+  level: 'info' | 'warning' | 'error'
   title: string
   message: string
 }
@@ -116,7 +141,16 @@ function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10)
 }
 
-export function noticeFor(kind: NoticeKind, expiry: Date | null): Notice {
+export function noticeFor(
+  kind: NoticeKind,
+  expiry: Date | null,
+  extra?: {
+    duration?: number
+    amountSats?: number
+    newExpiry?: string
+    reason?: string
+  },
+): Notice {
   const date = expiry ? isoDate(expiry) : ''
   switch (kind) {
     case '7d':
@@ -158,6 +192,48 @@ export function noticeFor(kind: NoticeKind, expiry: Date | null): Notice {
           'TunnelSats has no subscription for the WireGuard key in your configuration. Run Import Subscription in TunnelSats with a valid configuration, or Buy Subscription to get a new one.',
         ),
       }
+    case 'nwc-renewed': {
+      const parsedNew = extra?.newExpiry ? new Date(extra.newExpiry) : expiry
+      const newDate =
+        parsedNew && !isNaN(parsedNew.getTime())
+          ? isoDate(parsedNew)
+          : (extra?.newExpiry ?? date)
+      return {
+        kind,
+        level: 'info',
+        title: i18n('TunnelSats subscription auto-renewed via NWC'),
+        message: i18n(
+          'Your TunnelSats subscription was automatically renewed for ${duration} month(s) (${amount} sats via NWC). New expiry: ${date}.',
+          {
+            duration: String(extra?.duration ?? 1),
+            amount: String(extra?.amountSats ?? 0),
+            date: newDate,
+          },
+        ),
+      }
+    }
+    case 'nwc-fallback':
+      return {
+        kind,
+        level: 'warning',
+        title: i18n('NWC auto-renewal requires attention'),
+        message: i18n(
+          'Automatic NWC renewal could not complete (${reason}). A manual Pay Invoice task has been raised on your Lightning node, or you can update your wallet in Connect Wallet.',
+          {
+            reason:
+              extra?.reason || 'insufficient wallet budget or relay failure',
+          },
+        ),
+      }
+    case 'nwc-restore':
+      return {
+        kind,
+        level: 'warning',
+        title: i18n('Reconnect NWC wallet after backup restore'),
+        message: i18n(
+          'Your NWC wallet secret is excluded from StartOS backups. Run Connect Wallet in TunnelSats to reconnect automatic renewals.',
+        ),
+      }
   }
 }
 
@@ -184,6 +260,9 @@ export function planNotifications(
   const unknownDue = keyUnknown && prev?.unknownKey !== publicKey
   if (!keyUnknown) delete base.unknownKey
 
+  if (!input.nwcFallback) delete base.nwcFallbackKey
+  if (!input.nwcRestoreNeeded) delete base.nwcRestoreNotified
+
   let stageDue: ExpiryStage | null = null
   if (expiry) {
     const valid = (iso: string | undefined) => {
@@ -203,16 +282,6 @@ export function planNotifications(
       ...dates(prev?.announcedFor),
       ...(prevSentFor ? [prevSentFor] : []),
     ]
-    // The period keeps the latest expiry it saw, so a temporarily earlier
-    // answer and its correction back to that expiry are not a renewal. An
-    // expiry later than the one the last stage was announced for is one,
-    // though: a renewal can extend a shortened expiry without passing the
-    // old latest one. Unless it is still within the reminder window and the
-    // period already saw that exact reminder-window expiry (#100): then it
-    // is a correction back to an earlier answer. Pre-reminder expiries
-    // (stage === null, > 7 days away) are never recorded in `seen`, so a
-    // renewal that extends a shortened expiry back to an earlier >7d timestamp
-    // (e.g. 90d -> 35d -> 5d -> renewed to 35d) still starts a new period.
     const stage = expiryStage(expiry, now)
     const newPeriod =
       prev?.publicKey !== publicKey ||
@@ -249,6 +318,48 @@ export function planNotifications(
     steps.push({ notice: noticeFor('unknown-key', null), before: state, after })
     state = after
   }
+  if (
+    input.nwcRestoreNeeded &&
+    !state.nwcRestoreNotified
+  ) {
+    const after = { ...state, nwcRestoreNotified: true }
+    steps.push({
+      notice: noticeFor('nwc-restore', expiry),
+      before: state,
+      after,
+    })
+    state = after
+  }
+  if (
+    input.nwcRenewed?.paymentHash &&
+    state.nwcRenewedHash !== input.nwcRenewed.paymentHash
+  ) {
+    const after = { ...state, nwcRenewedHash: input.nwcRenewed.paymentHash }
+    steps.push({
+      notice: noticeFor('nwc-renewed', expiry, {
+        duration: input.nwcRenewed.duration,
+        amountSats: input.nwcRenewed.amountSats,
+        newExpiry: input.nwcRenewed.newExpiry,
+      }),
+      before: state,
+      after,
+    })
+    state = after
+  }
+  if (
+    input.nwcFallback?.key &&
+    state.nwcFallbackKey !== input.nwcFallback.key
+  ) {
+    const after = { ...state, nwcFallbackKey: input.nwcFallback.key }
+    steps.push({
+      notice: noticeFor('nwc-fallback', expiry, {
+        reason: input.nwcFallback.reason,
+      }),
+      before: state,
+      after,
+    })
+    state = after
+  }
   if (stageDue && expiry) {
     const upTo = STAGES.indexOf(stageDue)
     const iso = expiry.toISOString()
@@ -277,6 +388,9 @@ export function noticeStateRecord(state: NoticeState): {
   seen?: string[]
   announcedFor?: string[]
   unknownKey?: string
+  nwcRenewedHash?: string
+  nwcFallbackKey?: string
+  nwcRestoreNotified?: boolean
 } {
   return {
     publicKey: state.publicKey,
@@ -286,6 +400,15 @@ export function noticeStateRecord(state: NoticeState): {
     seen: state.seen ? [...state.seen] : undefined,
     announcedFor: state.announcedFor ? [...state.announcedFor] : undefined,
     unknownKey: state.unknownKey,
+    ...(state.nwcRenewedHash !== undefined
+      ? { nwcRenewedHash: state.nwcRenewedHash }
+      : {}),
+    ...(state.nwcFallbackKey !== undefined
+      ? { nwcFallbackKey: state.nwcFallbackKey }
+      : {}),
+    ...(state.nwcRestoreNotified !== undefined
+      ? { nwcRestoreNotified: state.nwcRestoreNotified }
+      : {}),
   }
 }
 
@@ -298,6 +421,9 @@ function sameState(a: NoticeState | null | undefined, b: NoticeState) {
     (a.seen ?? []).join(',') === (b.seen ?? []).join(',') &&
     (a.announcedFor ?? []).join(',') === (b.announcedFor ?? []).join(',') &&
     a.unknownKey === b.unknownKey &&
+    a.nwcRenewedHash === b.nwcRenewedHash &&
+    a.nwcFallbackKey === b.nwcFallbackKey &&
+    a.nwcRestoreNotified === b.nwcRestoreNotified &&
     sentStages(a).join(',') === sentStages(b).join(',')
   )
 }

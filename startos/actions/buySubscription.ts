@@ -352,6 +352,12 @@ export function startPurchase(
           lastError: undefined,
           nextAttemptAt: undefined,
         },
+        ...(typeof entry.duration === 'number'
+          ? { lastDuration: entry.duration }
+          : {}),
+        ...(typeof entry.amountSats === 'number' && entry.amountSats > 0
+          ? { lastAmountSats: entry.amountSats }
+          : {}),
         ...patch,
       }),
     raiseTask: ({ invoice, paymentHash, amountSats, targetNode }) => {

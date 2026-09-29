@@ -1,7 +1,7 @@
 import { IMPOSSIBLE, VersionInfo } from '@start9labs/start-sdk'
 
 export const current = VersionInfo.of({
-  version: '0.4.0:5',
+  version: '1.0.0:0',
   releaseNotes: {
     en_US:
       'Native storefront (Buy, Renew and Reset Bandwidth actions with on-device Curve25519 key generation and Lightning node Pay Invoice settlement), in-container clearnet-vpn routing handoff for LND, Core Lightning and Eclair, optional NIP-47 NWC automatic renewal with Tor SOCKS5 support and backup secret exclusion, and a read-only telemetry dashboard.',

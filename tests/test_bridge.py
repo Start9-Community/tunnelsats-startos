@@ -46,7 +46,7 @@ class TestPackageVersion(unittest.TestCase):
 
     def test_get_package_version_from_version_json(self):
         ver = bridge.get_package_version()
-        self.assertEqual(ver, "0.4.0")
+        self.assertEqual(ver, "1.0.0")
 
     def test_get_package_version_from_env(self):
         with unittest.mock.patch.dict(os.environ, {"PACKAGE_VERSION": "1.2.3:4"}):

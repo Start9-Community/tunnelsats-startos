@@ -14,7 +14,7 @@ TunnelSats provides dedicated, privacy-focused WireGuard VPN infrastructure spec
 6. **Activate Routing**:
    - Open your target Lightning node in StartOS.
    - Accept the 1-click task: **"Activate TunnelSats VPN tunnel and advertise clearnet endpoint to the Lightning Network"**.
-   - Your node brings up WireGuard internally (`wg0`), announces its public address, and routes its clearnet peer traffic through the encrypted tunnel (see the kill switch caveat below).
+   - Your node brings up WireGuard internally (`wg0`), announces its public address, and routes its clearnet peer traffic through the encrypted tunnel (see the kill switch note below).
 
 ### Option 2: Bring Your Own Configuration
 
@@ -32,7 +32,7 @@ Use the **Configure** action to switch TunnelSats off, pick a different target n
 
 - **In-Container Egress Privacy**: The Lightning node owns the WireGuard tunnel directly inside its container (`wg0`). Policy routing (table 51820) sends all clearnet peer traffic (inbound connections, gossip, ping/pong acknowledgments) through the tunnel.
 - **Home IP Hidden While the Tunnel Is Up**: Clearnet peers see the TunnelSats server address, not your home ISP address.
-- **Kill Switch Caveat**: The tunnel and its routing belong to your Lightning node package, not to TunnelSats. With current node builds, clearnet traffic can fall back to your home connection if `wg0` goes down or is removed; a fix in the node packages is pending. While `wg0` is up, clearnet peer traffic uses the tunnel.
+- **Kill Switch**: The tunnel and its routing belong to your Lightning node package, not to TunnelSats. This package requires LND 0.21.3-beta:10, Core Lightning 26.6.8:3 or Eclair 0.14.3:3 or later. Their routing table keeps a blackhole fallback: if `wg0` goes down, is removed or loses its server, clearnet traffic is dropped instead of leaving through your home connection, and at startup the node waits for the tunnel before connecting to peers. Tor traffic keeps working. Turning the tunnel off on purpose (disable TunnelSats in Configure, then accept the node's task to turn off the TunnelSats tunnel) returns clearnet traffic to your home connection.
 - **Tor Hybrid Coexistence**: Onion peer connections continue to route normally over the Tor network across the container bridge, while clearnet peer traffic is routed through TunnelSats.
 - **IPv6**: How your node routes IPv6 is decided by the Lightning node package. Current builds send IPv6 through the tunnel when the configuration's `AllowedIPs` include `::/0` (TunnelSats configurations do), and block it otherwise. The **Allow IPv6 Endpoint** setting only lets TunnelSats hand your node an IPv6 server endpoint to announce.
 - **No Box-Wide Changes**: Nothing to set up in the StartOS system settings, no interface firewall toggling, and no port 9735 conflicts. Only the target node's own traffic uses the tunnel.

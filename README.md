@@ -5,14 +5,11 @@
 A privacy-focused companion package and routing guide for Lightning Network nodes (LND, Core Lightning and Eclair) on StartOS.
 
 > [!CAUTION]
-> **Not yet available for adoption.** The code in this repository is the new native storefront and in-container clearnet VPN package. It is feature-complete and has passed our QA, but it is **not released** and should not be used on a production node until these upstream items are resolved:
+> **Not yet available for adoption.** The code in this repository is the new native storefront and in-container clearnet VPN package. It is feature-complete and has passed our QA, but it is **not released** and should not be used on a production node until the last upstream item is resolved:
 >
-> 1. **Start9 community review:** the package is under review for the Start9 Community registry ([Start9-Community/tunnelsats-startos#4](https://github.com/Start9-Community/tunnelsats-startos/pull/4)).
-> 2. **LND kill switch:** [Start9Labs/lnd-startos#214](https://github.com/Start9Labs/lnd-startos/issues/214)
-> 3. **Core Lightning kill switch:** [Start9Labs/cln-startos#213](https://github.com/Start9Labs/cln-startos/issues/213)
-> 4. **Eclair kill switch:** [Start9Labs/eclair-startos#6](https://github.com/Start9Labs/eclair-startos/issues/6)
+> - **Start9 community review:** the package is under review for the Start9 Community registry ([Start9-Community/tunnelsats-startos#4](https://github.com/Start9-Community/tunnelsats-startos/pull/4)).
 >
-> Items 2 to 4 are the same issue in each node package: when `wg0` goes down, clearnet traffic can fall back to your home connection. Until they are fixed, we can't recommend the package to node operators.
+> The node kill switch is fixed and released upstream: LND `0.21.3-beta:10` ([lnd-startos#214](https://github.com/Start9Labs/lnd-startos/issues/214)), Core Lightning `26.6.8:3` ([cln-startos#213](https://github.com/Start9Labs/cln-startos/issues/213)) and Eclair `0.14.3:3` ([eclair-startos#6](https://github.com/Start9Labs/eclair-startos/issues/6)). This package requires those versions or later, and our StartOS QA ([#116](https://github.com/Tunnelsats/tunnelsats-startos/issues/116)) confirmed that clearnet traffic is dropped instead of falling back to your home connection when `wg0` goes down.
 >
 > **The older gateway-based setup is end-of-life.** Its release builds (`0.4.0:3` to `0.4.0:5`, based on StartOS System > Gateways plus manual outbound gateway and external host settings) have been withdrawn, and there is currently no published build. Please don't set up TunnelSats on StartOS through System > Gateways. We'll announce the new package on [tunnelsats.com](https://tunnelsats.com) once it is available.
 

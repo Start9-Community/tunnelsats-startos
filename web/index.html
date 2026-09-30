@@ -684,12 +684,13 @@
             <h2 id="privacy-title">Check your privacy on the node</h2>
           </div>
           <p class="caveat">
-            <strong>Kill switch caveat:</strong> The tunnel and its routing
-            belong to your Lightning node package, not to TunnelSats. With
-            current node builds, clearnet traffic can fall back to your home
-            connection if <code>wg0</code> goes down or is removed; a fix in the
-            node packages is pending. While <code>wg0</code> is up, clearnet
-            peer traffic uses the tunnel.
+            <strong>Kill switch:</strong> The tunnel and its routing belong to
+            your Lightning node package, not to TunnelSats. With LND
+            0.21.3-beta:10, Core Lightning 26.6.8:3 or Eclair 0.14.3:3 or later
+            (required by this package), clearnet traffic is dropped instead of
+            leaving through your home connection if <code>wg0</code> goes down
+            or is removed. Tor keeps working. Turning the tunnel off on purpose
+            returns clearnet traffic to your home connection.
           </p>
           <p>
             This dashboard runs in the TunnelSats container and cannot see
@@ -934,11 +935,10 @@
                   through the tunnel while it is up.
                 </li>
                 <li>
-                  <strong>Kill switch caveat:</strong> the tunnel and its
-                  routing belong to your Lightning node package. With current
-                  node builds, clearnet traffic can fall back to your home
-                  connection if <code>wg0</code> goes down; a fix in the node
-                  packages is pending.
+                  <strong>Kill switch:</strong> the tunnel and its routing
+                  belong to your Lightning node package. With the required node
+                  versions, clearnet traffic is dropped if <code>wg0</code> goes
+                  down instead of falling back to your home connection.
                 </li>
                 <li>
                   <strong>Tor keeps working:</strong> onion connections continue

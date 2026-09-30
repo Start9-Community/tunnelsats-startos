@@ -578,7 +578,12 @@ test('index.html obeys the strict CSP and includes Eclair, NWC and kill-switch h
     html,
     /<strong>Yes, via Nostr Wallet Connect \(NWC\)\.<\/strong>\s+Run\s+<strong\s*>Services → TunnelSats → Actions → Connect Wallet<\/strong\s*>/,
   )
-  assert.match(html, /Kill switch caveat:/)
+  assert.match(html, /Kill switch:/)
+  assert.match(
+    html,
+    /LND\s+0\.21\.3-beta:10, Core Lightning 26\.6\.8:3 or Eclair 0\.14\.3:3/,
+  )
+  assert.doesNotMatch(html, /fix in the\s+node\s+packages is pending/)
   assert.match(html, /Services → TunnelSats → Actions → Buy Subscription/)
   assert.match(html, /Services → TunnelSats → Actions →\s+Connect Wallet/)
 })

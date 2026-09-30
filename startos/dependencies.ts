@@ -488,9 +488,9 @@ export function getSubscriptionExpiryTask(
 }
 
 const NODE_VERSION_RANGES = {
-  lnd: '>=0.21.3-beta:7',
-  'c-lightning': '>=26.6.7:3',
-  eclair: '>=0.14.3:2',
+  lnd: '>=0.21.3-beta:10',
+  'c-lightning': '>=26.6.8:3',
+  eclair: '>=0.14.3:3',
 } as const
 
 const NODE_HEALTH_CHECKS = {

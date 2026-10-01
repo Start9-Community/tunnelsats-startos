@@ -74,6 +74,9 @@ const NODE_PACKAGE_IDS = Object.freeze({
   eclair: 'eclair',
 })
 
+const VALID_TABS = Object.freeze(['overview', 'actions', 'verify'])
+const VALID_DURATIONS = Object.freeze(['1m', '3m', '6m', '12m'])
+
 let model = null
 let loadFailed = false
 let countdownTimer = null
@@ -82,7 +85,9 @@ let submittingIntent = false
 let localIntentFeedback = null
 let lastRenderedInvoice = null
 let selectedInvoiceKind = null
+let activeTab = 'overview'
 let selectedBuyDuration = '3m'
+let selectedRenewDuration = '3m'
 let selectedServerId = DEFAULT_SERVER_ID
 // Whether the operator picked selectedServerId. A picked region that drops
 // out of a refreshed list is never swapped for another: the selection is
@@ -1380,33 +1385,128 @@ function svgEl(tag, attrs) {
   return el
 }
 
+function usablePlans(m) {
+  return m &&
+    Array.isArray(m.plans) &&
+    m.plans.length &&
+    m.plans.every(
+      (p) => p && typeof p.usd === 'number' && typeof p.months === 'number',
+    )
+    ? m.plans
+    : PLAN_PRICES_USD
+}
+
 function renderPlans(m) {
   const list = byId('plan-list')
-  if (!list) return
-  const plans =
-    m && Array.isArray(m.plans) && m.plans.length ? m.plans : PLAN_PRICES_USD
-  const items = plans.map((plan) => {
-    const durationKey = `${plan.months}m`
-    const li = document.createElement('li')
-    li.className = 'plan-card'
-    li.setAttribute('data-plan-duration', durationKey)
-    li.classList.toggle('is-selected', durationKey === selectedBuyDuration)
-    const duration = document.createElement('span')
-    duration.className = 'plan-duration'
-    duration.textContent = `${plan.months} month${plan.months > 1 ? 's' : ''}`
-    const price = document.createElement('span')
-    price.className = 'plan-price'
-    price.textContent = formatUsd(plan.usd)
-    const perMonth = document.createElement('span')
-    perMonth.className = 'plan-per-mo'
-    perMonth.textContent =
-      plan.discountPct > 0
-        ? `${formatUsd(plan.usd / plan.months)}/mo · save ${plan.discountPct}%`
-        : `${formatUsd(plan.usd)}/mo`
-    li.append(duration, price, perMonth)
-    return li
-  })
-  list.replaceChildren(...items)
+  const plans = usablePlans(m)
+  if (list) {
+    const items = plans.map((plan) => {
+      const durationKey = `${plan.months}m`
+      const selected = durationKey === selectedBuyDuration
+      const li = document.createElement('li')
+      li.className = 'plan-card'
+      li.setAttribute('data-plan-duration', durationKey)
+      li.setAttribute('role', 'button')
+      li.setAttribute('tabindex', '0')
+      li.setAttribute('aria-pressed', selected ? 'true' : 'false')
+      li.classList.toggle('is-selected', selected)
+      const duration = document.createElement('span')
+      duration.className = 'plan-duration'
+      duration.textContent = `${plan.months} month${plan.months > 1 ? 's' : ''}`
+      const price = document.createElement('span')
+      price.className = 'plan-price'
+      price.textContent = formatUsd(plan.usd)
+      const perMonth = document.createElement('span')
+      perMonth.className = 'plan-per-mo'
+      perMonth.textContent =
+        plan.discountPct > 0
+          ? `${formatUsd(plan.usd / plan.months)}/mo · save ${plan.discountPct}%`
+          : `${formatUsd(plan.usd)}/mo`
+      li.append(duration, price, perMonth)
+      return li
+    })
+    list.replaceChildren(...items)
+  }
+  renderRenewPills(m)
+}
+
+function renderRenewPills(m) {
+  const plans = usablePlans(m)
+  const renewGroup = byId('renew-pills')
+  if (renewGroup) {
+    const buttons = plans.map((plan) => {
+      const durationKey = `${plan.months}m`
+      const active = durationKey === selectedRenewDuration
+      const btn = document.createElement('button')
+      btn.setAttribute('type', 'button')
+      btn.className = 'duration-pill'
+      btn.setAttribute('data-renew-duration', durationKey)
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false')
+      btn.classList.toggle('is-selected', active)
+      const durSpan = document.createElement('span')
+      durSpan.className = 'pill-dur'
+      durSpan.textContent = `${plan.months} mo`
+      const priceSpan = document.createElement('span')
+      priceSpan.className = 'pill-price'
+      priceSpan.textContent = formatUsd(plan.usd)
+      btn.append(durSpan, priceSpan)
+      if (plan.discountPct > 0) {
+        const badge = document.createElement('span')
+        badge.className = 'pill-save'
+        badge.textContent = `-${plan.discountPct}%`
+        btn.append(badge)
+      }
+      return btn
+    })
+    renewGroup.replaceChildren(...buttons)
+  }
+  const manageGroup = byId('manage-duration-pills')
+  if (manageGroup) {
+    const buttons = plans.map((plan) => {
+      const durationKey = `${plan.months}m`
+      const active = durationKey === selectedBuyDuration
+      const btn = document.createElement('button')
+      btn.setAttribute('type', 'button')
+      btn.className = 'duration-pill'
+      btn.setAttribute('data-plan-duration', durationKey)
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false')
+      btn.classList.toggle('is-selected', active)
+      const durSpan = document.createElement('span')
+      durSpan.className = 'pill-dur'
+      durSpan.textContent = `${plan.months} mo`
+      const priceSpan = document.createElement('span')
+      priceSpan.className = 'pill-price'
+      priceSpan.textContent = formatUsd(plan.usd)
+      btn.append(durSpan, priceSpan)
+      if (plan.discountPct > 0) {
+        const badge = document.createElement('span')
+        badge.className = 'pill-save'
+        badge.textContent = `-${plan.discountPct}%`
+        btn.append(badge)
+      }
+      return btn
+    })
+    manageGroup.replaceChildren(...buttons)
+  }
+}
+
+function selectBuyDuration(dur) {
+  if (!VALID_DURATIONS.includes(dur)) return
+  selectedBuyDuration = dur
+  for (const id of ['buy-duration-select', 'manage-buy-duration-select']) {
+    const select = byId(id)
+    if (select) select.value = dur
+  }
+  renderPlans(model)
+}
+
+function selectRenewDuration(dur) {
+  if (!VALID_DURATIONS.includes(dur)) return
+  selectedRenewDuration = dur
+  const select = byId('renew-duration-select')
+  if (select) select.value = dur
+  renderRenewPills(model)
+  if (model && model.configured) renderTimeline(model)
 }
 
 /**
@@ -1656,22 +1756,33 @@ function renderCountdown() {
     model && model.subscription ? model.subscription.expiresAt : null
   const expiry = expiresAt ? new Date(expiresAt) : null
   const timer = byId('countdown')
+  const ringArc = byId('subscription-ring-arc')
   if (!expiry || Number.isNaN(expiry.getTime())) {
     setText('expiry-date', 'Not confirmed')
     setText('countdown', 'Unknown')
     if (timer) timer.classList.remove('expired')
     setGauge('subscription-progress', 0, 100)
+    if (ringArc) {
+      ringArc.setAttribute('stroke-dashoffset', '100')
+      ringArc.classList.remove('is-alert', 'is-warn')
+      ringArc.classList.add('is-ok')
+    }
     return
   }
   const remaining = expiry.getTime() - Date.now()
   setText('expiry-date', `Expires ${expiry.toLocaleString()}`)
   setText('countdown', formatRemaining(remaining))
   if (timer) timer.classList.toggle('expired', remaining <= 0)
-  setGauge(
-    'subscription-progress',
-    Math.min(100, Math.max(0, (remaining / PROGRESS_TERM_MS) * 100)),
-    100,
-  )
+  const pct = Math.min(100, Math.max(0, (remaining / PROGRESS_TERM_MS) * 100))
+  setGauge('subscription-progress', pct, 100)
+  if (ringArc) {
+    const offset = Math.round((100 - pct) * 10) / 10
+    ringArc.setAttribute('stroke-dashoffset', String(offset))
+    const remDays = remaining / DAY_MS
+    ringArc.classList.toggle('is-alert', remDays <= 3)
+    ringArc.classList.toggle('is-warn', remDays > 3 && remDays <= 7)
+    ringArc.classList.toggle('is-ok', remDays > 7)
+  }
 }
 
 function formatPublicAddress(server, vpnPort) {
@@ -1719,6 +1830,19 @@ function renderOverview(m) {
   const usedValue = typeof used === 'number' ? used : 0
   setGauge('bandwidth-meter', usedValue, limit, levels)
   setGauge('modal-bandwidth-meter', usedValue, limit, levels)
+  const bwFill = byId('bandwidth-arc-fill')
+  if (bwFill) {
+    const usedPct =
+      limit > 0 ? Math.min(100, Math.max(0, (usedValue / limit) * 100)) : 0
+    const offset = Math.round((100 - usedPct) * 10) / 10
+    bwFill.setAttribute('stroke-dashoffset', String(offset))
+    bwFill.classList.toggle('is-alert', usedPct >= BANDWIDTH_CRITICAL_PCT)
+    bwFill.classList.toggle(
+      'is-warn',
+      usedPct >= BANDWIDTH_WARN_PCT && usedPct < BANDWIDTH_CRITICAL_PCT,
+    )
+    bwFill.classList.toggle('is-ok', usedPct < BANDWIDTH_WARN_PCT)
+  }
   renderCountdown()
   renderNwcStatus(m)
   renderTimeline(m)
@@ -1817,6 +1941,11 @@ function renderTimeline(m) {
       ...renewPreview(m).map((item) => {
         const li = document.createElement('li')
         li.className = 'renew-preview-item'
+        li.setAttribute('data-renew-duration', item.duration)
+        li.classList.toggle(
+          'is-selected',
+          item.duration === selectedRenewDuration,
+        )
         const plan = document.createElement('span')
         plan.className = 'renew-preview-plan'
         plan.textContent = `+${item.months} month${item.months > 1 ? 's' : ''} · ${formatUsd(item.usd)}`
@@ -1831,8 +1960,43 @@ function renderTimeline(m) {
 }
 
 function renderQuota(m) {
-  setText('pace-text', paceText(monthPace(m)))
+  const pace = monthPace(m)
+  setText('pace-text', paceText(pace))
+  const bwPace = byId('bandwidth-arc-pace')
+  if (bwPace) {
+    const limit =
+      m && m.bandwidth && typeof m.bandwidth.limitGb === 'number'
+        ? m.bandwidth.limitGb
+        : 100
+    const pacePct =
+      pace && typeof pace.projectedGb === 'number' && limit > 0
+        ? Math.min(100, Math.max(0, (pace.projectedGb / limit) * 100))
+        : 0
+    const paceOffset = Math.round((100 - pacePct) * 10) / 10
+    bwPace.setAttribute('stroke-dashoffset', String(paceOffset))
+  }
   setText('val-resets', resetsText(m))
+  const pipsEl = byId('reset-pips')
+  if (pipsEl) {
+    const bw = (m && m.bandwidth) || {}
+    const maxResets =
+      typeof bw.maxResetsPerMonth === 'number' && bw.maxResetsPerMonth > 0
+        ? Math.min(10, bw.maxResetsPerMonth)
+        : 0
+    const usedResets =
+      typeof bw.resetsThisMonth === 'number' && bw.resetsThisMonth >= 0
+        ? bw.resetsThisMonth
+        : 0
+    const pips = []
+    for (let i = 0; i < maxResets; i++) {
+      const pip = document.createElement('span')
+      pip.className = 'reset-pip'
+      pip.classList.toggle('is-used', i < usedResets)
+      pip.setAttribute('aria-hidden', 'true')
+      pips.push(pip)
+    }
+    pipsEl.replaceChildren(...pips)
+  }
   const eligibility = resetEligibility(m)
   const el = byId('val-reset-eligibility')
   if (el) {
@@ -1905,15 +2069,43 @@ function renderFlows(m) {
   section.hidden = flows.length === 0
 }
 
+function buildServerPillItem(server) {
+  const li = document.createElement('li')
+  const button = document.createElement('button')
+  button.setAttribute('type', 'button')
+  button.className = 'server-card'
+  button.setAttribute('data-server-id', server.id)
+  button.setAttribute(
+    'aria-pressed',
+    server.id === selectedServerId ? 'true' : 'false',
+  )
+  const flag = document.createElement('span')
+  flag.className = 'server-flag'
+  flag.setAttribute('aria-hidden', 'true')
+  flag.textContent = server.flag || ''
+  const city = document.createElement('span')
+  city.className = 'server-city'
+  city.textContent = server.city || server.id
+  const country = document.createElement('span')
+  country.className = 'server-country'
+  country.textContent = server.country || ''
+  button.append(flag, city, country)
+  li.append(button)
+  return li
+}
+
 function renderServers() {
   const cards = byId('server-cards')
+  const manageCards = byId('manage-server-cards')
   const note = byId('server-cards-note')
   const statusNote = byId('server-status-note')
   const list = usableServers(serverList)
   if (!list.length) {
-    if (cards) {
-      cards.hidden = true
-      cards.replaceChildren()
+    for (const el of [cards, manageCards]) {
+      if (el) {
+        el.hidden = true
+        el.replaceChildren()
+      }
     }
     if (note) {
       note.textContent = serversFailed
@@ -1935,34 +2127,11 @@ function renderServers() {
         : list[0].id
     }
   }
-  if (cards) {
-    cards.replaceChildren(
-      ...list.map((server) => {
-        const li = document.createElement('li')
-        const button = document.createElement('button')
-        button.setAttribute('type', 'button')
-        button.className = 'server-card'
-        button.setAttribute('data-server-id', server.id)
-        button.setAttribute(
-          'aria-pressed',
-          server.id === selectedServerId ? 'true' : 'false',
-        )
-        const flag = document.createElement('span')
-        flag.className = 'server-flag'
-        flag.setAttribute('aria-hidden', 'true')
-        flag.textContent = server.flag || ''
-        const city = document.createElement('span')
-        city.className = 'server-city'
-        city.textContent = server.city || server.id
-        const country = document.createElement('span')
-        country.className = 'server-country'
-        country.textContent = server.country || ''
-        button.append(flag, city, country)
-        li.append(button)
-        return li
-      }),
-    )
-    cards.hidden = false
+  for (const el of [cards, manageCards]) {
+    if (el) {
+      el.replaceChildren(...list.map((server) => buildServerPillItem(server)))
+      el.hidden = false
+    }
   }
   const needsPick = !selectedServerId
   for (const id of ['buy-server-select', 'manage-buy-server-select']) {
@@ -2026,6 +2195,45 @@ function selectServer(id) {
   }
 }
 
+function switchTab(tab) {
+  if (!VALID_TABS.includes(tab)) return
+  activeTab = tab
+  renderTabs(model)
+}
+
+function renderTabs(m) {
+  for (const tab of VALID_TABS) {
+    const btn = byId(`tab-btn-${tab}`)
+    if (btn) {
+      const active = tab === activeTab
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false')
+      btn.classList.toggle('is-active', active)
+    }
+  }
+  const setup = byId('view-setup')
+  const overview = byId('view-overview')
+  const manage = byId('manage')
+  const verify = byId('verify-section')
+  if (activeTab === 'overview') {
+    if (m) {
+      if (setup) setup.hidden = Boolean(m.configured)
+      if (overview) overview.hidden = !m.configured
+    }
+    if (manage) manage.hidden = true
+    if (verify) verify.hidden = true
+  } else if (activeTab === 'actions') {
+    if (setup) setup.hidden = true
+    if (overview) overview.hidden = true
+    if (manage) manage.hidden = false
+    if (verify) verify.hidden = true
+  } else if (activeTab === 'verify') {
+    if (setup) setup.hidden = true
+    if (overview) overview.hidden = true
+    if (manage) manage.hidden = true
+    if (verify) verify.hidden = false
+  }
+}
+
 function render() {
   renderBadge()
   const error = byId('load-error')
@@ -2037,11 +2245,8 @@ function render() {
   }
   renderIntentFeedback(model)
   renderIntentControls(model)
+  renderTabs(model)
   if (!model) return
-  const setup = byId('view-setup')
-  const overview = byId('view-overview')
-  if (setup) setup.hidden = model.configured
-  if (overview) overview.hidden = !model.configured
   setText(
     'attach-command',
     `start-cli package attach ${nodePackageId(model.targetNode)}`,
@@ -2219,14 +2424,16 @@ async function submitIntent(actionKey) {
       kind: 'buy',
       serverId,
       duration:
-        (durationSelect && durationSelect.value) ||
-        (manage ? '3m' : selectedBuyDuration || '3m'),
+        (durationSelect && durationSelect.value) || selectedBuyDuration || '3m',
     }
   } else if (actionKey === 'renew') {
     const durationSelect = byId('renew-duration-select')
     payload = {
       kind: 'renew',
-      duration: (durationSelect && durationSelect.value) || '3m',
+      duration:
+        (durationSelect && durationSelect.value) ||
+        selectedRenewDuration ||
+        '3m',
     }
   } else if (actionKey === 'reset') {
     payload = { kind: 'reset' }
@@ -2317,6 +2524,11 @@ function bindEvents() {
   document.addEventListener('click', (event) => {
     const target = event.target
     if (!target || typeof target.closest !== 'function') return
+    const tabBtn = target.closest('[data-tab-target]')
+    if (tabBtn) {
+      switchTab(tabBtn.getAttribute('data-tab-target'))
+      return
+    }
     const opener = target.closest('[data-open-dialog]')
     if (opener) {
       const dialog = byId(opener.getAttribute('data-open-dialog'))
@@ -2355,13 +2567,12 @@ function bindEvents() {
     }
     const planCard = target.closest('[data-plan-duration]')
     if (planCard) {
-      const dur = planCard.getAttribute('data-plan-duration')
-      if (dur) {
-        selectedBuyDuration = dur
-        const select = byId('buy-duration-select')
-        if (select) select.value = dur
-        renderPlans(model)
-      }
+      selectBuyDuration(planCard.getAttribute('data-plan-duration'))
+      return
+    }
+    const renewPill = target.closest('[data-renew-duration]')
+    if (renewPill) {
+      selectRenewDuration(renewPill.getAttribute('data-renew-duration'))
       return
     }
     // Light dismiss: .app-modal fills the viewport around .modal-dialog-inner,
@@ -2371,14 +2582,38 @@ function bindEvents() {
     }
   })
 
+  document.addEventListener('keydown', (event) => {
+    const target = event.target
+    if (!target || typeof target.closest !== 'function') return
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    const planCard = target.closest('[data-plan-duration]')
+    if (planCard && planCard.tagName !== 'BUTTON') {
+      event.preventDefault()
+      selectBuyDuration(planCard.getAttribute('data-plan-duration'))
+      return
+    }
+    const renewItem = target.closest('[data-renew-duration]')
+    if (renewItem && renewItem.tagName !== 'BUTTON') {
+      event.preventDefault()
+      selectRenewDuration(renewItem.getAttribute('data-renew-duration'))
+    }
+  })
+
   document.addEventListener('change', (event) => {
     const target = event.target
+    if (!target) return
     if (
-      target &&
-      (target.id === 'buy-server-select' ||
-        target.id === 'manage-buy-server-select')
+      target.id === 'buy-server-select' ||
+      target.id === 'manage-buy-server-select'
     ) {
       selectServer(target.value)
+    } else if (
+      target.id === 'buy-duration-select' ||
+      target.id === 'manage-buy-duration-select'
+    ) {
+      selectBuyDuration(target.value)
+    } else if (target.id === 'renew-duration-select') {
+      selectRenewDuration(target.value)
     }
   })
 

@@ -1894,6 +1894,956 @@ code {
   color: var(--text-muted) !important;
 }
 
+/* ── Command Deck Header & Segmented Navigation (Proposal A) ── */
+.dashboard-container {
+  max-width: 980px;
+}
+
+.command-header {
+  padding: 10px 14px;
+  border-radius: 16px;
+  background: rgba(22, 27, 34, 0.72);
+  border: 1px solid var(--card-border);
+  backdrop-filter: blur(14px);
+}
+
+.command-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(15, 17, 21, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.nav-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    color 0.18s ease,
+    background 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.nav-pill:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.nav-pill.is-active {
+  color: #111;
+  background: linear-gradient(
+    135deg,
+    var(--accent-bitcoin) 0%,
+    var(--accent-bitcoin-deep) 100%
+  );
+  border-color: rgba(250, 204, 21, 0.5);
+  box-shadow: 0 2px 12px rgba(250, 204, 21, 0.22);
+}
+
+.nav-pill-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.btn-header-faq {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease,
+    background 0.2s ease;
+}
+
+.btn-header-faq:hover {
+  color: var(--accent-bitcoin);
+  border-color: rgba(250, 204, 21, 0.45);
+  background: var(--accent-bitcoin-glow);
+}
+
+/* ── Topology & Awareness Ribbon (Top of Overview) ── */
+.topology-ribbon {
+  padding: 16px 18px;
+  gap: 12px;
+  background:
+    linear-gradient(
+      135deg,
+      rgba(250, 204, 21, 0.05) 0%,
+      rgba(22, 27, 34, 0.65) 50%,
+      rgba(34, 197, 94, 0.04) 100%
+    ),
+    var(--card-bg);
+}
+
+.topology-chain {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.topo-node {
+  flex: 1 1 130px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: 12px;
+  background: rgba(15, 17, 21, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.topo-node .brand-tile-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+
+.topo-node-wide {
+  flex: 2.1 1 275px;
+}
+
+.topo-node-wide .prop-value {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11.5px;
+}
+
+.topo-node-nwc {
+  flex: 1.05 1 140px;
+}
+
+.topo-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+}
+
+.topo-icon-svg {
+  width: 18px;
+  height: 18px;
+}
+
+.topo-icon.is-bitcoin,
+.title-icon.is-bitcoin {
+  color: var(--accent-bitcoin);
+  background: rgba(250, 204, 21, 0.1);
+  border-color: rgba(250, 204, 21, 0.28);
+}
+
+.topo-icon.is-signal,
+.title-icon.is-signal {
+  color: var(--accent-signal);
+  background: rgba(34, 197, 94, 0.1);
+  border-color: rgba(34, 197, 94, 0.28);
+}
+
+.topo-icon.is-info,
+.title-icon.is-info {
+  color: var(--accent-info);
+  background: rgba(96, 165, 250, 0.1);
+  border-color: rgba(96, 165, 250, 0.28);
+}
+
+.topo-icon.is-nwc {
+  color: #a855f7;
+  background: rgba(168, 85, 247, 0.12);
+  border-color: rgba(168, 85, 247, 0.3);
+}
+
+.topo-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.topo-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(250, 204, 21, 0.45);
+  flex-shrink: 0;
+}
+
+.topo-arrow svg {
+  width: 22px;
+  height: 16px;
+}
+
+.topology-meta-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.topo-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* ── 2-Column Command Deck Grid & SVG Gauges ── */
+.command-deck-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  align-items: stretch;
+}
+
+.command-card {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.card-title-with-icon {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.title-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.title-icon-svg {
+  width: 16px;
+  height: 16px;
+}
+
+.badge-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--accent-bitcoin);
+  background: rgba(250, 204, 21, 0.1);
+  border: 1px solid rgba(250, 204, 21, 0.28);
+}
+
+.ring-and-timeline {
+  display: grid;
+  grid-template-columns: 148px minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: var(--surface-sunken);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.ring-gauge-wrap {
+  position: relative;
+  width: 136px;
+  height: 136px;
+  margin: 0 auto;
+  display: grid;
+  place-items: center;
+}
+
+.ring-gauge-svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.ring-track {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.07);
+  stroke-width: 9;
+}
+
+.ring-arc {
+  fill: none;
+  stroke: var(--accent-bitcoin);
+  stroke-width: 9;
+  stroke-linecap: round;
+  transition:
+    stroke-dashoffset 0.45s ease,
+    stroke 0.3s ease;
+}
+
+.ring-arc.is-ok {
+  stroke: var(--accent-bitcoin);
+}
+
+.ring-arc.is-warn {
+  stroke: #f59e0b;
+}
+
+.ring-arc.is-alert {
+  stroke: var(--accent-alert);
+}
+
+.ring-gauge-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 14px;
+}
+
+.ring-gauge-center .metric-value {
+  font-size: 24px;
+  line-height: 1.1;
+}
+
+.ring-gauge-sub {
+  font-size: 10.5px !important;
+  color: var(--text-muted) !important;
+  margin-top: 2px;
+}
+
+.timeline-column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.timeline-legend-compact {
+  font-size: 11.5px;
+  gap: 2px;
+}
+
+/* ── 180-Degree Semi-Circular Bandwidth Arc Gauge ── */
+.arc-gauge-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 14px 16px 10px;
+  border-radius: 14px;
+  background: var(--surface-sunken);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.arc-gauge-svg {
+  width: 100%;
+  max-width: 240px;
+  height: auto;
+  overflow: visible;
+}
+
+.arc-track {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 14;
+  stroke-linecap: round;
+}
+
+.arc-pace {
+  fill: none;
+  stroke: rgba(250, 204, 21, 0.25);
+  stroke-width: 14;
+  stroke-linecap: round;
+  stroke-dasharray: 4 6;
+  transition: stroke-dashoffset 0.45s ease;
+}
+
+.arc-fill {
+  fill: none;
+  stroke: var(--accent-signal);
+  stroke-width: 14;
+  stroke-linecap: round;
+  transition:
+    stroke-dashoffset 0.45s ease,
+    stroke 0.3s ease;
+}
+
+.arc-fill.is-ok {
+  stroke: var(--accent-signal);
+}
+
+.arc-fill.is-warn {
+  stroke: var(--accent-bitcoin);
+}
+
+.arc-fill.is-alert {
+  stroke: var(--accent-alert);
+}
+
+.arc-gauge-center {
+  margin-top: -20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 2px;
+}
+
+.arc-gauge-center .metric-value {
+  font-size: 26px;
+  line-height: 1.1;
+}
+
+.arc-gauge-sub {
+  font-size: 12px !important;
+  color: var(--text-secondary) !important;
+}
+
+/* ── Context-Sensitive Renew Composer & Duration Pills ── */
+.renew-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 14px;
+  background: linear-gradient(
+    180deg,
+    rgba(250, 204, 21, 0.06) 0%,
+    rgba(0, 0, 0, 0.2) 100%
+  );
+  border: 1px solid rgba(250, 204, 21, 0.24);
+}
+
+.renew-composer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.duration-pills {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.duration-pills-sm {
+  width: 100%;
+}
+
+.duration-pill {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 8px 6px;
+  border-radius: 10px;
+  background: rgba(15, 17, 21, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text-primary);
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    border-color 0.18s ease,
+    background 0.18s ease,
+    transform 0.15s ease;
+}
+
+.duration-pill:hover {
+  border-color: rgba(250, 204, 21, 0.45);
+  transform: translateY(-1px);
+}
+
+.duration-pill[aria-pressed='true'] {
+  background: rgba(250, 204, 21, 0.14);
+  border-color: var(--accent-bitcoin);
+  box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.35);
+}
+
+.pill-dur {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.pill-price {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent-bitcoin);
+}
+
+.pill-save {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent-signal);
+}
+
+.renew-preview-item.is-selected {
+  border: 1px solid rgba(250, 204, 21, 0.4);
+  background: rgba(250, 204, 21, 0.08);
+}
+
+.btn-intent-renew,
+.btn-intent-hero {
+  width: 100%;
+  padding: 12px 18px;
+  font-size: 14px;
+  border-radius: 10px;
+}
+
+.btn-intent-secondary {
+  width: 100%;
+  background: rgba(250, 204, 21, 0.12);
+  color: var(--accent-bitcoin);
+  border-color: rgba(250, 204, 21, 0.38);
+}
+
+.btn-intent-secondary:hover:not(:disabled) {
+  background: rgba(250, 204, 21, 0.2);
+}
+
+.btn-icon-svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+/* ── Reset Pips & Quota Strip ── */
+.quota-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quota-fact-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface-sunken);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.reset-pips-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reset-pips {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.reset-pip {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent-signal);
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.45);
+  border: 1px solid rgba(34, 197, 94, 0.6);
+}
+
+.reset-pip.is-used {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow: none;
+}
+
+.reset-count-badge {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* ── New Customer Setup Storefront & Onboarding Strip ── */
+.setup-command-card {
+  gap: 22px;
+}
+
+.hero-title-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.hero-bitcoin-badge {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: rgba(250, 204, 21, 0.12);
+  border: 1px solid rgba(250, 204, 21, 0.35);
+  color: var(--accent-bitcoin);
+}
+
+.setup-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px;
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.24);
+  border: 1px solid rgba(250, 204, 21, 0.22);
+}
+
+.step-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.step-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #111;
+  background: var(--accent-bitcoin);
+}
+
+.step-inline-note {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.setup-cta-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.onboarding-strip {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.onboarding-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--surface-sunken);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.onboarding-num {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #111;
+  background: var(--accent-bitcoin);
+}
+
+.onboarding-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+/* ── Progressive Enhancement & Screen-Reader Helpers ── */
+.sr-only-select,
+.sr-only-gauge {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+.server-picker:has(.server-cards:not([hidden])) .fallback-select-wrap,
+.manage-buy-composer:has(.server-cards:not([hidden])) .fallback-select-wrap {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+.manage-buy-composer {
+  flex-direction: column;
+  align-items: stretch;
+  margin-top: 8px;
+}
+
+.verify-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ── Custom Neon Dual-Tone Brand Icons & Trust Strip ── */
+.brand-tile-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  object-fit: contain;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+.brand-tile-icon-sm {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  object-fit: contain;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.brand-tile-icon-xs {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.brand-trust-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.brand-trust-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(15, 17, 21, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.action-item-with-icon {
+  flex-direction: row !important;
+  align-items: flex-start !important;
+  gap: 12px !important;
+}
+
+.action-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.dashboard-wrapper {
+  width: 100%;
+  max-width: 1040px;
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.brand-logo {
+  height: 34px;
+  width: auto;
+  display: block;
+}
+
+.version-tag {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.command-header .status-badge {
+  padding: 6px 12px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.command-header .btn-refresh {
+  width: auto;
+  height: 32px;
+  padding: 0 11px;
+  border-radius: 999px;
+  gap: 5px;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.topo-node .prop-label {
+  font-size: 10px;
+  letter-spacing: 0.4px;
+}
+
+.topo-node .prop-value {
+  font-size: 12.5px;
+  overflow-wrap: break-word;
+}
+
+.refresh-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.card-header-row,
+.hero-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.muted {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.accent-link {
+  color: var(--accent-bitcoin);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.accent-link:hover {
+  text-decoration: underline;
+}
+
+.error-banner {
+  padding: 12px 16px;
+  border-radius: var(--radius-inner);
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #fca5a5;
+  font-size: 13px;
+}
+
+.notices-panel,
+.hero-card,
+.subscription-command-card,
+.bandwidth-command-card,
+.footer-version {
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .command-deck-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .onboarding-strip {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .brand-trust-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .topo-arrow {
+    display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .ring-and-timeline {
+    grid-template-columns: minmax(0, 1fr);
+    text-align: center;
+  }
+  .duration-pills {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .brand-trust-strip {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .command-nav {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .nav-pill {
+    flex: 1;
+    justify-content: center;
+    padding: 7px 8px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

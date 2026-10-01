@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import vm from 'node:vm'
 
@@ -1643,4 +1643,169 @@ test('index.html labels the reachability check as inbound only and uses native g
     assert.ok(html.includes(command), `privacy commands include ${command}`)
   }
   assert.doesNotMatch(html, /\sstyle\s*=/i)
+})
+
+test('command deck segmented navigation switches between Overview, Actions & Plans, and Verify & CLI while preserving context emphasis', async () => {
+  // Unconfigured customer: Overview tab emphasizes Setup (Server Region + Buy)
+  const hNew = load(
+    model({
+      configured: false,
+      status: 'unconfigured',
+      connection: {},
+      handoff: null,
+    }),
+  )
+  await settleAll(hNew)
+  assert.equal(hNew.el('view-setup').hidden, false)
+  assert.equal(hNew.el('view-overview').hidden, true)
+  assert.equal(hNew.el('manage').hidden, true)
+  assert.equal(hNew.el('verify-section').hidden, true)
+  assert.equal(hNew.el('tab-btn-overview').getAttribute('aria-pressed'), 'true')
+  assert.equal(hNew.el('tab-btn-actions').getAttribute('aria-pressed'), 'false')
+  assert.equal(hNew.el('tab-btn-verify').getAttribute('aria-pressed'), 'false')
+
+  // Configured customer: Overview tab emphasizes Overview (Topology + Renew)
+  const hExisting = load(model({ configured: true }))
+  await settleAll(hExisting)
+  assert.equal(hExisting.el('view-setup').hidden, true)
+  assert.equal(hExisting.el('view-overview').hidden, false)
+  assert.equal(hExisting.el('manage').hidden, true)
+  assert.equal(hExisting.el('verify-section').hidden, true)
+
+  // Switch to Actions & Plans tab
+  hExisting.run(`switchTab('actions')`)
+  assert.equal(hExisting.el('view-overview').hidden, true)
+  assert.equal(hExisting.el('manage').hidden, false)
+  assert.equal(hExisting.el('verify-section').hidden, true)
+  assert.equal(
+    hExisting.el('tab-btn-actions').getAttribute('aria-pressed'),
+    'true',
+  )
+  assert.equal(
+    hExisting.el('tab-btn-overview').getAttribute('aria-pressed'),
+    'false',
+  )
+
+  // Switch to Verify & CLI tab
+  hExisting.run(`switchTab('verify')`)
+  assert.equal(hExisting.el('view-overview').hidden, true)
+  assert.equal(hExisting.el('manage').hidden, true)
+  assert.equal(hExisting.el('verify-section').hidden, false)
+  assert.equal(
+    hExisting.el('tab-btn-verify').getAttribute('aria-pressed'),
+    'true',
+  )
+
+  // Unknown tab names are ignored
+  hExisting.run(`switchTab('unknown-tab')`)
+  assert.equal(
+    hExisting.el('tab-btn-verify').getAttribute('aria-pressed'),
+    'true',
+  )
+})
+
+test('duration pills for Buy and Renew sync with select elements and drive submitIntent', async () => {
+  const h = load(model({ configured: true }), 200, undefined, {
+    '/api/servers': { status: 200, body: SERVERS },
+  })
+  await settleAll(h)
+
+  // Renew duration pills default to 3m and update on selectRenewDuration
+  const renewPills = h.el('renew-pills').children
+  assert.equal(renewPills.length, 4)
+  assert.deepEqual(
+    renewPills.map((b) => b.getAttribute('data-renew-duration')),
+    ['1m', '3m', '6m', '12m'],
+  )
+  assert.deepEqual(
+    renewPills.map((b) => b.getAttribute('aria-pressed')),
+    ['false', 'true', 'false', 'false'],
+  )
+
+  h.run(`selectRenewDuration('12m')`)
+  assert.equal(h.el('renew-duration-select').value, '12m')
+  assert.deepEqual(
+    h.el('renew-pills').children.map((b) => b.getAttribute('aria-pressed')),
+    ['false', 'false', 'false', 'true'],
+  )
+  assert.equal(
+    h.el('renew-preview-list').children[3].classList.contains('is-selected'),
+    true,
+  )
+
+  // Invalid durations are ignored
+  h.run(`selectRenewDuration('99m')`)
+  assert.equal(h.el('renew-duration-select').value, '12m')
+
+  await vm.runInContext(`submitIntent('renew')`, h.context)
+  await settleAll(h)
+  const renewReq = h.requests.find((r) => r.url === '/api/intents')
+  assert.deepEqual(JSON.parse(renewReq!.init!.body), {
+    kind: 'renew',
+    duration: '12m',
+  })
+
+  // Buy duration pills update both buy-duration-select and manage-buy-duration-select
+  h.run(`selectBuyDuration('6m')`)
+  assert.equal(h.el('buy-duration-select').value, '6m')
+  assert.equal(h.el('manage-buy-duration-select').value, '6m')
+  assert.equal(
+    h.el('plan-list').children[2].getAttribute('aria-pressed'),
+    'true',
+  )
+})
+
+test('command deck renders SVG ring/arc gauges and visual reset pips without inline styles', async () => {
+  const h = load(
+    model({
+      bandwidth: {
+        usedGb: 75,
+        limitGb: 150,
+        resetsThisMonth: 1,
+        maxResetsPerMonth: 2,
+        resetThresholdPct: 70,
+      },
+    }),
+  )
+  await settleAll(h)
+
+  const ringArc = h.el('subscription-ring-arc')
+  const ringOffset = Number(ringArc.getAttribute('stroke-dashoffset'))
+  assert.ok(ringOffset >= 30 && ringOffset <= 40)
+  assert.equal('style' in ringArc.attributes, false)
+
+  const bwFill = h.el('bandwidth-arc-fill')
+  assert.equal(bwFill.getAttribute('stroke-dashoffset'), '50')
+  assert.equal('style' in bwFill.attributes, false)
+
+  const pips = h.el('reset-pips').children
+  assert.equal(pips.length, 2)
+  assert.equal(pips[0].classList.contains('is-used'), true)
+  assert.equal(pips[1].classList.contains('is-used'), false)
+})
+
+test('brand SVG assets have zero inline style attributes and all referenced img src files exist', () => {
+  const webDir = join(__dirname, '..', 'web')
+  const html = readFileSync(join(webDir, 'index.html'), 'utf8')
+  const imgSrcMatches = [...html.matchAll(/<img[^>]+src="([^"]+)"/g)].map(
+    (m) => m[1],
+  )
+  assert.ok(imgSrcMatches.length >= 15, 'expected custom brand SVGs and icons')
+  for (const relPath of imgSrcMatches) {
+    assert.ok(
+      existsSync(join(webDir, relPath)),
+      `referenced image ${relPath} must exist in web/`,
+    )
+  }
+
+  const svgFiles = readdirSync(webDir).filter((f) => f.endsWith('.svg'))
+  assert.ok(svgFiles.length >= 8, 'expected brand SVG files in web/')
+  for (const svgFile of svgFiles) {
+    const svgContent = readFileSync(join(webDir, svgFile), 'utf8')
+    assert.doesNotMatch(
+      svgContent,
+      /\bstyle\s*=/i,
+      `${svgFile} must use presentation attributes instead of inline style= for CSP compatibility`,
+    )
+  }
 })

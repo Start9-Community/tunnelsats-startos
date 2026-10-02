@@ -378,6 +378,51 @@ test('a failed load keeps the last view and says so', async () => {
   assert.equal(h.el('status-text').textContent, 'Status unavailable')
 })
 
+test('until the first answer, Overview offers neither Buy nor a stale overview', async () => {
+  const html = readFileSync(join(__dirname, '..', 'web', 'index.html'), 'utf8')
+  // Before the script runs, only the loading line is visible.
+  assert.match(html, /<section\s+id="view-setup"[^>]*\shidden\s*>/)
+  assert.match(html, /<section id="view-overview"[^>]*\shidden>/)
+  assert.doesNotMatch(html, /<p id="view-loading"[^>]*\shidden/)
+
+  const routes: Record<string, { status: number; body: Json }> = {
+    '/api/dashboard': { status: 503, body: {} },
+  }
+  const h = load(null, 200, undefined, routes)
+  const views = () =>
+    ['view-loading', 'view-setup', 'view-overview'].map((id) => h.el(id).hidden)
+  // init() has rendered; the first request has not been answered.
+  assert.deepEqual(views(), [false, true, true])
+
+  await settleAll(h)
+  assert.deepEqual(views(), [true, true, true])
+  // Nothing is shown below the banner, so it does not mention old values.
+  assert.equal(
+    h.el('load-error').textContent,
+    'The TunnelSats service did not answer; retrying.',
+  )
+  // However the operator gets back to Overview, it is the same state, even
+  // if a view was left visible by an earlier render.
+  h.run(`switchTab('actions')`)
+  h.el('view-setup').hidden = false
+  h.run(`switchTab('overview')`)
+  assert.deepEqual(views(), [true, true, true])
+
+  routes['/api/dashboard'] = { status: 200, body: model() }
+  await vm.runInContext('refresh()', h.context)
+  assert.deepEqual(views(), [true, true, false])
+  assert.equal(h.el('load-error').hidden, true)
+
+  // Once values are shown, a failed poll keeps them and says they may be old.
+  routes['/api/dashboard'] = { status: 503, body: {} }
+  await vm.runInContext('refresh()', h.context)
+  assert.deepEqual(views(), [true, true, false])
+  assert.match(
+    h.el('load-error').textContent,
+    /values below may be out of date/,
+  )
+})
+
 test('read-model strings are rendered as text, never parsed', async () => {
   const hostile = '<img src=x onerror=alert(1)>'
   const h = load(

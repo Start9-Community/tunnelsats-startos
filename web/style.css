@@ -1205,6 +1205,14 @@ code {
   }
 }
 
+/* Shown until the first answer from the bridge; never with stale values. */
+.view-loading {
+  padding: 2.5rem 1rem;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+
 /* ── Setup (new customers: region + buy first) ─────────────────────── */
 .setup-view {
   display: grid;

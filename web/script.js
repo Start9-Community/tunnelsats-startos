@@ -2329,11 +2329,14 @@ function renderTabs(m) {
   const overview = byId('view-overview')
   const manage = byId('manage')
   const verify = byId('verify-section')
+  const loading = byId('view-loading')
+  // Before the first answer the error banner (on failure) or this line is
+  // all there is: guessing a view would offer Buy to an existing customer.
+  if (loading)
+    loading.hidden = Boolean(m) || loadFailed || activeTab !== 'overview'
   if (activeTab === 'overview') {
-    if (m) {
-      if (setup) setup.hidden = Boolean(m.configured)
-      if (overview) overview.hidden = !m.configured
-    }
+    if (setup) setup.hidden = !m || Boolean(m.configured)
+    if (overview) overview.hidden = !m || !m.configured
     if (manage) manage.hidden = true
     if (verify) verify.hidden = true
   } else if (activeTab === 'actions') {
@@ -2354,9 +2357,11 @@ function render() {
   const error = byId('load-error')
   if (error) {
     error.hidden = !loadFailed
-    error.textContent = loadFailed
-      ? 'The TunnelSats service did not answer. The values below may be out of date; retrying.'
-      : ''
+    error.textContent = !loadFailed
+      ? ''
+      : model
+        ? 'The TunnelSats service did not answer. The values below may be out of date; retrying.'
+        : 'The TunnelSats service did not answer; retrying.'
   }
   renderIntentFeedback(model)
   renderIntentControls(model)

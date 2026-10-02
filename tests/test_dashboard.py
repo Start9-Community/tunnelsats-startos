@@ -12,6 +12,7 @@ import base64
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
 import threading
@@ -758,6 +759,75 @@ class TestDashboardEndpoint(LoopbackServerTestBase):
             },
         })
         self.assertEqual(bridge._intents_summary(now=self.now)["reset"]["status"], "processing")
+
+
+class TestStaticServingHardening(LoopbackServerTestBase):
+    """Static files over the real handler: odd paths always get an answer."""
+
+    def raw_get(self, raw_path):
+        # http.client refuses control characters in a URL, so speak HTTP over
+        # a plain socket to send exactly these bytes.
+        port = self.server.server_address[1]
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+            sock.sendall(b"GET " + raw_path + b" HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            chunks = []
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        head, _, body = b"".join(chunks).partition(b"\r\n\r\n")
+        return head.split(b"\r\n"), body
+
+    def test_control_characters_in_the_path_get_a_400_with_security_headers(self):
+        # A NUL byte used to make os.path.realpath raise, so the connection
+        # was dropped without any response.
+        for raw_path in (b"/\x00", b"/index.html\x00.png", b"/style.css\x01", b"/script.js\x7f"):
+            with self.subTest(raw_path=raw_path):
+                head, _ = self.raw_get(raw_path)
+                self.assertRegex(head[0], rb"^HTTP/1\.[01] 400 ")
+                self.assertIn(b"Content-Security-Policy: " + bridge.DASHBOARD_CSP.encode(), head)
+                self.assertIn(b"X-Content-Type-Options: nosniff", head)
+                self.assertIn(b"Referrer-Policy: no-referrer", head)
+
+    def test_trailing_slash_paths_are_not_served(self):
+        # "/index.html/" used to serve the page at a path where every
+        # relative asset URL resolves below a file.
+        for path in ("/index.html/", "/style.css/", "/fonts/", "/icons/"):
+            with self.subTest(path=path):
+                status, headers, _ = self.get(path)
+                self.assertEqual(status, 404)
+                self.assert_security_headers(headers)
+
+    def test_traversal_stays_inside_the_web_directory(self):
+        for path, expected in (
+            ("/../bridge.py", 403),
+            ("/fonts/../../bridge.py", 403),
+            # Paths are not percent-decoded: an encoded dot-dot is a missing file.
+            ("/%2e%2e/bridge.py", 404),
+            ("/..%2fbridge.py", 404),
+        ):
+            with self.subTest(path=path):
+                status, headers, body = self.get(path)
+                self.assertEqual(status, expected)
+                self.assert_security_headers(headers)
+                self.assertNotIn(b"DashboardHTTPRequestHandler", body)
+
+    def test_static_assets_are_served_with_their_mime_types(self):
+        for path, expected_type in (
+            ("/fonts/inter-latin-wght-normal.woff2", "font/woff2"),
+            ("/fonts/jetbrains-mono-latin-wght-normal.woff2", "font/woff2"),
+            ("/fonts/LICENSE-Inter.txt", "text/plain; charset=utf-8"),
+            ("/favicon.svg", "image/svg+xml"),
+            ("/icons/connected.png", "image/png"),
+        ):
+            with self.subTest(path=path):
+                status, headers, body = self.get(path)
+                self.assertEqual(status, 200)
+                self.assertEqual(headers.get("Content-Type"), expected_type)
+                self.assert_security_headers(headers)
+                self.assertGreater(len(body), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

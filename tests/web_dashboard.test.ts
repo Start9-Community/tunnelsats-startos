@@ -1960,6 +1960,74 @@ test('a rebuilt plan group gives focus back to the same duration', async () => {
   assert.equal(h.doc.activeElement, after)
 })
 
+test('a renamed region rebuilds its card and keeps focus on it', async () => {
+  const [germany, usa] = SERVERS.servers
+  const routes: Record<string, { status: number; body: Json }> = {
+    '/api/servers': { status: 200, body: { servers: [germany, usa] } },
+  }
+  const h = load(model({ configured: false }), 200, undefined, routes)
+  await settleAll(h)
+  const before = toggle(h, 'server-cards', 'data-server-id', 'us-east')
+  before.focus()
+  // Same ids, new city: the card has to show the new name.
+  routes['/api/servers'] = {
+    status: 200,
+    body: { servers: [germany, { ...usa, city: 'Reston' }] },
+  }
+  h.run('loadServers()')
+  await settleAll(h)
+  const after = toggle(h, 'server-cards', 'data-server-id', 'us-east')
+  assert.notEqual(after, before)
+  assert.equal(after.children[1].textContent, 'Reston')
+  assert.equal(h.doc.activeElement, after)
+})
+
+test('a withdrawn focused region leaves focus on the selected region, else the first', async () => {
+  const [germany, usa] = SERVERS.servers
+  const brazil = {
+    ...usa,
+    id: 'sa-br',
+    country: 'Brazil',
+    city: 'Sao Paulo',
+    flag: '🇧🇷',
+  }
+  const routes: Record<string, { status: number; body: Json }> = {
+    '/api/servers': { status: 200, body: { servers: [usa, germany, brazil] } },
+  }
+  const h = load(model({ configured: false }), 200, undefined, routes)
+  await settleAll(h)
+  const card = (id: string) => toggle(h, 'server-cards', 'data-server-id', id)
+  const offer = async (servers: Json[]) => {
+    routes['/api/servers'] = { status: 200, body: { servers } }
+    h.run('loadServers()')
+    await settleAll(h)
+  }
+
+  // Focused but not picked: focus moves to the selected (default) region,
+  // not to the first card.
+  assert.equal(h.run('selectedServerId'), 'eu-de')
+  card('sa-br').focus()
+  await offer([usa, germany])
+  assert.equal(h.doc.activeElement, card('eu-de'))
+
+  // Picked, then withdrawn: nothing is selected any more, so focus moves to
+  // the first card.
+  await offer([usa, germany, brazil])
+  const picked = card('sa-br')
+  picked.focus()
+  h.dispatch('click', picked)
+  assert.equal(h.run('selectedServerId'), 'sa-br')
+  await offer([usa, germany])
+  assert.equal(h.run('selectedServerId'), '')
+  assert.equal(h.doc.activeElement, card('us-east'))
+  assert.deepEqual(
+    h
+      .el('server-cards')
+      .children.map((li) => li.children[0].attributes['aria-pressed']),
+    ['false', 'false'],
+  )
+})
+
 test('a link to another tab moves focus to that tab instead of <body>', async () => {
   const h = load(model({ configured: true }))
   await settleAll(h)

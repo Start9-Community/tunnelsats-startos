@@ -1418,7 +1418,8 @@ function usablePlans(m) {
  * payment is pending) and a detached button drops keyboard focus to <body>,
  * so the buttons are rebuilt only when the options change (`key`) and the
  * pressed state is updated in place. After a rebuild, focus returns to the
- * button with the same value.
+ * button with the same value; if that option is gone (a withdrawn region), it
+ * moves to the selected button, else to the first one.
  */
 function renderToggleGroup(group, key, buildItems, valueAttr, selectedValue) {
   if (group.getAttribute('data-key') !== key) {
@@ -1429,12 +1430,12 @@ function renderToggleGroup(group, key, buildItems, valueAttr, selectedValue) {
     group.replaceChildren(...buildItems())
     group.setAttribute('data-key', key)
     if (focusedValue !== null) {
-      for (const button of group.querySelectorAll(`[${valueAttr}]`)) {
-        if (button.getAttribute(valueAttr) === focusedValue) {
-          button.focus({ preventScroll: true })
-          break
-        }
-      }
+      const buttons = [...group.querySelectorAll(`[${valueAttr}]`)]
+      const withValue = (value) =>
+        buttons.find((button) => button.getAttribute(valueAttr) === value)
+      const target =
+        withValue(focusedValue) || withValue(selectedValue) || buttons[0]
+      if (target) target.focus({ preventScroll: true })
     }
   }
   for (const button of group.querySelectorAll(`[${valueAttr}]`)) {

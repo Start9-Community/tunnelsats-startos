@@ -2100,6 +2100,23 @@ test('shipped SVG, PNG and font files carry no active content or metadata', () =
   }
 })
 
+test('the dashboard icons ship at twice their largest display size', () => {
+  // .brand-tile-icon is 2rem (32 px): 64 px covers 2x screens. Larger files
+  // only cost load time, which shows when the dashboard is opened over Tor.
+  const icons = webFiles().filter((file) => /^icons\/[^/]+\.png$/.test(file))
+  assert.equal(icons.length, 10)
+  for (const file of icons) {
+    const png = readFileSync(join(WEB_DIR, file))
+    // IHDR is always the first chunk; width and height follow its type.
+    assert.equal(png.toString('latin1', 12, 16), 'IHDR', `${file} IHDR`)
+    assert.deepEqual(
+      [png.readUInt32BE(16), png.readUInt32BE(20)],
+      [64, 64],
+      `${file} is 64x64`,
+    )
+  }
+})
+
 /** BIP-173 checksum, as used by NIP-19 identifiers (no length limit). */
 function bech32ChecksumValid(value: string): boolean {
   const charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'

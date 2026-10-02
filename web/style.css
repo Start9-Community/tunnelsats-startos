@@ -1628,8 +1628,16 @@ code {
   min-width: 0;
 }
 
+/* The public address keeps its full width; Copy wraps below it when both do
+   not fit. Only an address wider than the card is cut (full value in title). */
+.route-value-row {
+  flex-wrap: wrap;
+  row-gap: 0.25rem;
+}
+
 .route-value-row .route-value {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
+  max-width: 100%;
 }
 
 .connection-facts {

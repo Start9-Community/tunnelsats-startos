@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import vm from 'node:vm'
 
@@ -1817,6 +1817,34 @@ function webFiles(prefix = ''): string[] {
     )
     .sort()
 }
+
+test('every asset the dashboard references ships, and nothing unreferenced ships', () => {
+  const html = readFileSync(join(WEB_DIR, 'index.html'), 'utf8')
+  const css = readFileSync(join(WEB_DIR, 'style.css'), 'utf8')
+  const isLocal = (ref: string) => !/^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i.test(ref)
+  const referenced = new Set(
+    [
+      ...[...html.matchAll(/\s(?:src|href)="([^"]+)"/g)].map((m) => m[1]),
+      ...[...css.matchAll(/url\(\s*['"]?([^'")]+)['"]?\s*\)/g)].map(
+        (m) => m[1],
+      ),
+    ].filter(isLocal),
+  )
+  for (const ref of referenced) {
+    assert.ok(
+      existsSync(join(WEB_DIR, ref)),
+      `${ref} is referenced but missing`,
+    )
+  }
+  // The font licences ship next to the fonts without a link from the page.
+  const unreferenced = webFiles().filter(
+    (file) =>
+      file !== 'index.html' &&
+      !referenced.has(file) &&
+      !/^fonts\/LICENSE-[A-Za-z]+\.txt$/.test(file),
+  )
+  assert.deepEqual(unreferenced, [])
+})
 
 test('shipped SVG, PNG and font files carry no active content or metadata', () => {
   const files = webFiles()

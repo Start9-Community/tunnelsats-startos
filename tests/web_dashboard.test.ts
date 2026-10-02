@@ -34,7 +34,13 @@ class FakeClassList {
   }
 }
 
+interface FakeDocument {
+  activeElement: FakeElement | null
+  body: FakeElement
+}
+
 class FakeElement {
+  id = ''
   textContent = ''
   className = ''
   title = ''
@@ -45,18 +51,53 @@ class FakeElement {
   classList = new FakeClassList()
   children: FakeElement[] = []
   attributes: Record<string, string> = {}
+  parent: FakeElement | null = null
+  ownerDocument: FakeDocument | null = null
   constructor(public tagName = 'DIV') {}
   append(...nodes: FakeElement[]) {
+    for (const node of nodes) node.parent = this
     this.children.push(...nodes)
   }
   replaceChildren(...nodes: FakeElement[]) {
+    const doc = this.ownerDocument
+    const focused = doc?.activeElement ?? null
+    const hadFocus = focused !== this && this.contains(focused)
+    for (const child of this.children) child.parent = null
+    for (const node of nodes) node.parent = this
     this.children = nodes
+    // Like a browser: a focused element that leaves the page drops focus to <body>.
+    if (doc && hadFocus && !this.contains(focused)) doc.activeElement = doc.body
   }
   setAttribute(name: string, value: string) {
     this.attributes[name] = value
   }
   getAttribute(name: string) {
     return this.attributes[name] ?? null
+  }
+  contains(node: FakeElement | null): boolean {
+    for (let n = node; n; n = n.parent) if (n === this) return true
+    return false
+  }
+  /** The selector forms the script uses: `[attribute]` and a tag name. */
+  matches(selector: string): boolean {
+    const attribute = /^\[([\w-]+)\]$/.exec(selector)
+    if (attribute) return attribute[1] in this.attributes
+    return this.tagName === selector.toUpperCase()
+  }
+  closest(selector: string): FakeElement | null {
+    for (let n: FakeElement | null = this; n; n = n.parent) {
+      if (n.matches(selector)) return n
+    }
+    return null
+  }
+  querySelectorAll(selector: string): FakeElement[] {
+    return this.children.flatMap((child) => [
+      ...(child.matches(selector) ? [child] : []),
+      ...child.querySelectorAll(selector),
+    ])
+  }
+  focus() {
+    if (this.ownerDocument) this.ownerDocument.activeElement = this
   }
   addEventListener() {}
   remove() {}
@@ -65,10 +106,13 @@ class FakeElement {
 
 interface Harness {
   context: vm.Context
+  doc: FakeDocument
   storage: Map<string, string>
   requests: { url: string; init: Json | undefined }[]
   elements: Map<string, FakeElement>
   el: (id: string) => FakeElement
+  /** Runs the script's own document listeners, as a browser event would. */
+  dispatch: (type: string, target: FakeElement, init?: Json) => void
   run: <T = any>(code: string) => T
   settle: () => Promise<void>
 }
@@ -86,10 +130,19 @@ function load(
   const requests: { url: string; init: Json | undefined }[] = []
   const storage = new Map<string, string>(Object.entries(stored))
   const elements = new Map<string, FakeElement>()
+  const listeners = new Map<string, ((event: Json) => void)[]>()
+  const body = new FakeElement('BODY')
+  const doc: FakeDocument = { activeElement: body, body }
+  const own = (element: FakeElement) => {
+    element.ownerDocument = doc
+    return element
+  }
+  own(body)
   const el = (id: string) => {
     let element = elements.get(id)
     if (!element) {
-      element = new FakeElement()
+      element = own(new FakeElement())
+      element.id = id
       elements.set(id, element)
     }
     return element
@@ -98,17 +151,18 @@ function load(
   csrfMeta.setAttribute('content', 'csrf-test-token-123')
   const context = vm.createContext({
     console: { log() {}, warn() {}, error() {}, info() {} },
-    document: {
+    document: Object.assign(doc, {
       hidden: false,
       getElementById: el,
-      createElement: (tag: string) => new FakeElement(tag.toUpperCase()),
+      createElement: (tag: string) => own(new FakeElement(tag.toUpperCase())),
       createElementNS: (_ns: string, tag: string) =>
-        new FakeElement(tag.toUpperCase()),
+        own(new FakeElement(tag.toUpperCase())),
       querySelector: (selector: string) =>
         selector === 'meta[name="csrf-token"]' ? csrfMeta : null,
-      addEventListener() {},
-      body: new FakeElement('BODY'),
-    },
+      addEventListener: (type: string, handler: (event: Json) => void) => {
+        listeners.set(type, [...(listeners.get(type) ?? []), handler])
+      },
+    }),
     window: { isSecureContext: false },
     navigator: {},
     localStorage: {
@@ -152,14 +206,23 @@ function load(
   vm.runInContext(SCRIPT, context, { filename: 'script.js' })
   return {
     context,
+    doc,
     storage,
     requests,
     elements,
     el,
+    dispatch: (type: string, target: FakeElement, init: Json = {}) => {
+      for (const handler of listeners.get(type) ?? []) {
+        handler({ type, target, preventDefault() {}, ...init })
+      }
+    },
     run: (code: string) => {
       const value = vm.runInContext(code, context)
+      // parent and ownerDocument point back up the tree: copy children only.
+      const down = (key: string, v: unknown) =>
+        key === 'parent' || key === 'ownerDocument' ? undefined : v
       return value && typeof value === 'object'
-        ? JSON.parse(JSON.stringify(value))
+        ? JSON.parse(JSON.stringify(value, down))
         : value
     },
     settle: () => new Promise((resolve) => setImmediate(resolve)),
@@ -356,8 +419,9 @@ test('plan prices are the backend USD prices, rendered for all four plans', () =
   for (const p of plans) {
     assert.equal(p.usd, Math.round(3 * p.months * (100 - p.discountPct)) / 100)
   }
-  const cards = h.el('plan-list').children
+  const cards = h.el('plan-list').children.map((li) => li.children[0])
   assert.equal(cards.length, 4)
+  assert.ok(cards.every((c) => c.tagName === 'BUTTON'))
   assert.deepEqual(
     cards.map((c) => c.children[1].textContent),
     ['$3.00', '$8.55', '$16.20', '$28.80'],
@@ -1771,7 +1835,121 @@ test('duration pills for Buy and Renew sync with select elements and drive submi
   assert.equal(h.el('manage-buy-duration-select').value, '6m')
   assert.equal(h.el('buy-cta-label').textContent, 'Buy 6 months · $16.20')
   assert.equal(
-    h.el('plan-list').children[2].getAttribute('aria-pressed'),
+    h.el('plan-list').children[2].children[0].getAttribute('aria-pressed'),
+    'true',
+  )
+})
+
+/** The button in a toggle group that carries `value`. */
+const toggle = (h: Harness, group: string, attr: string, value: string) => {
+  const button = h
+    .el(group)
+    .querySelectorAll(`[${attr}]`)
+    .find((b) => b.getAttribute(attr) === value)
+  assert.ok(button, `${group} has no ${attr}=${value}`)
+  return button
+}
+
+test('polls and selections keep keyboard focus on pills, plan cards and server cards', async () => {
+  const h = load(model({ configured: true }), 200, undefined, {
+    '/api/servers': { status: 200, body: SERVERS },
+  })
+  await settleAll(h)
+  // [group, value attribute, value to pick, the script's selection variable]
+  const groups = [
+    ['renew-pills', 'data-renew-duration', '12m', 'selectedRenewDuration'],
+    ['plan-list', 'data-plan-duration', '6m', 'selectedBuyDuration'],
+    [
+      'manage-duration-pills',
+      'data-plan-duration',
+      '1m',
+      'selectedBuyDuration',
+    ],
+    ['server-cards', 'data-server-id', 'us-east', 'selectedServerId'],
+    ['manage-server-cards', 'data-server-id', 'eu-de', 'selectedServerId'],
+  ]
+  for (const [group, attr, value, selection] of groups) {
+    const button = toggle(h, group, attr, value)
+    assert.equal(
+      button.tagName,
+      'BUTTON',
+      `${group}: Enter and Space must work`,
+    )
+    button.focus()
+    // Every poll runs render(); while a payment is pending that is every 3 s.
+    h.run('render(); renderServers()')
+    assert.equal(toggle(h, group, attr, value), button, `${group}: rebuilt`)
+    assert.equal(h.doc.activeElement, button, `${group}: a poll took focus`)
+    h.dispatch('click', button)
+    assert.equal(h.run(selection), value)
+    assert.equal(h.doc.activeElement, button, `${group}: a pick took focus`)
+    assert.equal(button.getAttribute('aria-pressed'), 'true')
+    assert.ok(button.classList.contains('is-selected'))
+  }
+})
+
+test('a rebuilt plan group gives focus back to the same duration', async () => {
+  const h = load(model({ configured: true }))
+  await settleAll(h)
+  const before = toggle(h, 'plan-list', 'data-plan-duration', '6m')
+  before.focus()
+  // New prices from the backend change what the buttons show.
+  h.run(
+    'model.plans = PLAN_PRICES_USD.map((p) => ({ ...p, usd: p.usd + 1 })); render()',
+  )
+  const after = toggle(h, 'plan-list', 'data-plan-duration', '6m')
+  assert.notEqual(after, before)
+  assert.equal(after.children[1].textContent, '$17.20')
+  assert.equal(h.doc.activeElement, after)
+})
+
+test('a link to another tab moves focus to that tab instead of <body>', async () => {
+  const h = load(model({ configured: true }))
+  await settleAll(h)
+  for (const tab of ['overview', 'actions', 'verify']) {
+    h.el(`tab-btn-${tab}`).setAttribute('data-tab-target', tab)
+  }
+  // "Verify on the node" sits in the Overview panel, which the switch hides.
+  const link = vm.runInContext(
+    "document.createElement('button')",
+    h.context,
+  ) as FakeElement
+  link.setAttribute('data-tab-target', 'verify')
+  h.el('view-overview').append(link)
+  link.focus()
+  h.dispatch('click', link)
+  assert.equal(h.run('activeTab'), 'verify')
+  assert.equal(h.el('view-overview').hidden, true)
+  assert.equal(h.doc.activeElement, h.el('tab-btn-verify'))
+
+  const actions = h.el('tab-btn-actions')
+  actions.focus()
+  h.dispatch('click', actions)
+  assert.equal(h.run('activeTab'), 'actions')
+  assert.equal(h.doc.activeElement, actions)
+})
+
+test('the fallback duration and region selects drive the same selection', async () => {
+  const h = load(model({ configured: true }), 200, undefined, {
+    '/api/servers': { status: 200, body: SERVERS },
+  })
+  await settleAll(h)
+  const change = (id: string, value: string) => {
+    const select = h.el(id)
+    select.value = value
+    h.dispatch('change', select)
+  }
+  change('renew-duration-select', '1m')
+  assert.equal(h.run('selectedRenewDuration'), '1m')
+  change('manage-buy-duration-select', '12m')
+  assert.equal(h.run('selectedBuyDuration'), '12m')
+  assert.equal(h.el('buy-duration-select').value, '12m')
+  change('buy-server-select', 'us-east')
+  assert.equal(h.run('selectedServerId'), 'us-east')
+  assert.equal(
+    toggle(h, 'manage-server-cards', 'data-server-id', 'us-east').getAttribute(
+      'aria-pressed',
+    ),
     'true',
   )
 })

@@ -1412,36 +1412,100 @@ function usablePlans(m) {
     : PLAN_PRICES_USD
 }
 
+/**
+ * Fills a group of toggle buttons (plan cards, duration pills, server cards)
+ * and marks the selected one. render() runs on every poll (every 3 s while a
+ * payment is pending) and a detached button drops keyboard focus to <body>,
+ * so the buttons are rebuilt only when the options change (`key`) and the
+ * pressed state is updated in place. After a rebuild, focus returns to the
+ * button with the same value.
+ */
+function renderToggleGroup(group, key, buildItems, valueAttr, selectedValue) {
+  if (group.getAttribute('data-key') !== key) {
+    const active = document.activeElement
+    const focused =
+      active && group.contains(active) ? active.closest(`[${valueAttr}]`) : null
+    const focusedValue = focused ? focused.getAttribute(valueAttr) : null
+    group.replaceChildren(...buildItems())
+    group.setAttribute('data-key', key)
+    if (focusedValue !== null) {
+      for (const button of group.querySelectorAll(`[${valueAttr}]`)) {
+        if (button.getAttribute(valueAttr) === focusedValue) {
+          button.focus({ preventScroll: true })
+          break
+        }
+      }
+    }
+  }
+  for (const button of group.querySelectorAll(`[${valueAttr}]`)) {
+    const on = button.getAttribute(valueAttr) === selectedValue
+    button.setAttribute('aria-pressed', on ? 'true' : 'false')
+    button.classList.toggle('is-selected', on)
+  }
+}
+
+/** What a plan button shows: rebuild the plan groups only when this changes. */
+function plansKey(plans) {
+  return JSON.stringify(
+    plans.map((plan) => [plan.months, plan.usd, plan.discountPct]),
+  )
+}
+
+function buildPlanCard(plan) {
+  const li = document.createElement('li')
+  const card = document.createElement('button')
+  card.setAttribute('type', 'button')
+  card.className = 'plan-card'
+  card.setAttribute('data-plan-duration', `${plan.months}m`)
+  const duration = document.createElement('span')
+  duration.className = 'plan-duration'
+  duration.textContent = monthsLabel(plan.months)
+  const price = document.createElement('span')
+  price.className = 'plan-price'
+  price.textContent = formatUsd(plan.usd)
+  const perMonth = document.createElement('span')
+  perMonth.className = 'plan-per-mo'
+  perMonth.textContent =
+    plan.discountPct > 0
+      ? `${formatUsd(plan.usd / plan.months)}/mo · save ${plan.discountPct}%`
+      : `${formatUsd(plan.usd)}/mo`
+  card.append(duration, price, perMonth)
+  li.append(card)
+  return li
+}
+
+function buildDurationPill(plan, valueAttr) {
+  const btn = document.createElement('button')
+  btn.setAttribute('type', 'button')
+  btn.className = 'duration-pill'
+  btn.setAttribute(valueAttr, `${plan.months}m`)
+  const durSpan = document.createElement('span')
+  durSpan.className = 'pill-dur'
+  durSpan.textContent = `${plan.months} mo`
+  const priceSpan = document.createElement('span')
+  priceSpan.className = 'pill-price'
+  priceSpan.textContent = formatUsd(plan.usd)
+  btn.append(durSpan, priceSpan)
+  if (plan.discountPct > 0) {
+    const badge = document.createElement('span')
+    badge.className = 'pill-save'
+    badge.textContent = `-${plan.discountPct}%`
+    btn.append(badge)
+  }
+  return btn
+}
+
 function renderPlans(m) {
   const list = byId('plan-list')
   const plans = usablePlans(m)
   if (list) {
-    const items = plans.map((plan) => {
-      const durationKey = `${plan.months}m`
-      const selected = durationKey === selectedBuyDuration
-      const li = document.createElement('li')
-      li.className = 'plan-card'
-      li.setAttribute('data-plan-duration', durationKey)
-      li.setAttribute('role', 'button')
-      li.setAttribute('tabindex', '0')
-      li.setAttribute('aria-pressed', selected ? 'true' : 'false')
-      li.classList.toggle('is-selected', selected)
-      const duration = document.createElement('span')
-      duration.className = 'plan-duration'
-      duration.textContent = monthsLabel(plan.months)
-      const price = document.createElement('span')
-      price.className = 'plan-price'
-      price.textContent = formatUsd(plan.usd)
-      const perMonth = document.createElement('span')
-      perMonth.className = 'plan-per-mo'
-      perMonth.textContent =
-        plan.discountPct > 0
-          ? `${formatUsd(plan.usd / plan.months)}/mo · save ${plan.discountPct}%`
-          : `${formatUsd(plan.usd)}/mo`
-      li.append(duration, price, perMonth)
-      return li
-    })
-    list.replaceChildren(...items)
+    renderToggleGroup(
+      list,
+      plansKey(plans),
+      () => plans.map(buildPlanCard),
+      'data-plan-duration',
+      selectedBuyDuration,
+    )
   }
   const chosen = plans.find((plan) => `${plan.months}m` === selectedBuyDuration)
   setText(
@@ -1457,59 +1521,23 @@ function renderRenewPills(m) {
   const plans = usablePlans(m)
   const renewGroup = byId('renew-pills')
   if (renewGroup) {
-    const buttons = plans.map((plan) => {
-      const durationKey = `${plan.months}m`
-      const active = durationKey === selectedRenewDuration
-      const btn = document.createElement('button')
-      btn.setAttribute('type', 'button')
-      btn.className = 'duration-pill'
-      btn.setAttribute('data-renew-duration', durationKey)
-      btn.setAttribute('aria-pressed', active ? 'true' : 'false')
-      btn.classList.toggle('is-selected', active)
-      const durSpan = document.createElement('span')
-      durSpan.className = 'pill-dur'
-      durSpan.textContent = `${plan.months} mo`
-      const priceSpan = document.createElement('span')
-      priceSpan.className = 'pill-price'
-      priceSpan.textContent = formatUsd(plan.usd)
-      btn.append(durSpan, priceSpan)
-      if (plan.discountPct > 0) {
-        const badge = document.createElement('span')
-        badge.className = 'pill-save'
-        badge.textContent = `-${plan.discountPct}%`
-        btn.append(badge)
-      }
-      return btn
-    })
-    renewGroup.replaceChildren(...buttons)
+    renderToggleGroup(
+      renewGroup,
+      plansKey(plans),
+      () => plans.map((plan) => buildDurationPill(plan, 'data-renew-duration')),
+      'data-renew-duration',
+      selectedRenewDuration,
+    )
   }
   const manageGroup = byId('manage-duration-pills')
   if (manageGroup) {
-    const buttons = plans.map((plan) => {
-      const durationKey = `${plan.months}m`
-      const active = durationKey === selectedBuyDuration
-      const btn = document.createElement('button')
-      btn.setAttribute('type', 'button')
-      btn.className = 'duration-pill'
-      btn.setAttribute('data-plan-duration', durationKey)
-      btn.setAttribute('aria-pressed', active ? 'true' : 'false')
-      btn.classList.toggle('is-selected', active)
-      const durSpan = document.createElement('span')
-      durSpan.className = 'pill-dur'
-      durSpan.textContent = `${plan.months} mo`
-      const priceSpan = document.createElement('span')
-      priceSpan.className = 'pill-price'
-      priceSpan.textContent = formatUsd(plan.usd)
-      btn.append(durSpan, priceSpan)
-      if (plan.discountPct > 0) {
-        const badge = document.createElement('span')
-        badge.className = 'pill-save'
-        badge.textContent = `-${plan.discountPct}%`
-        btn.append(badge)
-      }
-      return btn
-    })
-    manageGroup.replaceChildren(...buttons)
+    renderToggleGroup(
+      manageGroup,
+      plansKey(plans),
+      () => plans.map((plan) => buildDurationPill(plan, 'data-plan-duration')),
+      'data-plan-duration',
+      selectedBuyDuration,
+    )
   }
 }
 
@@ -2156,10 +2184,6 @@ function buildServerPillItem(server) {
   button.setAttribute('type', 'button')
   button.className = 'server-card'
   button.setAttribute('data-server-id', server.id)
-  button.setAttribute(
-    'aria-pressed',
-    server.id === selectedServerId ? 'true' : 'false',
-  )
   const flag = document.createElement('span')
   flag.className = 'server-flag'
   flag.setAttribute('aria-hidden', 'true')
@@ -2186,6 +2210,7 @@ function renderServers() {
       if (el) {
         el.hidden = true
         el.replaceChildren()
+        el.setAttribute('data-key', '')
       }
     }
     if (note) {
@@ -2208,9 +2233,18 @@ function renderServers() {
         : list[0].id
     }
   }
+  const cardsKey = JSON.stringify(
+    list.map((server) => [server.id, server.flag, server.city, server.country]),
+  )
   for (const el of [cards, manageCards]) {
     if (el) {
-      el.replaceChildren(...list.map((server) => buildServerPillItem(server)))
+      renderToggleGroup(
+        el,
+        cardsKey,
+        () => list.map(buildServerPillItem),
+        'data-server-id',
+        selectedServerId,
+      )
       el.hidden = false
     }
   }
@@ -2607,7 +2641,12 @@ function bindEvents() {
     if (!target || typeof target.closest !== 'function') return
     const tabBtn = target.closest('[data-tab-target]')
     if (tabBtn) {
-      switchTab(tabBtn.getAttribute('data-tab-target'))
+      const tab = tabBtn.getAttribute('data-tab-target')
+      switchTab(tab)
+      // A link inside a panel is hidden with that panel: move focus to the
+      // selected tab instead of letting it fall back to <body>.
+      const selectedTab = byId(`tab-btn-${tab}`)
+      if (selectedTab && selectedTab !== tabBtn) selectedTab.focus()
       return
     }
     const opener = target.closest('[data-open-dialog]')
@@ -2660,23 +2699,6 @@ function bindEvents() {
     // so a click on the backdrop targets the <dialog> element directly.
     if (target.tagName === 'DIALOG' && target.open) {
       target.close()
-    }
-  })
-
-  document.addEventListener('keydown', (event) => {
-    const target = event.target
-    if (!target || typeof target.closest !== 'function') return
-    if (event.key !== 'Enter' && event.key !== ' ') return
-    const planCard = target.closest('[data-plan-duration]')
-    if (planCard && planCard.tagName !== 'BUTTON') {
-      event.preventDefault()
-      selectBuyDuration(planCard.getAttribute('data-plan-duration'))
-      return
-    }
-    const renewItem = target.closest('[data-renew-duration]')
-    if (renewItem && renewItem.tagName !== 'BUTTON') {
-      event.preventDefault()
-      selectRenewDuration(renewItem.getAttribute('data-renew-duration'))
     }
   })
 

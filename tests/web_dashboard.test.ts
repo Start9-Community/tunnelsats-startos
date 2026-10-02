@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import vm from 'node:vm'
 
@@ -1619,6 +1619,7 @@ test('the overview renders native gauges, the timeline and the quota', async () 
   )
   assert.match(h.el('pace-text').textContent, /GB/)
   assert.equal(h.el('timeline-phase').textContent, 'On track')
+  assert.equal(h.el('timeline-phase').getAttribute('data-phase'), 'ok')
   const svg = h.el('timeline-chart').children[0]
   assert.equal(svg.tagName, 'SVG')
   assert.equal(svg.attributes['aria-hidden'], 'true')
@@ -1626,8 +1627,24 @@ test('the overview renders native gauges, the timeline and the quota', async () 
     svg.children.every((child) => !('style' in child.attributes)),
     'the timeline uses SVG attributes, not inline styles',
   )
-  assert.equal(h.el('timeline-legend').children.length, 3)
-  assert.equal(h.el('renew-preview-list').children.length, 4)
+  const legend = h.el('timeline-legend').children
+  assert.deepEqual(
+    legend.map((chip) => chip.getAttribute('data-kind')),
+    ['7d', '3d'],
+  )
+  assert.ok(legend.every((chip) => chip.className === 'legend-chip'))
+  assert.match(legend[0].textContent, /^7-day reminder · \S/)
+  // One estimate for the selected plan, and a button that names it.
+  const preview = h.el('renew-preview')
+  assert.equal(preview.hidden, false)
+  assert.equal(preview.children[0].textContent, 'New expiry about ')
+  assert.equal(
+    preview.children[1].textContent,
+    h.run(
+      `formatDate(renewPreview(model).find((p) => p.duration === '3m').newExpiry)`,
+    ),
+  )
+  assert.equal(h.el('renew-cta-label').textContent, 'Renew 3 months · $8.55')
 })
 
 test('index.html labels the reachability check as inbound only and uses native gauges', () => {
@@ -1728,9 +1745,12 @@ test('duration pills for Buy and Renew sync with select elements and drive submi
     h.el('renew-pills').children.map((b) => b.getAttribute('aria-pressed')),
     ['false', 'false', 'false', 'true'],
   )
+  assert.equal(h.el('renew-cta-label').textContent, 'Renew 12 months · $28.80')
   assert.equal(
-    h.el('renew-preview-list').children[3].classList.contains('is-selected'),
-    true,
+    h.el('renew-preview').children[1].textContent,
+    h.run(
+      `formatDate(renewPreview(model).find((p) => p.duration === '12m').newExpiry)`,
+    ),
   )
 
   // Invalid durations are ignored
@@ -1749,6 +1769,7 @@ test('duration pills for Buy and Renew sync with select elements and drive submi
   h.run(`selectBuyDuration('6m')`)
   assert.equal(h.el('buy-duration-select').value, '6m')
   assert.equal(h.el('manage-buy-duration-select').value, '6m')
+  assert.equal(h.el('buy-cta-label').textContent, 'Buy 6 months · $16.20')
   assert.equal(
     h.el('plan-list').children[2].getAttribute('aria-pressed'),
     'true',
@@ -1784,28 +1805,228 @@ test('command deck renders SVG ring/arc gauges and visual reset pips without inl
   assert.equal(pips[1].classList.contains('is-used'), false)
 })
 
-test('brand SVG assets have zero inline style attributes and all referenced img src files exist', () => {
-  const webDir = join(__dirname, '..', 'web')
-  const html = readFileSync(join(webDir, 'index.html'), 'utf8')
-  const imgSrcMatches = [...html.matchAll(/<img[^>]+src="([^"]+)"/g)].map(
-    (m) => m[1],
-  )
-  assert.ok(imgSrcMatches.length >= 15, 'expected custom brand SVGs and icons')
-  for (const relPath of imgSrcMatches) {
-    assert.ok(
-      existsSync(join(webDir, relPath)),
-      `referenced image ${relPath} must exist in web/`,
+const WEB_DIR = join(__dirname, '..', 'web')
+
+/** Every file under web/, as POSIX paths relative to it. */
+function webFiles(prefix = ''): string[] {
+  return readdirSync(join(WEB_DIR, prefix), { withFileTypes: true })
+    .flatMap((entry) =>
+      entry.isDirectory()
+        ? webFiles(`${prefix}${entry.name}/`)
+        : [`${prefix}${entry.name}`],
     )
+    .sort()
+}
+
+test('shipped SVG, PNG and font files carry no active content or metadata', () => {
+  const files = webFiles()
+  const svgs = files.filter((file) => file.endsWith('.svg'))
+  assert.ok(svgs.length > 0)
+  for (const file of svgs) {
+    const svg = readFileSync(join(WEB_DIR, file), 'utf8')
+    for (const [pattern, what] of [
+      [/<script/i, 'a script element'],
+      [/\son[a-z]+\s*=/i, 'an event handler attribute'],
+      [/javascript:/i, 'a javascript: URL'],
+      [/<foreignObject/i, 'foreignObject'],
+      [/<!(?:DOCTYPE|ENTITY)/i, 'a DTD or entity'],
+      [/(?:\s|:)href\s*=\s*["'](?!#)/i, 'an external reference'],
+      [/\bstyle\s*=/i, 'an inline style attribute (CSP)'],
+    ] as const) {
+      assert.doesNotMatch(svg, pattern, `${file} must not contain ${what}`)
+    }
   }
 
-  const svgFiles = readdirSync(webDir).filter((f) => f.endsWith('.svg'))
-  assert.ok(svgFiles.length >= 8, 'expected brand SVG files in web/')
-  for (const svgFile of svgFiles) {
-    const svgContent = readFileSync(join(webDir, svgFile), 'utf8')
-    assert.doesNotMatch(
-      svgContent,
-      /\bstyle\s*=/i,
-      `${svgFile} must use presentation attributes instead of inline style= for CSP compatibility`,
+  const pngs = files.filter((file) => file.endsWith('.png'))
+  assert.ok(pngs.length > 0)
+  const signature = Buffer.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+  ])
+  for (const file of pngs) {
+    const png = readFileSync(join(WEB_DIR, file))
+    assert.ok(png.subarray(0, 8).equals(signature), `${file} is a PNG`)
+    const chunks: string[] = []
+    let offset = 8
+    while (offset + 8 <= png.length) {
+      const type = png.toString('latin1', offset + 4, offset + 8)
+      chunks.push(type)
+      offset += 12 + png.readUInt32BE(offset)
+      if (type === 'IEND') break
+    }
+    assert.equal(chunks.at(-1), 'IEND', `${file} ends with IEND`)
+    assert.equal(offset, png.length, `${file} has no data after IEND`)
+    for (const meta of ['tEXt', 'iTXt', 'zTXt', 'tIME', 'eXIf']) {
+      assert.ok(!chunks.includes(meta), `${file} carries no ${meta} chunk`)
+    }
+  }
+
+  const fonts = files.filter((file) => file.endsWith('.woff2'))
+  assert.deepEqual(fonts, [
+    'fonts/inter-latin-wght-normal.woff2',
+    'fonts/jetbrains-mono-latin-wght-normal.woff2',
+  ])
+  for (const file of fonts) {
+    const magic = readFileSync(join(WEB_DIR, file)).toString('latin1', 0, 4)
+    assert.equal(magic, 'wOF2', `${file} is a WOFF2 font`)
+  }
+  for (const license of [
+    'fonts/LICENSE-Inter.txt',
+    'fonts/LICENSE-JetBrainsMono.txt',
+  ]) {
+    assert.match(
+      readFileSync(join(WEB_DIR, license), 'utf8'),
+      /SIL OPEN FONT LICENSE Version 1\.1/,
     )
   }
+})
+
+/** BIP-173 checksum, as used by NIP-19 identifiers (no length limit). */
+function bech32ChecksumValid(value: string): boolean {
+  const charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
+  const lower = value.toLowerCase()
+  const sep = lower.lastIndexOf('1')
+  if (sep < 1 || sep + 7 > lower.length) return false
+  const hrp = [...lower.slice(0, sep)].map((c) => c.charCodeAt(0))
+  const data = [...lower.slice(sep + 1)].map((c) => charset.indexOf(c))
+  if (data.some((d) => d < 0)) return false
+  const gen = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]
+  let chk = 1
+  for (const v of [
+    ...hrp.map((c) => c >> 5),
+    0,
+    ...hrp.map((c) => c & 31),
+    ...data,
+  ]) {
+    const top = chk >> 25
+    chk = ((chk & 0x1ffffff) << 5) ^ v
+    for (let i = 0; i < 5; i++) if ((top >> i) & 1) chk ^= gen[i]
+  }
+  return chk === 1
+}
+
+test('external links are https, on an exact allow-list and open without an opener', () => {
+  const html = readFileSync(join(WEB_DIR, 'index.html'), 'utf8')
+  const allowed = new Set([
+    'https://tunnelsats.com',
+    'https://tunnelsats.com/guide',
+    'https://tunnelsats.com/status',
+    'https://tunnelsats.com/join-telegram',
+    'https://tunnelsats.com/faq#what-happens-if-i-reach-the-100gb-limit',
+    'https://primal.net/p/nprofile1qqsfj32jgnfp7asvcr5sj3ljar2v6elhm5560zfh0xqfeqsgl84s0rc37zmgx',
+    'https://x.com/TunnelSats',
+    'https://github.com/Tunnelsats/tunnelsats-startos',
+  ])
+  const anchors = [...html.matchAll(/<a\b[^>]*>/g)].map((m) => m[0])
+  let external = 0
+  for (const anchor of anchors) {
+    const href = /\shref="([^"]*)"/.exec(anchor)?.[1] ?? ''
+    if (/^[a-z][a-z0-9+.-]*:/i.test(href)) {
+      external++
+      assert.ok(allowed.has(href), `${href} is not on the link allow-list`)
+      assert.match(anchor, /\starget="_blank"/, `${href} opens in a new tab`)
+    }
+    if (/\starget="_blank"/.test(anchor)) {
+      assert.match(anchor, /\srel="noopener noreferrer"/, `${href} rel`)
+    }
+  }
+  assert.ok(external >= allowed.size)
+  // Previously linked but dead or not ours.
+  assert.ok(!html.includes('docs.tunnelsats.com'))
+  assert.ok(!html.includes('t.me/+'))
+  const nprofile = /nprofile1[02-9ac-hj-np-z]+/.exec(html)?.[0] ?? ''
+  assert.ok(bech32ChecksumValid(nprofile), 'the Nostr profile link is intact')
+  const typo = nprofile.slice(0, -1) + (nprofile.endsWith('q') ? 'p' : 'q')
+  assert.ok(!bech32ChecksumValid(typo), 'the checksum catches a typo')
+})
+
+test('the bandwidth pace marker sits on the arc at the projected usage', () => {
+  const h = load(model())
+  // The arc in index.html: M 20 82 A 60 60 0 0 1 140 82.
+  assert.deepEqual(h.run('arcPoint(0)'), { x: 20, y: 82 })
+  assert.deepEqual(h.run('arcPoint(50)'), { x: 80, y: 22 })
+  assert.deepEqual(h.run('arcPoint(100)'), { x: 140, y: 82 })
+  assert.deepEqual(h.run('arcPoint(250)'), { x: 140, y: 82 })
+  assert.deepEqual(h.run('arcPoint(-5)'), { x: 20, y: 82 })
+  assert.deepEqual(h.run('arcPoint(NaN)'), { x: 20, y: 82 })
+
+  const marker = h.el('bandwidth-pace-marker')
+  const pace = h.el('pace-text')
+  const quota = (bandwidth: Json, now: number) =>
+    h.run(`renderQuota(${JSON.stringify(model({ bandwidth }))}, ${now})`)
+  // Half of September gone, 50 GB used: 100 GB projected of 150 GB.
+  quota({ usedGb: 50, limitGb: 150 }, SEPT_16)
+  assert.equal(marker.getAttribute('cx'), '110')
+  assert.equal(marker.getAttribute('cy'), '30.04')
+  assert.equal(marker.classList.contains('is-visible'), true)
+  assert.equal(marker.classList.contains('is-over'), false)
+  assert.equal(pace.getAttribute('data-projection'), 'true')
+  // 120 GB projected of 100 GB: pinned to the end and flagged.
+  quota({ usedGb: 60, limitGb: 100 }, SEPT_16)
+  assert.equal(marker.getAttribute('cx'), '140')
+  assert.equal(marker.getAttribute('cy'), '82')
+  assert.equal(marker.classList.contains('is-over'), true)
+  // No projection on the first day of the month: no marker.
+  quota({ usedGb: 5, limitGb: 100 }, Date.UTC(2026, 8, 1, 12))
+  assert.equal(marker.classList.contains('is-visible'), false)
+  assert.equal(marker.classList.contains('is-over'), false)
+  assert.equal(pace.getAttribute('data-projection'), 'false')
+})
+
+test('the NWC badge reads Off, On or On · Tor and names problems plainly', async () => {
+  const view = (h: Harness, nwc: Json | undefined) =>
+    h.run(`nwcStatusView(${JSON.stringify(model({ nwc }))})`)
+  const h = load(model())
+  await settleAll(h)
+  assert.equal(h.el('nwc-badge').textContent, 'Off')
+  assert.equal(h.el('nwc-badge').className, 'nwc-badge neutral')
+  assert.equal(view(h, { connected: false }).badge, 'Off')
+  const on = view(h, {
+    connected: true,
+    relayHost: 'relay.example.com',
+    resolvedDuration: '3m',
+    recommendedBudgetSats: 12000,
+    recommendedAnnualSats: 48000,
+  })
+  assert.deepEqual([on.cls, on.badge], ['active', 'On'])
+  assert.match(on.note, /Relay relay\.example\.com · 3m plan · .*12,000 sats/)
+  assert.equal(
+    view(h, { connected: true, routeViaTor: true }).badge,
+    'On · Tor',
+  )
+  for (const [flags, badge] of [
+    [{ restoreReconnectNeeded: true }, 'Reconnect needed'],
+    [{ budgetWarning: true }, 'Budget too low'],
+    [{ fallbackTaskRaised: true }, 'Manual fallback'],
+  ] as const) {
+    const problem = view(h, { connected: true, ...flags })
+    assert.deepEqual([problem.cls, problem.badge], ['alert', badge])
+  }
+})
+
+test('truncated connection values keep the full value as their tooltip', async () => {
+  const h = load(model())
+  await settleAll(h)
+  assert.equal(h.el('val-endpoint').title, 'de2.tunnelsats.com:24556')
+  assert.equal(h.el('val-vpn-ip').title, '10.9.0.7')
+  assert.equal(h.el('val-target-node').title, 'LND')
+  const bare = load(model({ connection: {} }))
+  await settleAll(bare)
+  assert.equal(bare.el('val-endpoint').textContent, 'Unknown')
+  assert.equal(bare.el('val-endpoint').title, '')
+  assert.equal(bare.el('val-vpn-ip').title, '')
+})
+
+test('times are shown to the minute and estimates to the day', () => {
+  const h = load(model())
+  const time = h.run(`formatTime('2026-09-16T10:20:30.000Z')`)
+  assert.match(time, /2026/)
+  assert.match(time, /\d[:.]\d{2}/)
+  assert.doesNotMatch(time, /\d[:.]\d{2}[:.]\d{2}/, 'no seconds')
+  const date = h.run(`formatDate('2026-09-16T10:20:30.000Z')`)
+  assert.match(date, /2026/)
+  assert.doesNotMatch(date, /\d[:.]\d{2}/, 'no time of day')
+  assert.equal(h.run(`formatTime('not a date')`), null)
+  assert.equal(h.run(`formatDate(null)`), null)
+  assert.equal(h.run('monthsLabel(1)'), '1 month')
+  assert.equal(h.run('monthsLabel(12)'), '12 months')
 })

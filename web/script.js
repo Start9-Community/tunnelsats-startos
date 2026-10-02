@@ -590,7 +590,25 @@ function formatSats(sats) {
 function formatTime(iso) {
   if (!iso) return null
   const date = new Date(iso)
-  return Number.isNaN(date.getTime()) ? null : date.toLocaleString()
+  return Number.isNaN(date.getTime())
+    ? null
+    : date.toLocaleString(undefined, {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+      })
+}
+
+/** The day only, for estimates and reminders where the hour adds noise. */
+function formatDate(iso) {
+  if (!iso) return null
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime())
+    ? null
+    : date.toLocaleDateString(undefined, { dateStyle: 'medium' })
+}
+
+function monthsLabel(months) {
+  return `${months} month${months > 1 ? 's' : ''}`
 }
 
 function formatRemaining(ms) {
@@ -873,8 +891,8 @@ function nwcStatusView(m) {
   if (!nwc || !nwc.connected) {
     return {
       cls: 'neutral',
-      badge: 'Disabled',
-      note: 'Connect a wallet in Services → TunnelSats → Actions → Connect Wallet.',
+      badge: 'Off',
+      note: 'Optional: connect a wallet in Services → TunnelSats → Actions → Connect Wallet to renew automatically.',
     }
   }
   const rec =
@@ -889,29 +907,29 @@ function nwcStatusView(m) {
     return {
       cls: 'alert',
       badge: 'Reconnect needed',
-      note: 'NWC credentials are excluded from backups. Re-enter your NWC URI in Services → TunnelSats → Actions → Connect Wallet.',
+      note: 'Wallet credentials are not part of backups. Re-enter the NWC URI in Services → TunnelSats → Actions → Connect Wallet.',
     }
   }
   if (nwc.budgetWarning) {
     return {
       cls: 'alert',
       badge: 'Budget too low',
-      note: `${nwc.lastError ? `${nwc.lastError} ` : ''}Set your wallet budget to at least ${rec} (1.2× buffer) in Connect Wallet or accept the Pay Invoice task.`,
+      note: `${nwc.lastError ? `${nwc.lastError} ` : ''}Raise the wallet budget to at least ${rec} per renewal, or accept the Pay Invoice task.`,
     }
   }
   if (nwc.fallbackTaskRaised) {
     return {
       cls: 'alert',
       badge: 'Manual fallback',
-      note: `${nwc.lastError ? `${nwc.lastError} ` : ''}Accept the Pay Invoice task on your node or check Services → TunnelSats → Actions → Connect Wallet.`,
+      note: `${nwc.lastError ? `${nwc.lastError} ` : ''}Accept the Pay Invoice task on your node, or check Connect Wallet.`,
     }
   }
   const relay = nwc.relayHost || 'connected'
   const dur = nwc.resolvedDuration || '1m'
   return {
     cls: 'active',
-    badge: nwc.routeViaTor ? 'Enabled · Tor' : 'Enabled',
-    note: `Relay ${relay} (${dur} plan). Recommended 1.2× wallet budget: ${rec} per renewal (~${annual}/yr). Manage in Services → TunnelSats → Actions → Connect Wallet.`,
+    badge: nwc.routeViaTor ? 'On · Tor' : 'On',
+    note: `Relay ${relay} · ${dur} plan · wallet budget at least ${rec} per renewal (about ${annual} a year, 1.2× buffer).`,
   }
 }
 
@@ -1192,9 +1210,7 @@ function renewPreview(m, nowMs = Date.now()) {
   const end = expiryMs(m)
   if (end === null) return []
   const base = Math.max(end, nowMs)
-  const plans =
-    m && Array.isArray(m.plans) && m.plans.length ? m.plans : PLAN_PRICES_USD
-  return plans.map((plan) => {
+  return usablePlans(m).map((plan) => {
     const next = new Date(base)
     next.setUTCMonth(next.getUTCMonth() + plan.months)
     return {
@@ -1412,7 +1428,7 @@ function renderPlans(m) {
       li.classList.toggle('is-selected', selected)
       const duration = document.createElement('span')
       duration.className = 'plan-duration'
-      duration.textContent = `${plan.months} month${plan.months > 1 ? 's' : ''}`
+      duration.textContent = monthsLabel(plan.months)
       const price = document.createElement('span')
       price.className = 'plan-price'
       price.textContent = formatUsd(plan.usd)
@@ -1427,6 +1443,13 @@ function renderPlans(m) {
     })
     list.replaceChildren(...items)
   }
+  const chosen = plans.find((plan) => `${plan.months}m` === selectedBuyDuration)
+  setText(
+    'buy-cta-label',
+    chosen
+      ? `Buy ${monthsLabel(chosen.months)} · ${formatUsd(chosen.usd)}`
+      : 'Buy subscription',
+  )
   renderRenewPills(m)
 }
 
@@ -1506,7 +1529,7 @@ function selectRenewDuration(dur) {
   const select = byId('renew-duration-select')
   if (select) select.value = dur
   renderRenewPills(model)
-  if (model && model.configured) renderTimeline(model)
+  renderRenewSummary(model)
 }
 
 /**
@@ -1752,14 +1775,15 @@ function renderNwcStatus(m) {
 }
 
 function renderCountdown() {
-  const expiresAt =
-    model && model.subscription ? model.subscription.expiresAt : null
+  const sub = model && model.subscription
+  const expiresAt = sub ? sub.expiresAt : null
   const expiry = expiresAt ? new Date(expiresAt) : null
   const timer = byId('countdown')
   const ringArc = byId('subscription-ring-arc')
   if (!expiry || Number.isNaN(expiry.getTime())) {
     setText('expiry-date', 'Not confirmed')
-    setText('countdown', 'Unknown')
+    setText('countdown', '—')
+    setText('countdown-sub', 'not confirmed')
     if (timer) timer.classList.remove('expired')
     setGauge('subscription-progress', 0, 100)
     if (ringArc) {
@@ -1770,8 +1794,14 @@ function renderCountdown() {
     return
   }
   const remaining = expiry.getTime() - Date.now()
-  setText('expiry-date', `Expires ${expiry.toLocaleString()}`)
+  // An unlinked subscription only carries the configuration's own date hint.
+  const confirmed = sub.linked === true
+  setText(
+    'expiry-date',
+    `${formatTime(expiresAt)}${confirmed ? '' : ' (not confirmed)'}`,
+  )
   setText('countdown', formatRemaining(remaining))
+  setText('countdown-sub', remaining > 0 ? 'remaining' : '')
   if (timer) timer.classList.toggle('expired', remaining <= 0)
   const pct = Math.min(100, Math.max(0, (remaining / PROGRESS_TERM_MS) * 100))
   setGauge('subscription-progress', pct, 100)
@@ -1792,17 +1822,28 @@ function formatPublicAddress(server, vpnPort) {
   return `${host}:${vpnPort}`
 }
 
+/**
+ * Text plus the same text as tooltip, for values the layout may truncate.
+ * copyText prefers the title, so it must always be the full value.
+ */
+function setTitled(id, text) {
+  const el = byId(id)
+  if (!el) return
+  el.textContent = text
+  el.title = text === 'Unknown' ? '' : text
+}
+
 function renderOverview(m) {
   const conn = m.connection || {}
-  setText('val-target-node', nodeLabel(m.targetNode))
+  setTitled('val-target-node', nodeLabel(m.targetNode))
   setText('val-handoff', handoffText(m))
-  setText('val-endpoint', formatPublicAddress(conn.server, conn.vpnPort))
+  setTitled('val-endpoint', formatPublicAddress(conn.server, conn.vpnPort))
   const pubkey = byId('val-pubkey')
   if (pubkey) {
     pubkey.textContent = conn.publicKey || 'Unknown'
     pubkey.title = conn.publicKey || ''
   }
-  setText('val-vpn-ip', conn.vpnIp || 'Unknown')
+  setTitled('val-vpn-ip', conn.vpnIp || 'Unknown')
   setText(
     'val-last-sync',
     formatTime(m.subscription && m.subscription.lastSync) || 'Not yet',
@@ -1854,10 +1895,13 @@ function renderTimeline(m) {
   const chart = byId('timeline-chart')
   const legend = byId('timeline-legend')
   const timeline = subscriptionTimeline(m)
-  setText(
-    'timeline-phase',
-    timeline ? TIMELINE_PHASE_TEXT[timeline.phase] : 'Not confirmed',
-  )
+  const phase = byId('timeline-phase')
+  if (phase) {
+    phase.textContent = timeline
+      ? TIMELINE_PHASE_TEXT[timeline.phase]
+      : 'Not confirmed'
+    phase.setAttribute('data-phase', timeline ? timeline.phase : 'unknown')
+  }
   if (chart) {
     if (!timeline) {
       chart.replaceChildren()
@@ -1919,61 +1963,98 @@ function renderTimeline(m) {
   }
   if (legend) {
     const items = timeline
-      ? [
-          ...timeline.markers.map(
-            (marker) =>
-              `${marker.label}: ${formatTime(marker.at)}${marker.passed ? ' (passed)' : ''}`,
-          ),
-          `Expires: ${formatTime(timeline.expiresAt)}`,
-        ]
-      : ['The expiry is shown once TunnelSats confirms it.']
-    legend.replaceChildren(
-      ...items.map((text) => {
-        const li = document.createElement('li')
-        li.textContent = text
-        return li
-      }),
-    )
+      ? timeline.markers.map((marker) => {
+          const li = document.createElement('li')
+          li.className = 'legend-chip'
+          li.setAttribute('data-kind', marker.kind)
+          li.classList.toggle('is-passed', marker.passed)
+          li.textContent = `${marker.label} · ${formatDate(marker.at)}${marker.passed ? ' (passed)' : ''}`
+          return li
+        })
+      : [legendNote('The expiry is shown once TunnelSats confirms it.')]
+    legend.replaceChildren(...items)
   }
-  const preview = byId('renew-preview-list')
-  if (preview) {
-    preview.replaceChildren(
-      ...renewPreview(m).map((item) => {
-        const li = document.createElement('li')
-        li.className = 'renew-preview-item'
-        li.setAttribute('data-renew-duration', item.duration)
-        li.classList.toggle(
-          'is-selected',
-          item.duration === selectedRenewDuration,
-        )
-        const plan = document.createElement('span')
-        plan.className = 'renew-preview-plan'
-        plan.textContent = `+${item.months} month${item.months > 1 ? 's' : ''} · ${formatUsd(item.usd)}`
-        const date = document.createElement('span')
-        date.className = 'renew-preview-date'
-        date.textContent = `until about ${new Date(item.newExpiry).toLocaleDateString()}`
-        li.append(plan, date)
-        return li
-      }),
-    )
+  renderRenewSummary(m)
+}
+
+function legendNote(text) {
+  const li = document.createElement('li')
+  li.className = 'legend-note'
+  li.textContent = text
+  return li
+}
+
+/**
+ * The renew button names the chosen plan and price; the line above it
+ * estimates the new expiry (renewPreview). The estimate is hidden without a
+ * confirmed expiry.
+ */
+function renderRenewSummary(m) {
+  const plan = usablePlans(m).find(
+    (p) => `${p.months}m` === selectedRenewDuration,
+  )
+  setText(
+    'renew-cta-label',
+    plan
+      ? `Renew ${monthsLabel(plan.months)} · ${formatUsd(plan.usd)}`
+      : 'Renew subscription',
+  )
+  const preview = byId('renew-preview')
+  if (!preview) return
+  const item = renewPreview(m).find((p) => p.duration === selectedRenewDuration)
+  const date = item ? formatDate(item.newExpiry) : null
+  if (!date) {
+    preview.hidden = true
+    preview.replaceChildren()
+    return
+  }
+  const lead = document.createElement('span')
+  lead.textContent = 'New expiry about '
+  const strong = document.createElement('strong')
+  strong.textContent = date
+  preview.replaceChildren(lead, strong)
+  preview.hidden = false
+}
+
+// Bandwidth arc geometry, as drawn in index.html: M 20 82 A 60 60 0 0 1 140 82.
+const ARC_CENTER_X = 80
+const ARC_CENTER_Y = 82
+const ARC_RADIUS = 60
+
+/** The point on the bandwidth arc for a percentage (0 left end, 100 right end). */
+function arcPoint(pct) {
+  const p = Math.min(100, Math.max(0, Number.isFinite(pct) ? pct : 0))
+  const theta = Math.PI * (1 - p / 100)
+  return {
+    x: Math.round((ARC_CENTER_X + ARC_RADIUS * Math.cos(theta)) * 100) / 100,
+    y: Math.round((ARC_CENTER_Y - ARC_RADIUS * Math.sin(theta)) * 100) / 100,
   }
 }
 
-function renderQuota(m) {
-  const pace = monthPace(m)
-  setText('pace-text', paceText(pace))
-  const bwPace = byId('bandwidth-arc-pace')
-  if (bwPace) {
-    const limit =
-      m && m.bandwidth && typeof m.bandwidth.limitGb === 'number'
-        ? m.bandwidth.limitGb
-        : 100
-    const pacePct =
-      pace && typeof pace.projectedGb === 'number' && limit > 0
-        ? Math.min(100, Math.max(0, (pace.projectedGb / limit) * 100))
-        : 0
-    const paceOffset = Math.round((100 - pacePct) * 10) / 10
-    bwPace.setAttribute('stroke-dashoffset', String(paceOffset))
+function renderQuota(m, nowMs = Date.now()) {
+  const pace = monthPace(m, nowMs)
+  const projected =
+    pace && typeof pace.projectedGb === 'number' ? pace.projectedGb : null
+  const paceEl = byId('pace-text')
+  if (paceEl) {
+    paceEl.textContent = paceText(pace)
+    paceEl.setAttribute(
+      'data-projection',
+      projected === null ? 'false' : 'true',
+    )
+  }
+  const marker = byId('bandwidth-pace-marker')
+  if (marker) {
+    const point = arcPoint(
+      projected === null ? 0 : (projected / pace.limitGb) * 100,
+    )
+    marker.setAttribute('cx', String(point.x))
+    marker.setAttribute('cy', String(point.y))
+    marker.classList.toggle('is-visible', projected !== null)
+    marker.classList.toggle(
+      'is-over',
+      projected !== null && pace.exceedsLimit === true,
+    )
   }
   setText('val-resets', resetsText(m))
   const pipsEl = byId('reset-pips')

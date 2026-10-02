@@ -2050,6 +2050,8 @@ test('shipped SVG, PNG and font files carry no active content or metadata', () =
       [/<!(?:DOCTYPE|ENTITY)/i, 'a DTD or entity'],
       [/(?:\s|:)href\s*=\s*["'](?!#)/i, 'an external reference'],
       [/\bstyle\s*=/i, 'an inline style attribute (CSP)'],
+      [/<style[\s>]/i, 'a style element (CSP)'],
+      [/url\((?!\s*['"]?#)/i, 'an external url() reference'],
     ] as const) {
       assert.doesNotMatch(svg, pattern, `${file} must not contain ${what}`)
     }

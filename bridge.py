@@ -1421,6 +1421,23 @@ DASHBOARD_CSP = (
     "form-action 'none'"
 )
 
+# Content types of the files under web/; anything else is served as
+# application/octet-stream (never sniffed: X-Content-Type-Options: nosniff).
+STATIC_CONTENT_TYPES = {
+    ".html": "text/html",
+    ".css": "text/css",
+    ".js": "application/javascript",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
+    ".woff2": "font/woff2",
+    ".txt": "text/plain; charset=utf-8",
+}
+
+# No dashboard path contains a control character, and a NUL byte makes
+# os.path.realpath raise instead of answering.
+STATIC_PATH_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
 
 class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -1527,6 +1544,9 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             return
 
         path_only = self.path.partition('?')[0].partition('#')[0]
+        if STATIC_PATH_CONTROL_CHARS_RE.search(path_only):
+            self.send_error(400, "Invalid path")
+            return
         if path_only == "/api/status":
             from urllib.parse import urlparse, parse_qs
             query_params = parse_qs(urlparse(self.path).query)
@@ -1612,8 +1632,13 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
 
         web_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "web"))
         target_path = path_only.lstrip("/")
-        if not target_path or target_path == "":
+        if not target_path:
             target_path = "index.html"
+        elif target_path.endswith("/"):
+            # No directory listings, and "index.html/" would serve the page at
+            # a path where every relative asset URL breaks.
+            self.send_error(404, "File not found")
+            return
 
         safe_path = os.path.realpath(os.path.join(web_dir, target_path))
         if os.path.commonpath([web_dir, safe_path]) != web_dir:
@@ -1635,25 +1660,17 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
 
+            try:
+                with open(safe_path, "rb") as f:
+                    content = f.read()
+            except OSError:
+                self.send_error(404, "File not found")
+                return
+            extension = os.path.splitext(safe_path)[1].lower()
             self.send_response(200)
-            if safe_path.endswith(".html"):
-                self.send_header("Content-Type", "text/html")
-            elif safe_path.endswith(".css"):
-                self.send_header("Content-Type", "text/css")
-            elif safe_path.endswith(".js"):
-                self.send_header("Content-Type", "application/javascript")
-            elif safe_path.endswith(".svg"):
-                self.send_header("Content-Type", "image/svg+xml")
-            elif safe_path.endswith(".png"):
-                self.send_header("Content-Type", "image/png")
-            elif safe_path.endswith(".ico"):
-                self.send_header("Content-Type", "image/x-icon")
-            else:
-                self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Type", STATIC_CONTENT_TYPES.get(extension, "application/octet-stream"))
             self.end_headers()
-
-            with open(safe_path, "rb") as f:
-                self.wfile.write(f.read())
+            self.wfile.write(content)
         else:
             self.send_error(404, "File not found")
 

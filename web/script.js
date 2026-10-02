@@ -74,6 +74,9 @@ const NODE_PACKAGE_IDS = Object.freeze({
   eclair: 'eclair',
 })
 
+const VALID_TABS = Object.freeze(['overview', 'actions', 'verify'])
+const VALID_DURATIONS = Object.freeze(['1m', '3m', '6m', '12m'])
+
 let model = null
 let loadFailed = false
 let countdownTimer = null
@@ -82,7 +85,9 @@ let submittingIntent = false
 let localIntentFeedback = null
 let lastRenderedInvoice = null
 let selectedInvoiceKind = null
+let activeTab = 'overview'
 let selectedBuyDuration = '3m'
+let selectedRenewDuration = '3m'
 let selectedServerId = DEFAULT_SERVER_ID
 // Whether the operator picked selectedServerId. A picked region that drops
 // out of a refreshed list is never swapped for another: the selection is
@@ -585,7 +590,25 @@ function formatSats(sats) {
 function formatTime(iso) {
   if (!iso) return null
   const date = new Date(iso)
-  return Number.isNaN(date.getTime()) ? null : date.toLocaleString()
+  return Number.isNaN(date.getTime())
+    ? null
+    : date.toLocaleString(undefined, {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+      })
+}
+
+/** The day only, for estimates and reminders where the hour adds noise. */
+function formatDate(iso) {
+  if (!iso) return null
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime())
+    ? null
+    : date.toLocaleDateString(undefined, { dateStyle: 'medium' })
+}
+
+function monthsLabel(months) {
+  return `${months} month${months > 1 ? 's' : ''}`
 }
 
 function formatRemaining(ms) {
@@ -868,8 +891,8 @@ function nwcStatusView(m) {
   if (!nwc || !nwc.connected) {
     return {
       cls: 'neutral',
-      badge: 'Disabled',
-      note: 'Connect a wallet in Services → TunnelSats → Actions → Connect Wallet.',
+      badge: 'Off',
+      note: 'Optional: connect a wallet in Services → TunnelSats → Actions → Connect Wallet to renew automatically.',
     }
   }
   const rec =
@@ -884,29 +907,29 @@ function nwcStatusView(m) {
     return {
       cls: 'alert',
       badge: 'Reconnect needed',
-      note: 'NWC credentials are excluded from backups. Re-enter your NWC URI in Services → TunnelSats → Actions → Connect Wallet.',
+      note: 'Wallet credentials are not part of backups. Re-enter the NWC URI in Services → TunnelSats → Actions → Connect Wallet.',
     }
   }
   if (nwc.budgetWarning) {
     return {
       cls: 'alert',
       badge: 'Budget too low',
-      note: `${nwc.lastError ? `${nwc.lastError} ` : ''}Set your wallet budget to at least ${rec} (1.2× buffer) in Connect Wallet or accept the Pay Invoice task.`,
+      note: `${nwc.lastError ? `${nwc.lastError} ` : ''}Raise the wallet budget to at least ${rec} per renewal, or accept the Pay Invoice task.`,
     }
   }
   if (nwc.fallbackTaskRaised) {
     return {
       cls: 'alert',
       badge: 'Manual fallback',
-      note: `${nwc.lastError ? `${nwc.lastError} ` : ''}Accept the Pay Invoice task on your node or check Services → TunnelSats → Actions → Connect Wallet.`,
+      note: `${nwc.lastError ? `${nwc.lastError} ` : ''}Accept the Pay Invoice task on your node, or check Connect Wallet.`,
     }
   }
   const relay = nwc.relayHost || 'connected'
   const dur = nwc.resolvedDuration || '1m'
   return {
     cls: 'active',
-    badge: nwc.routeViaTor ? 'Enabled · Tor' : 'Enabled',
-    note: `Relay ${relay} (${dur} plan). Recommended 1.2× wallet budget: ${rec} per renewal (~${annual}/yr). Manage in Services → TunnelSats → Actions → Connect Wallet.`,
+    badge: nwc.routeViaTor ? 'On · Tor' : 'On',
+    note: `Relay ${relay} · ${dur} plan · wallet budget at least ${rec} per renewal (about ${annual} a year, 1.2× buffer).`,
   }
 }
 
@@ -1187,9 +1210,7 @@ function renewPreview(m, nowMs = Date.now()) {
   const end = expiryMs(m)
   if (end === null) return []
   const base = Math.max(end, nowMs)
-  const plans =
-    m && Array.isArray(m.plans) && m.plans.length ? m.plans : PLAN_PRICES_USD
-  return plans.map((plan) => {
+  return usablePlans(m).map((plan) => {
     const next = new Date(base)
     next.setUTCMonth(next.getUTCMonth() + plan.months)
     return {
@@ -1380,33 +1401,164 @@ function svgEl(tag, attrs) {
   return el
 }
 
+function usablePlans(m) {
+  return m &&
+    Array.isArray(m.plans) &&
+    m.plans.length &&
+    m.plans.every(
+      (p) => p && typeof p.usd === 'number' && typeof p.months === 'number',
+    )
+    ? m.plans
+    : PLAN_PRICES_USD
+}
+
+/**
+ * Fills a group of toggle buttons (plan cards, duration pills, server cards)
+ * and marks the selected one. render() runs on every poll (every 3 s while a
+ * payment is pending) and a detached button drops keyboard focus to <body>,
+ * so the buttons are rebuilt only when the options change (`key`) and the
+ * pressed state is updated in place. After a rebuild, focus returns to the
+ * button with the same value; if that option is gone (a withdrawn region), it
+ * moves to the selected button, else to the first one.
+ */
+function renderToggleGroup(group, key, buildItems, valueAttr, selectedValue) {
+  if (group.getAttribute('data-key') !== key) {
+    const active = document.activeElement
+    const focused =
+      active && group.contains(active) ? active.closest(`[${valueAttr}]`) : null
+    const focusedValue = focused ? focused.getAttribute(valueAttr) : null
+    group.replaceChildren(...buildItems())
+    group.setAttribute('data-key', key)
+    if (focusedValue !== null) {
+      const buttons = [...group.querySelectorAll(`[${valueAttr}]`)]
+      const withValue = (value) =>
+        buttons.find((button) => button.getAttribute(valueAttr) === value)
+      const target =
+        withValue(focusedValue) || withValue(selectedValue) || buttons[0]
+      if (target) target.focus({ preventScroll: true })
+    }
+  }
+  for (const button of group.querySelectorAll(`[${valueAttr}]`)) {
+    const on = button.getAttribute(valueAttr) === selectedValue
+    button.setAttribute('aria-pressed', on ? 'true' : 'false')
+    button.classList.toggle('is-selected', on)
+  }
+}
+
+/** What a plan button shows: rebuild the plan groups only when this changes. */
+function plansKey(plans) {
+  return JSON.stringify(
+    plans.map((plan) => [plan.months, plan.usd, plan.discountPct]),
+  )
+}
+
+function buildPlanCard(plan) {
+  const li = document.createElement('li')
+  const card = document.createElement('button')
+  card.setAttribute('type', 'button')
+  card.className = 'plan-card'
+  card.setAttribute('data-plan-duration', `${plan.months}m`)
+  const duration = document.createElement('span')
+  duration.className = 'plan-duration'
+  duration.textContent = monthsLabel(plan.months)
+  const price = document.createElement('span')
+  price.className = 'plan-price'
+  price.textContent = formatUsd(plan.usd)
+  const perMonth = document.createElement('span')
+  perMonth.className = 'plan-per-mo'
+  perMonth.textContent =
+    plan.discountPct > 0
+      ? `${formatUsd(plan.usd / plan.months)}/mo · save ${plan.discountPct}%`
+      : `${formatUsd(plan.usd)}/mo`
+  card.append(duration, price, perMonth)
+  li.append(card)
+  return li
+}
+
+function buildDurationPill(plan, valueAttr) {
+  const btn = document.createElement('button')
+  btn.setAttribute('type', 'button')
+  btn.className = 'duration-pill'
+  btn.setAttribute(valueAttr, `${plan.months}m`)
+  const durSpan = document.createElement('span')
+  durSpan.className = 'pill-dur'
+  durSpan.textContent = `${plan.months} mo`
+  const priceSpan = document.createElement('span')
+  priceSpan.className = 'pill-price'
+  priceSpan.textContent = formatUsd(plan.usd)
+  btn.append(durSpan, priceSpan)
+  if (plan.discountPct > 0) {
+    const badge = document.createElement('span')
+    badge.className = 'pill-save'
+    badge.textContent = `-${plan.discountPct}%`
+    btn.append(badge)
+  }
+  return btn
+}
+
 function renderPlans(m) {
   const list = byId('plan-list')
-  if (!list) return
-  const plans =
-    m && Array.isArray(m.plans) && m.plans.length ? m.plans : PLAN_PRICES_USD
-  const items = plans.map((plan) => {
-    const durationKey = `${plan.months}m`
-    const li = document.createElement('li')
-    li.className = 'plan-card'
-    li.setAttribute('data-plan-duration', durationKey)
-    li.classList.toggle('is-selected', durationKey === selectedBuyDuration)
-    const duration = document.createElement('span')
-    duration.className = 'plan-duration'
-    duration.textContent = `${plan.months} month${plan.months > 1 ? 's' : ''}`
-    const price = document.createElement('span')
-    price.className = 'plan-price'
-    price.textContent = formatUsd(plan.usd)
-    const perMonth = document.createElement('span')
-    perMonth.className = 'plan-per-mo'
-    perMonth.textContent =
-      plan.discountPct > 0
-        ? `${formatUsd(plan.usd / plan.months)}/mo · save ${plan.discountPct}%`
-        : `${formatUsd(plan.usd)}/mo`
-    li.append(duration, price, perMonth)
-    return li
-  })
-  list.replaceChildren(...items)
+  const plans = usablePlans(m)
+  if (list) {
+    renderToggleGroup(
+      list,
+      plansKey(plans),
+      () => plans.map(buildPlanCard),
+      'data-plan-duration',
+      selectedBuyDuration,
+    )
+  }
+  const chosen = plans.find((plan) => `${plan.months}m` === selectedBuyDuration)
+  setText(
+    'buy-cta-label',
+    chosen
+      ? `Buy ${monthsLabel(chosen.months)} · ${formatUsd(chosen.usd)}`
+      : 'Buy subscription',
+  )
+  renderRenewPills(m)
+}
+
+function renderRenewPills(m) {
+  const plans = usablePlans(m)
+  const renewGroup = byId('renew-pills')
+  if (renewGroup) {
+    renderToggleGroup(
+      renewGroup,
+      plansKey(plans),
+      () => plans.map((plan) => buildDurationPill(plan, 'data-renew-duration')),
+      'data-renew-duration',
+      selectedRenewDuration,
+    )
+  }
+  const manageGroup = byId('manage-duration-pills')
+  if (manageGroup) {
+    renderToggleGroup(
+      manageGroup,
+      plansKey(plans),
+      () => plans.map((plan) => buildDurationPill(plan, 'data-plan-duration')),
+      'data-plan-duration',
+      selectedBuyDuration,
+    )
+  }
+}
+
+function selectBuyDuration(dur) {
+  if (!VALID_DURATIONS.includes(dur)) return
+  selectedBuyDuration = dur
+  for (const id of ['buy-duration-select', 'manage-buy-duration-select']) {
+    const select = byId(id)
+    if (select) select.value = dur
+  }
+  renderPlans(model)
+}
+
+function selectRenewDuration(dur) {
+  if (!VALID_DURATIONS.includes(dur)) return
+  selectedRenewDuration = dur
+  const select = byId('renew-duration-select')
+  if (select) select.value = dur
+  renderRenewPills(model)
+  renderRenewSummary(model)
 }
 
 /**
@@ -1652,26 +1804,44 @@ function renderNwcStatus(m) {
 }
 
 function renderCountdown() {
-  const expiresAt =
-    model && model.subscription ? model.subscription.expiresAt : null
+  const sub = model && model.subscription
+  const expiresAt = sub ? sub.expiresAt : null
   const expiry = expiresAt ? new Date(expiresAt) : null
   const timer = byId('countdown')
+  const ringArc = byId('subscription-ring-arc')
   if (!expiry || Number.isNaN(expiry.getTime())) {
     setText('expiry-date', 'Not confirmed')
-    setText('countdown', 'Unknown')
+    setText('countdown', '—')
+    setText('countdown-sub', 'not confirmed')
     if (timer) timer.classList.remove('expired')
     setGauge('subscription-progress', 0, 100)
+    if (ringArc) {
+      ringArc.setAttribute('stroke-dashoffset', '100')
+      ringArc.classList.remove('is-alert', 'is-warn')
+      ringArc.classList.add('is-ok')
+    }
     return
   }
   const remaining = expiry.getTime() - Date.now()
-  setText('expiry-date', `Expires ${expiry.toLocaleString()}`)
-  setText('countdown', formatRemaining(remaining))
-  if (timer) timer.classList.toggle('expired', remaining <= 0)
-  setGauge(
-    'subscription-progress',
-    Math.min(100, Math.max(0, (remaining / PROGRESS_TERM_MS) * 100)),
-    100,
+  // An unlinked subscription only carries the configuration's own date hint.
+  const confirmed = sub.linked === true
+  setText(
+    'expiry-date',
+    `${formatTime(expiresAt)}${confirmed ? '' : ' (not confirmed)'}`,
   )
+  setText('countdown', formatRemaining(remaining))
+  setText('countdown-sub', remaining > 0 ? 'remaining' : '')
+  if (timer) timer.classList.toggle('expired', remaining <= 0)
+  const pct = Math.min(100, Math.max(0, (remaining / PROGRESS_TERM_MS) * 100))
+  setGauge('subscription-progress', pct, 100)
+  if (ringArc) {
+    const offset = Math.round((100 - pct) * 10) / 10
+    ringArc.setAttribute('stroke-dashoffset', String(offset))
+    const remDays = remaining / DAY_MS
+    ringArc.classList.toggle('is-alert', remDays <= 3)
+    ringArc.classList.toggle('is-warn', remDays > 3 && remDays <= 7)
+    ringArc.classList.toggle('is-ok', remDays > 7)
+  }
 }
 
 function formatPublicAddress(server, vpnPort) {
@@ -1681,17 +1851,28 @@ function formatPublicAddress(server, vpnPort) {
   return `${host}:${vpnPort}`
 }
 
+/**
+ * Text plus the same text as tooltip, for values the layout may truncate.
+ * copyText prefers the title, so it must always be the full value.
+ */
+function setTitled(id, text) {
+  const el = byId(id)
+  if (!el) return
+  el.textContent = text
+  el.title = text === 'Unknown' ? '' : text
+}
+
 function renderOverview(m) {
   const conn = m.connection || {}
-  setText('val-target-node', nodeLabel(m.targetNode))
+  setTitled('val-target-node', nodeLabel(m.targetNode))
   setText('val-handoff', handoffText(m))
-  setText('val-endpoint', formatPublicAddress(conn.server, conn.vpnPort))
+  setTitled('val-endpoint', formatPublicAddress(conn.server, conn.vpnPort))
   const pubkey = byId('val-pubkey')
   if (pubkey) {
     pubkey.textContent = conn.publicKey || 'Unknown'
     pubkey.title = conn.publicKey || ''
   }
-  setText('val-vpn-ip', conn.vpnIp || 'Unknown')
+  setTitled('val-vpn-ip', conn.vpnIp || 'Unknown')
   setText(
     'val-last-sync',
     formatTime(m.subscription && m.subscription.lastSync) || 'Not yet',
@@ -1719,6 +1900,19 @@ function renderOverview(m) {
   const usedValue = typeof used === 'number' ? used : 0
   setGauge('bandwidth-meter', usedValue, limit, levels)
   setGauge('modal-bandwidth-meter', usedValue, limit, levels)
+  const bwFill = byId('bandwidth-arc-fill')
+  if (bwFill) {
+    const usedPct =
+      limit > 0 ? Math.min(100, Math.max(0, (usedValue / limit) * 100)) : 0
+    const offset = Math.round((100 - usedPct) * 10) / 10
+    bwFill.setAttribute('stroke-dashoffset', String(offset))
+    bwFill.classList.toggle('is-alert', usedPct >= BANDWIDTH_CRITICAL_PCT)
+    bwFill.classList.toggle(
+      'is-warn',
+      usedPct >= BANDWIDTH_WARN_PCT && usedPct < BANDWIDTH_CRITICAL_PCT,
+    )
+    bwFill.classList.toggle('is-ok', usedPct < BANDWIDTH_WARN_PCT)
+  }
   renderCountdown()
   renderNwcStatus(m)
   renderTimeline(m)
@@ -1730,10 +1924,13 @@ function renderTimeline(m) {
   const chart = byId('timeline-chart')
   const legend = byId('timeline-legend')
   const timeline = subscriptionTimeline(m)
-  setText(
-    'timeline-phase',
-    timeline ? TIMELINE_PHASE_TEXT[timeline.phase] : 'Not confirmed',
-  )
+  const phase = byId('timeline-phase')
+  if (phase) {
+    phase.textContent = timeline
+      ? TIMELINE_PHASE_TEXT[timeline.phase]
+      : 'Not confirmed'
+    phase.setAttribute('data-phase', timeline ? timeline.phase : 'unknown')
+  }
   if (chart) {
     if (!timeline) {
       chart.replaceChildren()
@@ -1795,44 +1992,121 @@ function renderTimeline(m) {
   }
   if (legend) {
     const items = timeline
-      ? [
-          ...timeline.markers.map(
-            (marker) =>
-              `${marker.label}: ${formatTime(marker.at)}${marker.passed ? ' (passed)' : ''}`,
-          ),
-          `Expires: ${formatTime(timeline.expiresAt)}`,
-        ]
-      : ['The expiry is shown once TunnelSats confirms it.']
-    legend.replaceChildren(
-      ...items.map((text) => {
-        const li = document.createElement('li')
-        li.textContent = text
-        return li
-      }),
-    )
+      ? timeline.markers.map((marker) => {
+          const li = document.createElement('li')
+          li.className = 'legend-chip'
+          li.setAttribute('data-kind', marker.kind)
+          li.classList.toggle('is-passed', marker.passed)
+          li.textContent = `${marker.label} · ${formatDate(marker.at)}${marker.passed ? ' (passed)' : ''}`
+          return li
+        })
+      : [legendNote('The expiry is shown once TunnelSats confirms it.')]
+    legend.replaceChildren(...items)
   }
-  const preview = byId('renew-preview-list')
-  if (preview) {
-    preview.replaceChildren(
-      ...renewPreview(m).map((item) => {
-        const li = document.createElement('li')
-        li.className = 'renew-preview-item'
-        const plan = document.createElement('span')
-        plan.className = 'renew-preview-plan'
-        plan.textContent = `+${item.months} month${item.months > 1 ? 's' : ''} · ${formatUsd(item.usd)}`
-        const date = document.createElement('span')
-        date.className = 'renew-preview-date'
-        date.textContent = `until about ${new Date(item.newExpiry).toLocaleDateString()}`
-        li.append(plan, date)
-        return li
-      }),
-    )
+  renderRenewSummary(m)
+}
+
+function legendNote(text) {
+  const li = document.createElement('li')
+  li.className = 'legend-note'
+  li.textContent = text
+  return li
+}
+
+/**
+ * The renew button names the chosen plan and price; the line above it
+ * estimates the new expiry (renewPreview). The estimate is hidden without a
+ * confirmed expiry.
+ */
+function renderRenewSummary(m) {
+  const plan = usablePlans(m).find(
+    (p) => `${p.months}m` === selectedRenewDuration,
+  )
+  setText(
+    'renew-cta-label',
+    plan
+      ? `Renew ${monthsLabel(plan.months)} · ${formatUsd(plan.usd)}`
+      : 'Renew subscription',
+  )
+  const preview = byId('renew-preview')
+  if (!preview) return
+  const item = renewPreview(m).find((p) => p.duration === selectedRenewDuration)
+  const date = item ? formatDate(item.newExpiry) : null
+  if (!date) {
+    preview.hidden = true
+    preview.replaceChildren()
+    return
+  }
+  const lead = document.createElement('span')
+  lead.textContent = 'New expiry about '
+  const strong = document.createElement('strong')
+  strong.textContent = date
+  preview.replaceChildren(lead, strong)
+  preview.hidden = false
+}
+
+// Bandwidth arc geometry, as drawn in index.html: M 20 82 A 60 60 0 0 1 140 82.
+const ARC_CENTER_X = 80
+const ARC_CENTER_Y = 82
+const ARC_RADIUS = 60
+
+/** The point on the bandwidth arc for a percentage (0 left end, 100 right end). */
+function arcPoint(pct) {
+  const p = Math.min(100, Math.max(0, Number.isFinite(pct) ? pct : 0))
+  const theta = Math.PI * (1 - p / 100)
+  return {
+    x: Math.round((ARC_CENTER_X + ARC_RADIUS * Math.cos(theta)) * 100) / 100,
+    y: Math.round((ARC_CENTER_Y - ARC_RADIUS * Math.sin(theta)) * 100) / 100,
   }
 }
 
-function renderQuota(m) {
-  setText('pace-text', paceText(monthPace(m)))
+function renderQuota(m, nowMs = Date.now()) {
+  const pace = monthPace(m, nowMs)
+  const projected =
+    pace && typeof pace.projectedGb === 'number' ? pace.projectedGb : null
+  const paceEl = byId('pace-text')
+  if (paceEl) {
+    paceEl.textContent = paceText(pace)
+    paceEl.setAttribute(
+      'data-projection',
+      projected === null ? 'false' : 'true',
+    )
+  }
+  const marker = byId('bandwidth-pace-marker')
+  if (marker) {
+    const point = arcPoint(
+      projected === null ? 0 : (projected / pace.limitGb) * 100,
+    )
+    marker.setAttribute('cx', String(point.x))
+    marker.setAttribute('cy', String(point.y))
+    marker.classList.toggle('is-visible', projected !== null)
+    marker.classList.toggle(
+      'is-over',
+      projected !== null && pace.exceedsLimit === true,
+    )
+  }
   setText('val-resets', resetsText(m))
+  const pipsEl = byId('reset-pips')
+  if (pipsEl) {
+    const bw = (m && m.bandwidth) || {}
+    const maxResets =
+      typeof bw.maxResetsPerMonth === 'number' && bw.maxResetsPerMonth > 0
+        ? Math.min(10, bw.maxResetsPerMonth)
+        : 0
+    const usedResets =
+      typeof bw.resetsThisMonth === 'number' && bw.resetsThisMonth >= 0
+        ? bw.resetsThisMonth
+        : 0
+    const pips = []
+    for (let i = 0; i < maxResets; i++) {
+      const pip = document.createElement('span')
+      pip.className = 'reset-pip'
+      pip.classList.toggle('is-used', i < usedResets)
+      pip.setAttribute('aria-hidden', 'true')
+      pips.push(pip)
+    }
+    pipsEl.replaceChildren(...pips)
+  }
   const eligibility = resetEligibility(m)
   const el = byId('val-reset-eligibility')
   if (el) {
@@ -1905,15 +2179,40 @@ function renderFlows(m) {
   section.hidden = flows.length === 0
 }
 
+function buildServerPillItem(server) {
+  const li = document.createElement('li')
+  const button = document.createElement('button')
+  button.setAttribute('type', 'button')
+  button.className = 'server-card'
+  button.setAttribute('data-server-id', server.id)
+  const flag = document.createElement('span')
+  flag.className = 'server-flag'
+  flag.setAttribute('aria-hidden', 'true')
+  flag.textContent = server.flag || ''
+  const city = document.createElement('span')
+  city.className = 'server-city'
+  city.textContent = server.city || server.id
+  const country = document.createElement('span')
+  country.className = 'server-country'
+  country.textContent = server.country || ''
+  button.append(flag, city, country)
+  li.append(button)
+  return li
+}
+
 function renderServers() {
   const cards = byId('server-cards')
+  const manageCards = byId('manage-server-cards')
   const note = byId('server-cards-note')
   const statusNote = byId('server-status-note')
   const list = usableServers(serverList)
   if (!list.length) {
-    if (cards) {
-      cards.hidden = true
-      cards.replaceChildren()
+    for (const el of [cards, manageCards]) {
+      if (el) {
+        el.hidden = true
+        el.replaceChildren()
+        el.setAttribute('data-key', '')
+      }
     }
     if (note) {
       note.textContent = serversFailed
@@ -1935,34 +2234,20 @@ function renderServers() {
         : list[0].id
     }
   }
-  if (cards) {
-    cards.replaceChildren(
-      ...list.map((server) => {
-        const li = document.createElement('li')
-        const button = document.createElement('button')
-        button.setAttribute('type', 'button')
-        button.className = 'server-card'
-        button.setAttribute('data-server-id', server.id)
-        button.setAttribute(
-          'aria-pressed',
-          server.id === selectedServerId ? 'true' : 'false',
-        )
-        const flag = document.createElement('span')
-        flag.className = 'server-flag'
-        flag.setAttribute('aria-hidden', 'true')
-        flag.textContent = server.flag || ''
-        const city = document.createElement('span')
-        city.className = 'server-city'
-        city.textContent = server.city || server.id
-        const country = document.createElement('span')
-        country.className = 'server-country'
-        country.textContent = server.country || ''
-        button.append(flag, city, country)
-        li.append(button)
-        return li
-      }),
-    )
-    cards.hidden = false
+  const cardsKey = JSON.stringify(
+    list.map((server) => [server.id, server.flag, server.city, server.country]),
+  )
+  for (const el of [cards, manageCards]) {
+    if (el) {
+      renderToggleGroup(
+        el,
+        cardsKey,
+        () => list.map(buildServerPillItem),
+        'data-server-id',
+        selectedServerId,
+      )
+      el.hidden = false
+    }
   }
   const needsPick = !selectedServerId
   for (const id of ['buy-server-select', 'manage-buy-server-select']) {
@@ -2026,22 +2311,63 @@ function selectServer(id) {
   }
 }
 
+function switchTab(tab) {
+  if (!VALID_TABS.includes(tab)) return
+  activeTab = tab
+  renderTabs(model)
+}
+
+function renderTabs(m) {
+  for (const tab of VALID_TABS) {
+    const btn = byId(`tab-btn-${tab}`)
+    if (btn) {
+      const active = tab === activeTab
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false')
+      btn.classList.toggle('is-active', active)
+    }
+  }
+  const setup = byId('view-setup')
+  const overview = byId('view-overview')
+  const manage = byId('manage')
+  const verify = byId('verify-section')
+  const loading = byId('view-loading')
+  // Before the first answer the error banner (on failure) or this line is
+  // all there is: guessing a view would offer Buy to an existing customer.
+  if (loading)
+    loading.hidden = Boolean(m) || loadFailed || activeTab !== 'overview'
+  if (activeTab === 'overview') {
+    if (setup) setup.hidden = !m || Boolean(m.configured)
+    if (overview) overview.hidden = !m || !m.configured
+    if (manage) manage.hidden = true
+    if (verify) verify.hidden = true
+  } else if (activeTab === 'actions') {
+    if (setup) setup.hidden = true
+    if (overview) overview.hidden = true
+    if (manage) manage.hidden = false
+    if (verify) verify.hidden = true
+  } else if (activeTab === 'verify') {
+    if (setup) setup.hidden = true
+    if (overview) overview.hidden = true
+    if (manage) manage.hidden = true
+    if (verify) verify.hidden = false
+  }
+}
+
 function render() {
   renderBadge()
   const error = byId('load-error')
   if (error) {
     error.hidden = !loadFailed
-    error.textContent = loadFailed
-      ? 'The TunnelSats service did not answer. The values below may be out of date; retrying.'
-      : ''
+    error.textContent = !loadFailed
+      ? ''
+      : model
+        ? 'The TunnelSats service did not answer. The values below may be out of date; retrying.'
+        : 'The TunnelSats service did not answer; retrying.'
   }
   renderIntentFeedback(model)
   renderIntentControls(model)
+  renderTabs(model)
   if (!model) return
-  const setup = byId('view-setup')
-  const overview = byId('view-overview')
-  if (setup) setup.hidden = model.configured
-  if (overview) overview.hidden = !model.configured
   setText(
     'attach-command',
     `start-cli package attach ${nodePackageId(model.targetNode)}`,
@@ -2219,14 +2545,16 @@ async function submitIntent(actionKey) {
       kind: 'buy',
       serverId,
       duration:
-        (durationSelect && durationSelect.value) ||
-        (manage ? '3m' : selectedBuyDuration || '3m'),
+        (durationSelect && durationSelect.value) || selectedBuyDuration || '3m',
     }
   } else if (actionKey === 'renew') {
     const durationSelect = byId('renew-duration-select')
     payload = {
       kind: 'renew',
-      duration: (durationSelect && durationSelect.value) || '3m',
+      duration:
+        (durationSelect && durationSelect.value) ||
+        selectedRenewDuration ||
+        '3m',
     }
   } else if (actionKey === 'reset') {
     payload = { kind: 'reset' }
@@ -2317,6 +2645,16 @@ function bindEvents() {
   document.addEventListener('click', (event) => {
     const target = event.target
     if (!target || typeof target.closest !== 'function') return
+    const tabBtn = target.closest('[data-tab-target]')
+    if (tabBtn) {
+      const tab = tabBtn.getAttribute('data-tab-target')
+      switchTab(tab)
+      // A link inside a panel is hidden with that panel: move focus to the
+      // selected tab instead of letting it fall back to <body>.
+      const selectedTab = byId(`tab-btn-${tab}`)
+      if (selectedTab && selectedTab !== tabBtn) selectedTab.focus()
+      return
+    }
     const opener = target.closest('[data-open-dialog]')
     if (opener) {
       const dialog = byId(opener.getAttribute('data-open-dialog'))
@@ -2355,13 +2693,12 @@ function bindEvents() {
     }
     const planCard = target.closest('[data-plan-duration]')
     if (planCard) {
-      const dur = planCard.getAttribute('data-plan-duration')
-      if (dur) {
-        selectedBuyDuration = dur
-        const select = byId('buy-duration-select')
-        if (select) select.value = dur
-        renderPlans(model)
-      }
+      selectBuyDuration(planCard.getAttribute('data-plan-duration'))
+      return
+    }
+    const renewPill = target.closest('[data-renew-duration]')
+    if (renewPill) {
+      selectRenewDuration(renewPill.getAttribute('data-renew-duration'))
       return
     }
     // Light dismiss: .app-modal fills the viewport around .modal-dialog-inner,
@@ -2373,12 +2710,19 @@ function bindEvents() {
 
   document.addEventListener('change', (event) => {
     const target = event.target
+    if (!target) return
     if (
-      target &&
-      (target.id === 'buy-server-select' ||
-        target.id === 'manage-buy-server-select')
+      target.id === 'buy-server-select' ||
+      target.id === 'manage-buy-server-select'
     ) {
       selectServer(target.value)
+    } else if (
+      target.id === 'buy-duration-select' ||
+      target.id === 'manage-buy-duration-select'
+    ) {
+      selectBuyDuration(target.value)
+    } else if (target.id === 'renew-duration-select') {
+      selectRenewDuration(target.value)
     }
   })
 

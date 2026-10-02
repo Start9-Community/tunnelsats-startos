@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import vm from 'node:vm'
 
@@ -34,7 +34,13 @@ class FakeClassList {
   }
 }
 
+interface FakeDocument {
+  activeElement: FakeElement | null
+  body: FakeElement
+}
+
 class FakeElement {
+  id = ''
   textContent = ''
   className = ''
   title = ''
@@ -45,18 +51,53 @@ class FakeElement {
   classList = new FakeClassList()
   children: FakeElement[] = []
   attributes: Record<string, string> = {}
+  parent: FakeElement | null = null
+  ownerDocument: FakeDocument | null = null
   constructor(public tagName = 'DIV') {}
   append(...nodes: FakeElement[]) {
+    for (const node of nodes) node.parent = this
     this.children.push(...nodes)
   }
   replaceChildren(...nodes: FakeElement[]) {
+    const doc = this.ownerDocument
+    const focused = doc?.activeElement ?? null
+    const hadFocus = focused !== this && this.contains(focused)
+    for (const child of this.children) child.parent = null
+    for (const node of nodes) node.parent = this
     this.children = nodes
+    // Like a browser: a focused element that leaves the page drops focus to <body>.
+    if (doc && hadFocus && !this.contains(focused)) doc.activeElement = doc.body
   }
   setAttribute(name: string, value: string) {
     this.attributes[name] = value
   }
   getAttribute(name: string) {
     return this.attributes[name] ?? null
+  }
+  contains(node: FakeElement | null): boolean {
+    for (let n = node; n; n = n.parent) if (n === this) return true
+    return false
+  }
+  /** The selector forms the script uses: `[attribute]` and a tag name. */
+  matches(selector: string): boolean {
+    const attribute = /^\[([\w-]+)\]$/.exec(selector)
+    if (attribute) return attribute[1] in this.attributes
+    return this.tagName === selector.toUpperCase()
+  }
+  closest(selector: string): FakeElement | null {
+    for (let n: FakeElement | null = this; n; n = n.parent) {
+      if (n.matches(selector)) return n
+    }
+    return null
+  }
+  querySelectorAll(selector: string): FakeElement[] {
+    return this.children.flatMap((child) => [
+      ...(child.matches(selector) ? [child] : []),
+      ...child.querySelectorAll(selector),
+    ])
+  }
+  focus() {
+    if (this.ownerDocument) this.ownerDocument.activeElement = this
   }
   addEventListener() {}
   remove() {}
@@ -65,10 +106,13 @@ class FakeElement {
 
 interface Harness {
   context: vm.Context
+  doc: FakeDocument
   storage: Map<string, string>
   requests: { url: string; init: Json | undefined }[]
   elements: Map<string, FakeElement>
   el: (id: string) => FakeElement
+  /** Runs the script's own document listeners, as a browser event would. */
+  dispatch: (type: string, target: FakeElement, init?: Json) => void
   run: <T = any>(code: string) => T
   settle: () => Promise<void>
 }
@@ -86,10 +130,19 @@ function load(
   const requests: { url: string; init: Json | undefined }[] = []
   const storage = new Map<string, string>(Object.entries(stored))
   const elements = new Map<string, FakeElement>()
+  const listeners = new Map<string, ((event: Json) => void)[]>()
+  const body = new FakeElement('BODY')
+  const doc: FakeDocument = { activeElement: body, body }
+  const own = (element: FakeElement) => {
+    element.ownerDocument = doc
+    return element
+  }
+  own(body)
   const el = (id: string) => {
     let element = elements.get(id)
     if (!element) {
-      element = new FakeElement()
+      element = own(new FakeElement())
+      element.id = id
       elements.set(id, element)
     }
     return element
@@ -98,17 +151,18 @@ function load(
   csrfMeta.setAttribute('content', 'csrf-test-token-123')
   const context = vm.createContext({
     console: { log() {}, warn() {}, error() {}, info() {} },
-    document: {
+    document: Object.assign(doc, {
       hidden: false,
       getElementById: el,
-      createElement: (tag: string) => new FakeElement(tag.toUpperCase()),
+      createElement: (tag: string) => own(new FakeElement(tag.toUpperCase())),
       createElementNS: (_ns: string, tag: string) =>
-        new FakeElement(tag.toUpperCase()),
+        own(new FakeElement(tag.toUpperCase())),
       querySelector: (selector: string) =>
         selector === 'meta[name="csrf-token"]' ? csrfMeta : null,
-      addEventListener() {},
-      body: new FakeElement('BODY'),
-    },
+      addEventListener: (type: string, handler: (event: Json) => void) => {
+        listeners.set(type, [...(listeners.get(type) ?? []), handler])
+      },
+    }),
     window: { isSecureContext: false },
     navigator: {},
     localStorage: {
@@ -152,14 +206,23 @@ function load(
   vm.runInContext(SCRIPT, context, { filename: 'script.js' })
   return {
     context,
+    doc,
     storage,
     requests,
     elements,
     el,
+    dispatch: (type: string, target: FakeElement, init: Json = {}) => {
+      for (const handler of listeners.get(type) ?? []) {
+        handler({ type, target, preventDefault() {}, ...init })
+      }
+    },
     run: (code: string) => {
       const value = vm.runInContext(code, context)
+      // parent and ownerDocument point back up the tree: copy children only.
+      const down = (key: string, v: unknown) =>
+        key === 'parent' || key === 'ownerDocument' ? undefined : v
       return value && typeof value === 'object'
-        ? JSON.parse(JSON.stringify(value))
+        ? JSON.parse(JSON.stringify(value, down))
         : value
     },
     settle: () => new Promise((resolve) => setImmediate(resolve)),
@@ -315,6 +378,51 @@ test('a failed load keeps the last view and says so', async () => {
   assert.equal(h.el('status-text').textContent, 'Status unavailable')
 })
 
+test('until the first answer, Overview offers neither Buy nor a stale overview', async () => {
+  const html = readFileSync(join(__dirname, '..', 'web', 'index.html'), 'utf8')
+  // Before the script runs, only the loading line is visible.
+  assert.match(html, /<section\s+id="view-setup"[^>]*\shidden\s*>/)
+  assert.match(html, /<section id="view-overview"[^>]*\shidden>/)
+  assert.doesNotMatch(html, /<p id="view-loading"[^>]*\shidden/)
+
+  const routes: Record<string, { status: number; body: Json }> = {
+    '/api/dashboard': { status: 503, body: {} },
+  }
+  const h = load(null, 200, undefined, routes)
+  const views = () =>
+    ['view-loading', 'view-setup', 'view-overview'].map((id) => h.el(id).hidden)
+  // init() has rendered; the first request has not been answered.
+  assert.deepEqual(views(), [false, true, true])
+
+  await settleAll(h)
+  assert.deepEqual(views(), [true, true, true])
+  // Nothing is shown below the banner, so it does not mention old values.
+  assert.equal(
+    h.el('load-error').textContent,
+    'The TunnelSats service did not answer; retrying.',
+  )
+  // However the operator gets back to Overview, it is the same state, even
+  // if a view was left visible by an earlier render.
+  h.run(`switchTab('actions')`)
+  h.el('view-setup').hidden = false
+  h.run(`switchTab('overview')`)
+  assert.deepEqual(views(), [true, true, true])
+
+  routes['/api/dashboard'] = { status: 200, body: model() }
+  await vm.runInContext('refresh()', h.context)
+  assert.deepEqual(views(), [true, true, false])
+  assert.equal(h.el('load-error').hidden, true)
+
+  // Once values are shown, a failed poll keeps them and says they may be old.
+  routes['/api/dashboard'] = { status: 503, body: {} }
+  await vm.runInContext('refresh()', h.context)
+  assert.deepEqual(views(), [true, true, false])
+  assert.match(
+    h.el('load-error').textContent,
+    /values below may be out of date/,
+  )
+})
+
 test('read-model strings are rendered as text, never parsed', async () => {
   const hostile = '<img src=x onerror=alert(1)>'
   const h = load(
@@ -356,8 +464,9 @@ test('plan prices are the backend USD prices, rendered for all four plans', () =
   for (const p of plans) {
     assert.equal(p.usd, Math.round(3 * p.months * (100 - p.discountPct)) / 100)
   }
-  const cards = h.el('plan-list').children
+  const cards = h.el('plan-list').children.map((li) => li.children[0])
   assert.equal(cards.length, 4)
+  assert.ok(cards.every((c) => c.tagName === 'BUTTON'))
   assert.deepEqual(
     cards.map((c) => c.children[1].textContent),
     ['$3.00', '$8.55', '$16.20', '$28.80'],
@@ -1619,6 +1728,7 @@ test('the overview renders native gauges, the timeline and the quota', async () 
   )
   assert.match(h.el('pace-text').textContent, /GB/)
   assert.equal(h.el('timeline-phase').textContent, 'On track')
+  assert.equal(h.el('timeline-phase').getAttribute('data-phase'), 'ok')
   const svg = h.el('timeline-chart').children[0]
   assert.equal(svg.tagName, 'SVG')
   assert.equal(svg.attributes['aria-hidden'], 'true')
@@ -1626,8 +1736,24 @@ test('the overview renders native gauges, the timeline and the quota', async () 
     svg.children.every((child) => !('style' in child.attributes)),
     'the timeline uses SVG attributes, not inline styles',
   )
-  assert.equal(h.el('timeline-legend').children.length, 3)
-  assert.equal(h.el('renew-preview-list').children.length, 4)
+  const legend = h.el('timeline-legend').children
+  assert.deepEqual(
+    legend.map((chip) => chip.getAttribute('data-kind')),
+    ['7d', '3d'],
+  )
+  assert.ok(legend.every((chip) => chip.className === 'legend-chip'))
+  assert.match(legend[0].textContent, /^7-day reminder · \S/)
+  // One estimate for the selected plan, and a button that names it.
+  const preview = h.el('renew-preview')
+  assert.equal(preview.hidden, false)
+  assert.equal(preview.children[0].textContent, 'New expiry about ')
+  assert.equal(
+    preview.children[1].textContent,
+    h.run(
+      `formatDate(renewPreview(model).find((p) => p.duration === '3m').newExpiry)`,
+    ),
+  )
+  assert.equal(h.el('renew-cta-label').textContent, 'Renew 3 months · $8.55')
 })
 
 test('index.html labels the reachability check as inbound only and uses native gauges', () => {
@@ -1643,4 +1769,614 @@ test('index.html labels the reachability check as inbound only and uses native g
     assert.ok(html.includes(command), `privacy commands include ${command}`)
   }
   assert.doesNotMatch(html, /\sstyle\s*=/i)
+})
+
+test('every meter and progress bar in index.html has an accessible name', () => {
+  // The SVG gauges are aria-hidden: these elements are what a screen reader reads.
+  const html = readFileSync(join(__dirname, '..', 'web', 'index.html'), 'utf8')
+  const gauges = [...html.matchAll(/<(meter|progress)\b([^>]*)>/g)]
+  assert.equal(gauges.length, 3)
+  for (const [, tag, attributes] of gauges) {
+    const id = /\sid="([^"]+)"/.exec(attributes)?.[1]
+    const label = /\saria-label="([^"]*)"/.exec(attributes)?.[1] ?? ''
+    assert.ok(label.trim().length > 0, `<${tag} id="${id}"> has no aria-label`)
+  }
+})
+
+test('command deck segmented navigation switches between Overview, Actions & Plans, and Verify & CLI while preserving context emphasis', async () => {
+  // Unconfigured customer: Overview tab emphasizes Setup (Server Region + Buy)
+  const hNew = load(
+    model({
+      configured: false,
+      status: 'unconfigured',
+      connection: {},
+      handoff: null,
+    }),
+  )
+  await settleAll(hNew)
+  assert.equal(hNew.el('view-setup').hidden, false)
+  assert.equal(hNew.el('view-overview').hidden, true)
+  assert.equal(hNew.el('manage').hidden, true)
+  assert.equal(hNew.el('verify-section').hidden, true)
+  assert.equal(hNew.el('tab-btn-overview').getAttribute('aria-pressed'), 'true')
+  assert.equal(hNew.el('tab-btn-actions').getAttribute('aria-pressed'), 'false')
+  assert.equal(hNew.el('tab-btn-verify').getAttribute('aria-pressed'), 'false')
+
+  // Configured customer: Overview tab emphasizes Overview (Topology + Renew)
+  const hExisting = load(model({ configured: true }))
+  await settleAll(hExisting)
+  assert.equal(hExisting.el('view-setup').hidden, true)
+  assert.equal(hExisting.el('view-overview').hidden, false)
+  assert.equal(hExisting.el('manage').hidden, true)
+  assert.equal(hExisting.el('verify-section').hidden, true)
+
+  // Switch to Actions & Plans tab
+  hExisting.run(`switchTab('actions')`)
+  assert.equal(hExisting.el('view-overview').hidden, true)
+  assert.equal(hExisting.el('manage').hidden, false)
+  assert.equal(hExisting.el('verify-section').hidden, true)
+  assert.equal(
+    hExisting.el('tab-btn-actions').getAttribute('aria-pressed'),
+    'true',
+  )
+  assert.equal(
+    hExisting.el('tab-btn-overview').getAttribute('aria-pressed'),
+    'false',
+  )
+
+  // Switch to Verify & CLI tab
+  hExisting.run(`switchTab('verify')`)
+  assert.equal(hExisting.el('view-overview').hidden, true)
+  assert.equal(hExisting.el('manage').hidden, true)
+  assert.equal(hExisting.el('verify-section').hidden, false)
+  assert.equal(
+    hExisting.el('tab-btn-verify').getAttribute('aria-pressed'),
+    'true',
+  )
+
+  // Unknown tab names are ignored
+  hExisting.run(`switchTab('unknown-tab')`)
+  assert.equal(
+    hExisting.el('tab-btn-verify').getAttribute('aria-pressed'),
+    'true',
+  )
+})
+
+test('duration pills for Buy and Renew sync with select elements and drive submitIntent', async () => {
+  const h = load(model({ configured: true }), 200, undefined, {
+    '/api/servers': { status: 200, body: SERVERS },
+  })
+  await settleAll(h)
+
+  // Renew duration pills default to 3m and update on selectRenewDuration
+  const renewPills = h.el('renew-pills').children
+  assert.equal(renewPills.length, 4)
+  assert.deepEqual(
+    renewPills.map((b) => b.getAttribute('data-renew-duration')),
+    ['1m', '3m', '6m', '12m'],
+  )
+  assert.deepEqual(
+    renewPills.map((b) => b.getAttribute('aria-pressed')),
+    ['false', 'true', 'false', 'false'],
+  )
+
+  h.run(`selectRenewDuration('12m')`)
+  assert.equal(h.el('renew-duration-select').value, '12m')
+  assert.deepEqual(
+    h.el('renew-pills').children.map((b) => b.getAttribute('aria-pressed')),
+    ['false', 'false', 'false', 'true'],
+  )
+  assert.equal(h.el('renew-cta-label').textContent, 'Renew 12 months · $28.80')
+  assert.equal(
+    h.el('renew-preview').children[1].textContent,
+    h.run(
+      `formatDate(renewPreview(model).find((p) => p.duration === '12m').newExpiry)`,
+    ),
+  )
+
+  // Invalid durations are ignored
+  h.run(`selectRenewDuration('99m')`)
+  assert.equal(h.el('renew-duration-select').value, '12m')
+
+  await vm.runInContext(`submitIntent('renew')`, h.context)
+  await settleAll(h)
+  const renewReq = h.requests.find((r) => r.url === '/api/intents')
+  assert.deepEqual(JSON.parse(renewReq!.init!.body), {
+    kind: 'renew',
+    duration: '12m',
+  })
+
+  // Buy duration pills update both buy-duration-select and manage-buy-duration-select
+  h.run(`selectBuyDuration('6m')`)
+  assert.equal(h.el('buy-duration-select').value, '6m')
+  assert.equal(h.el('manage-buy-duration-select').value, '6m')
+  assert.equal(h.el('buy-cta-label').textContent, 'Buy 6 months · $16.20')
+  assert.equal(
+    h.el('plan-list').children[2].children[0].getAttribute('aria-pressed'),
+    'true',
+  )
+})
+
+/** The button in a toggle group that carries `value`. */
+const toggle = (h: Harness, group: string, attr: string, value: string) => {
+  const button = h
+    .el(group)
+    .querySelectorAll(`[${attr}]`)
+    .find((b) => b.getAttribute(attr) === value)
+  assert.ok(button, `${group} has no ${attr}=${value}`)
+  return button
+}
+
+test('polls and selections keep keyboard focus on pills, plan cards and server cards', async () => {
+  const h = load(model({ configured: true }), 200, undefined, {
+    '/api/servers': { status: 200, body: SERVERS },
+  })
+  await settleAll(h)
+  // [group, value attribute, value to pick, the script's selection variable]
+  const groups = [
+    ['renew-pills', 'data-renew-duration', '12m', 'selectedRenewDuration'],
+    ['plan-list', 'data-plan-duration', '6m', 'selectedBuyDuration'],
+    [
+      'manage-duration-pills',
+      'data-plan-duration',
+      '1m',
+      'selectedBuyDuration',
+    ],
+    ['server-cards', 'data-server-id', 'us-east', 'selectedServerId'],
+    ['manage-server-cards', 'data-server-id', 'eu-de', 'selectedServerId'],
+  ]
+  for (const [group, attr, value, selection] of groups) {
+    const button = toggle(h, group, attr, value)
+    assert.equal(
+      button.tagName,
+      'BUTTON',
+      `${group}: Enter and Space must work`,
+    )
+    button.focus()
+    // Every poll runs render(); while a payment is pending that is every 3 s.
+    h.run('render(); renderServers()')
+    assert.equal(toggle(h, group, attr, value), button, `${group}: rebuilt`)
+    assert.equal(h.doc.activeElement, button, `${group}: a poll took focus`)
+    h.dispatch('click', button)
+    assert.equal(h.run(selection), value)
+    assert.equal(h.doc.activeElement, button, `${group}: a pick took focus`)
+    assert.equal(button.getAttribute('aria-pressed'), 'true')
+    assert.ok(button.classList.contains('is-selected'))
+  }
+})
+
+test('a rebuilt plan group gives focus back to the same duration', async () => {
+  const h = load(model({ configured: true }))
+  await settleAll(h)
+  const before = toggle(h, 'plan-list', 'data-plan-duration', '6m')
+  before.focus()
+  // New prices from the backend change what the buttons show.
+  h.run(
+    'model.plans = PLAN_PRICES_USD.map((p) => ({ ...p, usd: p.usd + 1 })); render()',
+  )
+  const after = toggle(h, 'plan-list', 'data-plan-duration', '6m')
+  assert.notEqual(after, before)
+  assert.equal(after.children[1].textContent, '$17.20')
+  assert.equal(h.doc.activeElement, after)
+})
+
+test('a renamed region rebuilds its card and keeps focus on it', async () => {
+  const [germany, usa] = SERVERS.servers
+  const routes: Record<string, { status: number; body: Json }> = {
+    '/api/servers': { status: 200, body: { servers: [germany, usa] } },
+  }
+  const h = load(model({ configured: false }), 200, undefined, routes)
+  await settleAll(h)
+  const before = toggle(h, 'server-cards', 'data-server-id', 'us-east')
+  before.focus()
+  // Same ids, new city: the card has to show the new name.
+  routes['/api/servers'] = {
+    status: 200,
+    body: { servers: [germany, { ...usa, city: 'Reston' }] },
+  }
+  h.run('loadServers()')
+  await settleAll(h)
+  const after = toggle(h, 'server-cards', 'data-server-id', 'us-east')
+  assert.notEqual(after, before)
+  assert.equal(after.children[1].textContent, 'Reston')
+  assert.equal(h.doc.activeElement, after)
+})
+
+test('a withdrawn focused region leaves focus on the selected region, else the first', async () => {
+  const [germany, usa] = SERVERS.servers
+  const brazil = {
+    ...usa,
+    id: 'sa-br',
+    country: 'Brazil',
+    city: 'Sao Paulo',
+    flag: '🇧🇷',
+  }
+  const routes: Record<string, { status: number; body: Json }> = {
+    '/api/servers': { status: 200, body: { servers: [usa, germany, brazil] } },
+  }
+  const h = load(model({ configured: false }), 200, undefined, routes)
+  await settleAll(h)
+  const card = (id: string) => toggle(h, 'server-cards', 'data-server-id', id)
+  const offer = async (servers: Json[]) => {
+    routes['/api/servers'] = { status: 200, body: { servers } }
+    h.run('loadServers()')
+    await settleAll(h)
+  }
+
+  // Focused but not picked: focus moves to the selected (default) region,
+  // not to the first card.
+  assert.equal(h.run('selectedServerId'), 'eu-de')
+  card('sa-br').focus()
+  await offer([usa, germany])
+  assert.equal(h.doc.activeElement, card('eu-de'))
+
+  // Picked, then withdrawn: nothing is selected any more, so focus moves to
+  // the first card.
+  await offer([usa, germany, brazil])
+  const picked = card('sa-br')
+  picked.focus()
+  h.dispatch('click', picked)
+  assert.equal(h.run('selectedServerId'), 'sa-br')
+  await offer([usa, germany])
+  assert.equal(h.run('selectedServerId'), '')
+  assert.equal(h.doc.activeElement, card('us-east'))
+  assert.deepEqual(
+    h
+      .el('server-cards')
+      .children.map((li) => li.children[0].attributes['aria-pressed']),
+    ['false', 'false'],
+  )
+})
+
+test('a link to another tab moves focus to that tab instead of <body>', async () => {
+  const h = load(model({ configured: true }))
+  await settleAll(h)
+  for (const tab of ['overview', 'actions', 'verify']) {
+    h.el(`tab-btn-${tab}`).setAttribute('data-tab-target', tab)
+  }
+  // "Verify on the node" sits in the Overview panel, which the switch hides.
+  const link = vm.runInContext(
+    "document.createElement('button')",
+    h.context,
+  ) as FakeElement
+  link.setAttribute('data-tab-target', 'verify')
+  h.el('view-overview').append(link)
+  link.focus()
+  h.dispatch('click', link)
+  assert.equal(h.run('activeTab'), 'verify')
+  assert.equal(h.el('view-overview').hidden, true)
+  assert.equal(h.doc.activeElement, h.el('tab-btn-verify'))
+
+  const actions = h.el('tab-btn-actions')
+  actions.focus()
+  h.dispatch('click', actions)
+  assert.equal(h.run('activeTab'), 'actions')
+  assert.equal(h.doc.activeElement, actions)
+})
+
+test('the fallback duration and region selects drive the same selection', async () => {
+  const h = load(model({ configured: true }), 200, undefined, {
+    '/api/servers': { status: 200, body: SERVERS },
+  })
+  await settleAll(h)
+  const change = (id: string, value: string) => {
+    const select = h.el(id)
+    select.value = value
+    h.dispatch('change', select)
+  }
+  change('renew-duration-select', '1m')
+  assert.equal(h.run('selectedRenewDuration'), '1m')
+  change('manage-buy-duration-select', '12m')
+  assert.equal(h.run('selectedBuyDuration'), '12m')
+  assert.equal(h.el('buy-duration-select').value, '12m')
+  change('buy-server-select', 'us-east')
+  assert.equal(h.run('selectedServerId'), 'us-east')
+  assert.equal(
+    toggle(h, 'manage-server-cards', 'data-server-id', 'us-east').getAttribute(
+      'aria-pressed',
+    ),
+    'true',
+  )
+})
+
+test('command deck renders SVG ring/arc gauges and visual reset pips without inline styles', async () => {
+  const h = load(
+    model({
+      bandwidth: {
+        usedGb: 75,
+        limitGb: 150,
+        resetsThisMonth: 1,
+        maxResetsPerMonth: 2,
+        resetThresholdPct: 70,
+      },
+    }),
+  )
+  await settleAll(h)
+
+  const ringArc = h.el('subscription-ring-arc')
+  const ringOffset = Number(ringArc.getAttribute('stroke-dashoffset'))
+  assert.ok(ringOffset >= 30 && ringOffset <= 40)
+  assert.equal('style' in ringArc.attributes, false)
+
+  const bwFill = h.el('bandwidth-arc-fill')
+  assert.equal(bwFill.getAttribute('stroke-dashoffset'), '50')
+  assert.equal('style' in bwFill.attributes, false)
+
+  const pips = h.el('reset-pips').children
+  assert.equal(pips.length, 2)
+  assert.equal(pips[0].classList.contains('is-used'), true)
+  assert.equal(pips[1].classList.contains('is-used'), false)
+})
+
+const WEB_DIR = join(__dirname, '..', 'web')
+
+/** Every file under web/, as POSIX paths relative to it. */
+function webFiles(prefix = ''): string[] {
+  return readdirSync(join(WEB_DIR, prefix), { withFileTypes: true })
+    .flatMap((entry) =>
+      entry.isDirectory()
+        ? webFiles(`${prefix}${entry.name}/`)
+        : [`${prefix}${entry.name}`],
+    )
+    .sort()
+}
+
+test('every asset the dashboard references ships, and nothing unreferenced ships', () => {
+  const html = readFileSync(join(WEB_DIR, 'index.html'), 'utf8')
+  const css = readFileSync(join(WEB_DIR, 'style.css'), 'utf8')
+  const isLocal = (ref: string) => !/^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i.test(ref)
+  const referenced = new Set(
+    [
+      ...[...html.matchAll(/\s(?:src|href)="([^"]+)"/g)].map((m) => m[1]),
+      ...[...css.matchAll(/url\(\s*['"]?([^'")]+)['"]?\s*\)/g)].map(
+        (m) => m[1],
+      ),
+    ].filter(isLocal),
+  )
+  for (const ref of referenced) {
+    assert.ok(
+      existsSync(join(WEB_DIR, ref)),
+      `${ref} is referenced but missing`,
+    )
+  }
+  // The font licences ship next to the fonts without a link from the page.
+  const unreferenced = webFiles().filter(
+    (file) =>
+      file !== 'index.html' &&
+      !referenced.has(file) &&
+      !/^fonts\/LICENSE-[A-Za-z]+\.txt$/.test(file),
+  )
+  assert.deepEqual(unreferenced, [])
+})
+
+test('shipped SVG, PNG and font files carry no active content or metadata', () => {
+  const files = webFiles()
+  const svgs = files.filter((file) => file.endsWith('.svg'))
+  assert.ok(svgs.length > 0)
+  for (const file of svgs) {
+    const svg = readFileSync(join(WEB_DIR, file), 'utf8')
+    for (const [pattern, what] of [
+      [/<script/i, 'a script element'],
+      [/\son[a-z]+\s*=/i, 'an event handler attribute'],
+      [/javascript:/i, 'a javascript: URL'],
+      [/<foreignObject/i, 'foreignObject'],
+      [/<!(?:DOCTYPE|ENTITY)/i, 'a DTD or entity'],
+      [/(?:\s|:)href\s*=\s*["'](?!#)/i, 'an external reference'],
+      [/\bstyle\s*=/i, 'an inline style attribute (CSP)'],
+      [/<style[\s>]/i, 'a style element (CSP)'],
+      [/url\((?!\s*['"]?#)/i, 'an external url() reference'],
+    ] as const) {
+      assert.doesNotMatch(svg, pattern, `${file} must not contain ${what}`)
+    }
+  }
+
+  const pngs = files.filter((file) => file.endsWith('.png'))
+  assert.ok(pngs.length > 0)
+  const signature = Buffer.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+  ])
+  for (const file of pngs) {
+    const png = readFileSync(join(WEB_DIR, file))
+    assert.ok(png.subarray(0, 8).equals(signature), `${file} is a PNG`)
+    const chunks: string[] = []
+    let offset = 8
+    while (offset + 8 <= png.length) {
+      const type = png.toString('latin1', offset + 4, offset + 8)
+      chunks.push(type)
+      offset += 12 + png.readUInt32BE(offset)
+      if (type === 'IEND') break
+    }
+    assert.equal(chunks.at(-1), 'IEND', `${file} ends with IEND`)
+    assert.equal(offset, png.length, `${file} has no data after IEND`)
+    for (const meta of ['tEXt', 'iTXt', 'zTXt', 'tIME', 'eXIf']) {
+      assert.ok(!chunks.includes(meta), `${file} carries no ${meta} chunk`)
+    }
+  }
+
+  const fonts = files.filter((file) => file.endsWith('.woff2'))
+  assert.deepEqual(fonts, [
+    'fonts/inter-latin-wght-normal.woff2',
+    'fonts/jetbrains-mono-latin-wght-normal.woff2',
+  ])
+  for (const file of fonts) {
+    const magic = readFileSync(join(WEB_DIR, file)).toString('latin1', 0, 4)
+    assert.equal(magic, 'wOF2', `${file} is a WOFF2 font`)
+  }
+  for (const license of [
+    'fonts/LICENSE-Inter.txt',
+    'fonts/LICENSE-JetBrainsMono.txt',
+  ]) {
+    assert.match(
+      readFileSync(join(WEB_DIR, license), 'utf8'),
+      /SIL OPEN FONT LICENSE Version 1\.1/,
+    )
+  }
+})
+
+test('the dashboard icons ship at twice their largest display size', () => {
+  // .brand-tile-icon is 2rem (32 px): 64 px covers 2x screens. Larger files
+  // only cost load time, which shows when the dashboard is opened over Tor.
+  const icons = webFiles().filter((file) => /^icons\/[^/]+\.png$/.test(file))
+  assert.equal(icons.length, 10)
+  for (const file of icons) {
+    const png = readFileSync(join(WEB_DIR, file))
+    // IHDR is always the first chunk; width and height follow its type.
+    assert.equal(png.toString('latin1', 12, 16), 'IHDR', `${file} IHDR`)
+    assert.deepEqual(
+      [png.readUInt32BE(16), png.readUInt32BE(20)],
+      [64, 64],
+      `${file} is 64x64`,
+    )
+  }
+})
+
+/** BIP-173 checksum, as used by NIP-19 identifiers (no length limit). */
+function bech32ChecksumValid(value: string): boolean {
+  const charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
+  const lower = value.toLowerCase()
+  const sep = lower.lastIndexOf('1')
+  if (sep < 1 || sep + 7 > lower.length) return false
+  const hrp = [...lower.slice(0, sep)].map((c) => c.charCodeAt(0))
+  const data = [...lower.slice(sep + 1)].map((c) => charset.indexOf(c))
+  if (data.some((d) => d < 0)) return false
+  const gen = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]
+  let chk = 1
+  for (const v of [
+    ...hrp.map((c) => c >> 5),
+    0,
+    ...hrp.map((c) => c & 31),
+    ...data,
+  ]) {
+    const top = chk >> 25
+    chk = ((chk & 0x1ffffff) << 5) ^ v
+    for (let i = 0; i < 5; i++) if ((top >> i) & 1) chk ^= gen[i]
+  }
+  return chk === 1
+}
+
+test('external links are https, on an exact allow-list and open without an opener', () => {
+  const html = readFileSync(join(WEB_DIR, 'index.html'), 'utf8')
+  const allowed = new Set([
+    'https://tunnelsats.com',
+    'https://tunnelsats.com/guide',
+    'https://tunnelsats.com/status',
+    'https://tunnelsats.com/join-telegram',
+    'https://tunnelsats.com/faq#what-happens-if-i-reach-the-100gb-limit',
+    'https://primal.net/p/nprofile1qqsfj32jgnfp7asvcr5sj3ljar2v6elhm5560zfh0xqfeqsgl84s0rc37zmgx',
+    'https://x.com/TunnelSats',
+    'https://github.com/Tunnelsats/tunnelsats-startos',
+  ])
+  const anchors = [...html.matchAll(/<a\b[^>]*>/g)].map((m) => m[0])
+  let external = 0
+  for (const anchor of anchors) {
+    const href = /\shref="([^"]*)"/.exec(anchor)?.[1] ?? ''
+    if (/^[a-z][a-z0-9+.-]*:/i.test(href)) {
+      external++
+      assert.ok(allowed.has(href), `${href} is not on the link allow-list`)
+      assert.match(anchor, /\starget="_blank"/, `${href} opens in a new tab`)
+    }
+    if (/\starget="_blank"/.test(anchor)) {
+      assert.match(anchor, /\srel="noopener noreferrer"/, `${href} rel`)
+    }
+  }
+  assert.ok(external >= allowed.size)
+  // Previously linked but dead or not ours.
+  assert.ok(!html.includes('docs.tunnelsats.com'))
+  assert.ok(!html.includes('t.me/+'))
+  const nprofile = /nprofile1[02-9ac-hj-np-z]+/.exec(html)?.[0] ?? ''
+  assert.ok(bech32ChecksumValid(nprofile), 'the Nostr profile link is intact')
+  const typo = nprofile.slice(0, -1) + (nprofile.endsWith('q') ? 'p' : 'q')
+  assert.ok(!bech32ChecksumValid(typo), 'the checksum catches a typo')
+})
+
+test('the bandwidth pace marker sits on the arc at the projected usage', () => {
+  const h = load(model())
+  // The arc in index.html: M 20 82 A 60 60 0 0 1 140 82.
+  assert.deepEqual(h.run('arcPoint(0)'), { x: 20, y: 82 })
+  assert.deepEqual(h.run('arcPoint(50)'), { x: 80, y: 22 })
+  assert.deepEqual(h.run('arcPoint(100)'), { x: 140, y: 82 })
+  assert.deepEqual(h.run('arcPoint(250)'), { x: 140, y: 82 })
+  assert.deepEqual(h.run('arcPoint(-5)'), { x: 20, y: 82 })
+  assert.deepEqual(h.run('arcPoint(NaN)'), { x: 20, y: 82 })
+
+  const marker = h.el('bandwidth-pace-marker')
+  const pace = h.el('pace-text')
+  const quota = (bandwidth: Json, now: number) =>
+    h.run(`renderQuota(${JSON.stringify(model({ bandwidth }))}, ${now})`)
+  // Half of September gone, 50 GB used: 100 GB projected of 150 GB.
+  quota({ usedGb: 50, limitGb: 150 }, SEPT_16)
+  assert.equal(marker.getAttribute('cx'), '110')
+  assert.equal(marker.getAttribute('cy'), '30.04')
+  assert.equal(marker.classList.contains('is-visible'), true)
+  assert.equal(marker.classList.contains('is-over'), false)
+  assert.equal(pace.getAttribute('data-projection'), 'true')
+  // 120 GB projected of 100 GB: pinned to the end and flagged.
+  quota({ usedGb: 60, limitGb: 100 }, SEPT_16)
+  assert.equal(marker.getAttribute('cx'), '140')
+  assert.equal(marker.getAttribute('cy'), '82')
+  assert.equal(marker.classList.contains('is-over'), true)
+  // No projection on the first day of the month: no marker.
+  quota({ usedGb: 5, limitGb: 100 }, Date.UTC(2026, 8, 1, 12))
+  assert.equal(marker.classList.contains('is-visible'), false)
+  assert.equal(marker.classList.contains('is-over'), false)
+  assert.equal(pace.getAttribute('data-projection'), 'false')
+})
+
+test('the NWC badge reads Off, On or On · Tor and names problems plainly', async () => {
+  const view = (h: Harness, nwc: Json | undefined) =>
+    h.run(`nwcStatusView(${JSON.stringify(model({ nwc }))})`)
+  const h = load(model())
+  await settleAll(h)
+  assert.equal(h.el('nwc-badge').textContent, 'Off')
+  assert.equal(h.el('nwc-badge').className, 'nwc-badge neutral')
+  assert.equal(view(h, { connected: false }).badge, 'Off')
+  const on = view(h, {
+    connected: true,
+    relayHost: 'relay.example.com',
+    resolvedDuration: '3m',
+    recommendedBudgetSats: 12000,
+    recommendedAnnualSats: 48000,
+  })
+  assert.deepEqual([on.cls, on.badge], ['active', 'On'])
+  assert.match(on.note, /Relay relay\.example\.com · 3m plan · .*12,000 sats/)
+  assert.equal(
+    view(h, { connected: true, routeViaTor: true }).badge,
+    'On · Tor',
+  )
+  for (const [flags, badge] of [
+    [{ restoreReconnectNeeded: true }, 'Reconnect needed'],
+    [{ budgetWarning: true }, 'Budget too low'],
+    [{ fallbackTaskRaised: true }, 'Manual fallback'],
+  ] as const) {
+    const problem = view(h, { connected: true, ...flags })
+    assert.deepEqual([problem.cls, problem.badge], ['alert', badge])
+  }
+})
+
+test('truncated connection values keep the full value as their tooltip', async () => {
+  const h = load(model())
+  await settleAll(h)
+  assert.equal(h.el('val-endpoint').title, 'de2.tunnelsats.com:24556')
+  assert.equal(h.el('val-vpn-ip').title, '10.9.0.7')
+  assert.equal(h.el('val-target-node').title, 'LND')
+  const bare = load(model({ connection: {} }))
+  await settleAll(bare)
+  assert.equal(bare.el('val-endpoint').textContent, 'Unknown')
+  assert.equal(bare.el('val-endpoint').title, '')
+  assert.equal(bare.el('val-vpn-ip').title, '')
+})
+
+test('times are shown to the minute and estimates to the day', () => {
+  const h = load(model())
+  const time = h.run(`formatTime('2026-09-16T10:20:30.000Z')`)
+  assert.match(time, /2026/)
+  assert.match(time, /\d[:.]\d{2}/)
+  assert.doesNotMatch(time, /\d[:.]\d{2}[:.]\d{2}/, 'no seconds')
+  const date = h.run(`formatDate('2026-09-16T10:20:30.000Z')`)
+  assert.match(date, /2026/)
+  assert.doesNotMatch(date, /\d[:.]\d{2}/, 'no time of day')
+  assert.equal(h.run(`formatTime('not a date')`), null)
+  assert.equal(h.run(`formatDate(null)`), null)
+  assert.equal(h.run('monthsLabel(1)'), '1 month')
+  assert.equal(h.run('monthsLabel(12)'), '12 months')
 })

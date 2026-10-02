@@ -617,8 +617,9 @@
                 <progress
                   id="subscription-progress"
                   class="gauge gauge-time sr-only-gauge"
-                  max="30"
+                  max="100"
                   value="0"
+                  aria-label="Time left of a one-month term"
                 ></progress>
                 <div id="timeline-chart" class="timeline-chart"></div>
                 <ul id="timeline-legend" class="timeline-legend"></ul>
@@ -766,6 +767,7 @@
               high="90"
               optimum="20"
               value="0"
+              aria-label="Bandwidth used this month"
             ></meter>
 
             <div class="quota-strip">
@@ -1334,6 +1336,7 @@
               high="90"
               optimum="20"
               value="0"
+              aria-label="Bandwidth used this month"
             ></meter>
           </div>
           <ul class="bandwidth-facts">

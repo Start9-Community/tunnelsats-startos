@@ -1726,6 +1726,18 @@ test('index.html labels the reachability check as inbound only and uses native g
   assert.doesNotMatch(html, /\sstyle\s*=/i)
 })
 
+test('every meter and progress bar in index.html has an accessible name', () => {
+  // The SVG gauges are aria-hidden: these elements are what a screen reader reads.
+  const html = readFileSync(join(__dirname, '..', 'web', 'index.html'), 'utf8')
+  const gauges = [...html.matchAll(/<(meter|progress)\b([^>]*)>/g)]
+  assert.equal(gauges.length, 3)
+  for (const [, tag, attributes] of gauges) {
+    const id = /\sid="([^"]+)"/.exec(attributes)?.[1]
+    const label = /\saria-label="([^"]*)"/.exec(attributes)?.[1] ?? ''
+    assert.ok(label.trim().length > 0, `<${tag} id="${id}"> has no aria-label`)
+  }
+})
+
 test('command deck segmented navigation switches between Overview, Actions & Plans, and Verify & CLI while preserving context emphasis', async () => {
   // Unconfigured customer: Overview tab emphasizes Setup (Server Region + Buy)
   const hNew = load(

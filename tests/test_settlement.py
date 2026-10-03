@@ -364,6 +364,65 @@ class TestOrderSettlement(SettlementTestBase):
         self.assertEqual(result["outcomes"], [])
         self.assertEqual(self.api.requests, [])
 
+    def test_paid_replaced_order_in_previous_pending_orders_is_claimed_and_provisioned(self):
+        old_priv, old_pub = new_keypair()
+        old_hash = "c" * 64
+        old_task = "tunnelsats-order:eclair:" + old_hash[:16]
+        old_order = self.pending_order(
+            paymentHash=old_hash,
+            orderId="order-old",
+            privateKey=old_priv,
+            publicKey=old_pub,
+            expiresAt=iso(NOW + timedelta(minutes=30)),
+        )
+        new_order = self.pending_order()
+        self.write_meta({
+            "pendingOrder": new_order,
+            "previousPendingOrders": [old_order],
+        })
+        self.api.on("GET", f"/subscription/{HASH}", response({"status": "unpaid"}))
+        self.api.on("GET", f"/subscription/{old_hash}", response({"status": "paid"}))
+        claim_resp = self.claim_payload()
+        claim_resp["peer"]["publicKey"] = old_pub
+        self.api.on("POST", "/subscription/claim", response(claim_resp))
+
+        result = self.settle()
+
+        self.assertEqual(
+            [(o["kind"], o["result"]) for o in result["outcomes"]],
+            [("order", "waiting"), ("order", "provisioned")],
+        )
+        with open(bridge.CONFIG_PATH) as f:
+            conf = f.read()
+        self.assertIn(f"PrivateKey = {old_priv}\n", conf)
+        meta = self.read_meta()
+        self.assertNotIn("previousPendingOrders", meta)
+        self.assertEqual(meta["pendingOrder"]["paymentHash"], HASH)
+        self.assertIn(old_task, result["clearPayTasks"])
+
+    def test_unpaid_previous_pending_order_waits_and_is_pruned_once_expired(self):
+        old_priv, old_pub = new_keypair()
+        old_hash = "c" * 64
+        old_task = "tunnelsats-order:eclair:" + old_hash[:16]
+        old_order = self.pending_order(
+            paymentHash=old_hash,
+            orderId="order-old",
+            privateKey=old_priv,
+            publicKey=old_pub,
+            expiresAt=iso(NOW + timedelta(minutes=30)),
+        )
+        self.write_meta({"previousPendingOrders": [old_order]})
+        self.api.on("GET", f"/subscription/{old_hash}", response({"status": "unpaid"}))
+
+        waiting = self.settle(now=NOW)
+        self.assertEqual(waiting["outcomes"], [])
+        self.assertEqual(len(self.read_meta()["previousPendingOrders"]), 1)
+
+        expired = self.settle(now=NOW + timedelta(minutes=31))
+        self.assertEqual(expired["outcomes"], [])
+        self.assertNotIn("previousPendingOrders", self.read_meta())
+        self.assertIn(old_task, expired["clearPayTasks"])
+
 
 class TestRenewalSettlement(SettlementTestBase):
     def setUp(self):

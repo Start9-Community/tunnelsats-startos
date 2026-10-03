@@ -13,6 +13,8 @@ import ipaddress
 import math
 import threading
 import collections
+import secrets
+import urllib.parse
 import urllib.request
 import urllib.error
 from contextlib import contextmanager
@@ -66,13 +68,15 @@ os.umask(0o077)
 _enabled_cache = None
 _enabled_cache_mtime = 0
 _pubkey_cache = None
-_csrf_token = None
+_csrf_lock = threading.Lock()
+_csrf_token = secrets.token_hex(32)
 
 def get_csrf_token():
     global _csrf_token
     if _csrf_token is None:
-        import secrets
-        _csrf_token = secrets.token_hex(32)
+        with _csrf_lock:
+            if _csrf_token is None:
+                _csrf_token = secrets.token_hex(32)
     return _csrf_token
 
 def validate_csrf_token(token):
@@ -305,6 +309,7 @@ def save_configuration(conf_content, target_node="lnd", clear_pending_order=None
         meta["syncSuccess"] = False
         if clear_pending_order:
             _clear_pending(meta, "pendingOrder", clear_pending_order)
+            _remove_previous_pending_order(meta, clear_pending_order, queue_pay_task=True)
         atomic_write_json(META_FILE_PATH, meta)
 
 def get_default_gateway():
@@ -1342,6 +1347,149 @@ def _pay_tasks_to_clear(meta):
     return [t for t in meta.get("payTasksToClear") or [] if isinstance(t, str)]
 
 
+def _remove_previous_pending_order(meta, payment_hash, queue_pay_task=True):
+    """Removes any entry matching payment_hash from meta['previousPendingOrders']
+    and queues its pay task in payTasksToClear. Caller holds meta_lock."""
+    prev_list = meta.get("previousPendingOrders")
+    if not isinstance(prev_list, list):
+        return False
+    kept = []
+    removed = False
+    for item in prev_list:
+        if not isinstance(item, dict) or not isinstance(item.get("paymentHash"), str) or not item["paymentHash"]:
+            removed = True
+            continue
+        if item["paymentHash"] == payment_hash:
+            removed = True
+            node = item.get("targetNode")
+            if queue_pay_task and node in TARGET_NODES:
+                tasks = [t for t in meta.get("payTasksToClear") or [] if isinstance(t, str)]
+                replay_id = pay_task_replay_id("order", node, payment_hash)
+                if replay_id not in tasks:
+                    tasks.append(replay_id)
+                meta["payTasksToClear"] = tasks
+        else:
+            kept.append(item)
+    if removed:
+        if kept:
+            meta["previousPendingOrders"] = kept
+        else:
+            meta.pop("previousPendingOrders", None)
+    return removed
+
+
+def _update_previous_pending_order(payment_hash, fields):
+    with meta_lock():
+        meta = read_meta()
+        prev_list = meta.get("previousPendingOrders")
+        if not isinstance(prev_list, list):
+            return
+        changed = False
+        for item in prev_list:
+            if isinstance(item, dict) and item.get("paymentHash") == payment_hash:
+                for name, value in fields.items():
+                    if value is None:
+                        item.pop(name, None)
+                    else:
+                        item[name] = value
+                changed = True
+        if changed:
+            atomic_write_json(META_FILE_PATH, meta)
+
+
+def _settle_previous_orders(now, newer_order_provisioned=False):
+    """Checks replaced unexpired orders retained in meta['previousPendingOrders'].
+    Paid orders are claimed and provisioned with their retained privateKey;
+    unpaid orders are kept until their invoice expires and then pruned."""
+    with meta_lock():
+        meta = read_meta()
+        raw_list = meta.get("previousPendingOrders")
+        if not isinstance(raw_list, list) or not raw_list:
+            return []
+        cleaned = [
+            dict(p) for p in raw_list
+            if isinstance(p, dict) and isinstance(p.get("paymentHash"), str) and p["paymentHash"]
+        ]
+        if len(cleaned) != len(raw_list):
+            if cleaned:
+                meta["previousPendingOrders"] = cleaned
+            else:
+                meta.pop("previousPendingOrders", None)
+            atomic_write_json(META_FILE_PATH, meta)
+
+    outcomes = []
+    provisioned = newer_order_provisioned
+    for prev in cleaned:
+        p_hash = prev["paymentHash"]
+        retry_at = _parse_iso(prev.get("nextAttemptAt"))
+        if retry_at is not None and retry_at > now:
+            outcomes.append(_outcome("order", "failed", str(prev.get("lastError") or "Retrying shortly."), p_hash))
+            continue
+        try:
+            state = _payment_state(p_hash)
+            if state in ("processing", "paid"):
+                if prev.get("paymentReceivedFor") != p_hash:
+                    prev["paymentReceivedFor"] = p_hash
+                    _update_previous_pending_order(p_hash, {"paymentReceivedFor": p_hash})
+            if state == "processing":
+                _update_previous_pending_order(p_hash, {"lastError": None, "nextAttemptAt": None})
+                outcomes.append(_outcome("order", "waiting", "Payment received; the tunnel is being provisioned.", p_hash))
+                continue
+            if state in ("unpaid", "unknown"):
+                expires_dt = _parse_iso(prev.get("expiresAt"))
+                created_dt = _parse_iso(prev.get("createdAt"))
+                effective_exp = expires_dt or (created_dt + INVOICE_DEFAULT_TTL if created_dt is not None else None)
+                is_expired = (
+                    (effective_exp is not None and now >= effective_exp)
+                    or (created_dt is not None and now - created_dt >= PENDING_TTL)
+                    or (effective_exp is None and created_dt is None)
+                )
+                if is_expired and prev.get("paymentReceivedFor") != p_hash:
+                    with meta_lock():
+                        m = read_meta()
+                        if _remove_previous_pending_order(m, p_hash, queue_pay_task=True):
+                            atomic_write_json(META_FILE_PATH, m)
+                elif "lastError" in prev or "nextAttemptAt" in prev:
+                    _update_previous_pending_order(p_hash, {"lastError": None, "nextAttemptAt": None})
+                continue
+
+            if provisioned:
+                with meta_lock():
+                    m = read_meta()
+                    if _remove_previous_pending_order(m, p_hash, queue_pay_task=True):
+                        atomic_write_json(META_FILE_PATH, m)
+                outcomes.append(_outcome("order", "superseded", "A newer tunnel order was already provisioned.", p_hash))
+                continue
+
+            status, claim = _api_call(
+                "POST",
+                "/subscription/claim",
+                {"paymentHash": p_hash, "wgPublicKey": prev.get("publicKey")},
+            )
+            if status == 202 or claim.get("status") == "processing":
+                _update_previous_pending_order(p_hash, {"lastError": None, "nextAttemptAt": None})
+                outcomes.append(_outcome("order", "waiting", "Payment received; the tunnel is being provisioned.", p_hash))
+                continue
+            conf = assemble_claimed_config(claim, prev)
+            save_configuration(
+                conf,
+                prev.get("targetNode"),
+                clear_pending_order=p_hash,
+                provisioned_key=prev.get("publicKey"),
+            )
+            provisioned = True
+            outcomes.append(_outcome("order", "provisioned", "The new tunnel was configured.", p_hash))
+        except Exception as e:
+            message = str(e) if isinstance(e, SettlementError) else f"Unexpected error: {e}"
+            print(f"Settlement of previous order {p_hash[:8]} failed: {message}", file=sys.stderr)
+            _update_previous_pending_order(
+                p_hash,
+                {"lastError": message, "nextAttemptAt": _iso(now + SETTLE_RETRY_DELAY)},
+            )
+            outcomes.append(_outcome("order", "failed", message, p_hash))
+    return outcomes
+
+
 def settle_pending(now=None):
     """One settlement tick. Returns {"outcomes": [...], "clearPayTasks": [...],
     "busy": bool}. Each outcome's result is one of "waiting", "provisioned",
@@ -1362,6 +1510,14 @@ def settle_pending(now=None):
             pending = meta.get(key)
             if isinstance(pending, dict) and isinstance(pending.get("paymentHash"), str) and pending["paymentHash"]:
                 outcomes.append(_settle_one(kind, key, pending, now))
+        newer_order_provisioned = any(
+            o["kind"] == "order" and o["result"] == "provisioned" for o in outcomes
+        ) or (
+            isinstance(meta.get("pendingOrder"), dict)
+            and bool(meta["pendingOrder"].get("paymentHash"))
+            and meta["pendingOrder"].get("paymentReceivedFor") == meta["pendingOrder"].get("paymentHash")
+        )
+        outcomes.extend(_settle_previous_orders(now, newer_order_provisioned=newer_order_provisioned))
         with meta_lock():
             tasks = _pay_tasks_to_clear(read_meta())
         return {"outcomes": outcomes, "clearPayTasks": tasks, "busy": False}
@@ -1437,9 +1593,12 @@ STATIC_CONTENT_TYPES = {
 # No dashboard path contains a control character, and a NUL byte makes
 # os.path.realpath raise instead of answering.
 STATIC_PATH_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+DASHBOARD_MAX_CONCURRENT_REQUESTS = 32
 
 
 class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
+    timeout = 10
+
     def log_message(self, format, *args):
         pass
 
@@ -1501,17 +1660,24 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin:
             try:
-                origin_host = origin.split("://")[-1].split("/")[0].split(":")[0].lower()
-                is_allowed_origin = (
-                    origin_host in ("localhost", "127.0.0.1", "[::1]") or
-                    any(origin_host.endswith(s) for s in (".local", ".lan", ".onion"))
-                )
-                if not is_allowed_origin:
-                    import ipaddress
-                    try:
-                        is_allowed_origin = ipaddress.ip_address(origin_host).is_private
-                    except ValueError:
-                        is_allowed_origin = False
+                parsed_origin = urllib.parse.urlsplit(origin.strip())
+                origin_host = (parsed_origin.hostname or "").lower()
+                if parsed_origin.scheme.lower() not in ("http", "https") or not origin_host:
+                    self.send_error(403, "Cross-origin request rejected")
+                    return False
+                if is_local:
+                    is_allowed_origin = origin_host in ("localhost", "127.0.0.1", "::1")
+                else:
+                    is_allowed_origin = (
+                        origin_host in ("localhost", "127.0.0.1", "::1") or
+                        any(origin_host.endswith(s) for s in (".local", ".lan", ".onion"))
+                    )
+                    if not is_allowed_origin:
+                        import ipaddress
+                        try:
+                            is_allowed_origin = ipaddress.ip_address(origin_host).is_private
+                        except ValueError:
+                            is_allowed_origin = False
 
                 if not is_allowed_origin:
                     self.send_error(403, "Cross-origin request rejected")
@@ -1546,59 +1712,6 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         path_only = self.path.partition('?')[0].partition('#')[0]
         if STATIC_PATH_CONTROL_CHARS_RE.search(path_only):
             self.send_error(400, "Invalid path")
-            return
-        if path_only == "/api/status":
-            from urllib.parse import urlparse, parse_qs
-            query_params = parse_qs(urlparse(self.path).query)
-            force_sync = query_params.get("force", ["0"])[0] in ("1", "true", "yes")
-
-            if force_sync:
-                pubkey = get_wg_pubkey()
-                if pubkey and pubkey not in ("Unknown", "Not available"):
-                    try:
-                        lazy_sync(pubkey)
-                    except Exception as e:
-                        print(f"Force sync failed: {e}", file=sys.stderr)
-
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-
-            status_data = get_status()
-            target_host, target_port = get_target_details()
-
-            response = {
-                "version": status_data.get("version", get_package_version()),
-                "enabled": status_data.get("enabled", is_enabled()),
-                "configured": status_data.get("configured", False),
-                "allow_ipv6": status_data.get("allow_ipv6", is_allow_ipv6()),
-                "status": status_data.get("status", "stopped"),
-                "subscription_active": status_data.get("subscription_active", False),
-                "subscription_linked": status_data.get("subscription_linked", False),
-                "pubkey": status_data.get("pubkey", get_wg_pubkey()),
-                "expires_at": status_data.get("expires_at", "Unknown"),
-                "days_remaining": status_data.get("days_remaining"),
-                "expiry_formatted": status_data.get("expiry_formatted", "Unknown"),
-                "target_host": target_host,
-                "target_port": target_port,
-                "vpn_port": status_data.get("vpn_port", DEFAULT_VPN_PORT),
-                "public_ip": status_data.get("public_ip", "Unknown"),
-                "server": status_data.get("server", "Unknown"),
-                "vpn_ip": status_data.get("vpn_ip", "None"),
-                "internal_octet": status_data.get("internal_octet", "Unknown"),
-                "last_sync": status_data.get("last_sync"),
-                "bandwidth_used_gb": status_data.get("bandwidth_used_gb", 0.0),
-                "bandwidth_limit_gb": status_data.get("bandwidth_limit_gb", BANDWIDTH_LIMIT_GB),
-                "csrf_token": get_csrf_token(),
-            }
-            self.wfile.write(json.dumps(response).encode("utf-8"))
-            return
-
-        if path_only == "/api/csrf":
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"csrf_token": get_csrf_token()}).encode("utf-8"))
             return
 
         if path_only == "/api/servers":
@@ -1729,9 +1842,34 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             return
         self.send_error(404, "Not found")
 
+
+class DashboardHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._conn_sem = threading.BoundedSemaphore(DASHBOARD_MAX_CONCURRENT_REQUESTS)
+
+    def process_request(self, request, client_address):
+        if not self._conn_sem.acquire(blocking=False):
+            self.close_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._conn_sem.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._conn_sem.release()
+
+
 def web_server_thread():
     try:
-        server = ThreadingHTTPServer(("0.0.0.0", 80), DashboardHTTPRequestHandler)
+        server = DashboardHTTPServer(("0.0.0.0", 80), DashboardHTTPRequestHandler)
         print("Web UI Dashboard server running on port 80...")
         server.serve_forever()
     except Exception as e:
@@ -2858,12 +2996,30 @@ def _nwc_summary(meta):
 # or logged.
 
 NWC_MAX_RENEWAL_SATS = 500_000
+NWC_MAX_SATS_BY_DURATION = {1: 50_000, 3: 135_000, 6: 250_000, 12: 450_000}
 NWC_MAX_ATTEMPTS = 3
 NWC_RETRY_DELAY = timedelta(hours=1)
 NWC_TRIGGER_WINDOW = timedelta(days=7)
 NWC_GRACE_WINDOW = timedelta(days=7)
 TOR_SOCKS_HOST = os.getenv("TOR_SOCKS_HOST", "tor.embassy")
 TOR_SOCKS_PORT = int(os.getenv("TOR_SOCKS_PORT", "9050"))
+
+
+def _nwc_max_renewal_sats(duration_months, last_amount_sats=None, last_duration_months=None):
+    """Per-duration safety ceiling for NWC auto-renewal, bounded further by the
+    duration-scaled previous purchase amount when available."""
+    duration_cap = NWC_MAX_SATS_BY_DURATION.get(duration_months, NWC_MAX_RENEWAL_SATS)
+    if (
+        isinstance(last_amount_sats, (int, float))
+        and not isinstance(last_amount_sats, bool)
+        and math.isfinite(last_amount_sats)
+        and last_amount_sats > 0
+        and last_duration_months in (1, 3, 6, 12)
+    ):
+        scaled_last = math.ceil((last_amount_sats / last_duration_months) * duration_months)
+        floor_sats = _NWC_DEFAULT_ESTIMATED_SATS.get(duration_months, 4500) * 2
+        return min(duration_cap, max(math.ceil(scaled_last * 2.5), floor_sats))
+    return duration_cap
 
 _NWC_PUBKEY_RE = re.compile(r"^[0-9a-f]{64}$")
 _NWC_PERMANENT_ERROR_CODES = frozenset({
@@ -3795,8 +3951,10 @@ def _record_nwc_failure(wg_pubkey, payment_hash, err, now, force_fallback=False,
             })
             meta["nwcAutoRenewState"] = nwc_state
         pending = meta.get("pendingRenewal")
-        if trip_fallback and payment_hash and isinstance(pending, dict) and pending.get("paymentHash") == payment_hash:
-            pending["raisePayTask"] = True
+        if payment_hash and isinstance(pending, dict) and pending.get("paymentHash") == payment_hash:
+            pending.pop("nwcPayInFlightUntil", None)
+            if trip_fallback:
+                pending["raisePayTask"] = True
         atomic_write_json(META_FILE_PATH, meta)
     return trip_fallback
 
@@ -3892,7 +4050,9 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
         duration_setting = wallet_doc.get("autoRenewDuration") or meta.get("nwcAutoRenewDuration") or "match"
         if duration_setting not in ("match", "1m", "3m", "6m", "12m"):
             duration_setting = "match"
-        last_dur = _dashboard_duration(meta.get("lastDuration")) or "1m"
+        recorded_last_dur = _dashboard_duration(meta.get("lastDuration"))
+        last_dur = recorded_last_dur or "1m"
+        last_months = int(recorded_last_dur[:-1]) if recorded_last_dur else None
         resolved_duration = last_dur if duration_setting == "match" else duration_setting
         months = int(resolved_duration[:-1])
 
@@ -3948,6 +4108,13 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
                 and inv_exp_dt is not None
                 and now < inv_exp_dt
             ):
+                pending_duration = _dashboard_duration(pending.get("duration"))
+                if pending_duration != resolved_duration:
+                    return {
+                        "result": "manual-pending",
+                        "paymentHash": payment_hash,
+                        "message": "A manual renewal invoice for a different duration is still pending.",
+                    }
                 reusable_pending = dict(pending)
 
         if reusable_pending is None and isinstance(pending, dict) and isinstance(pending.get("paymentHash"), str) and pending.get("paymentHash"):
@@ -4008,6 +4175,7 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
             # checking that no concurrent manual Renew wrote a pendingRenewal first.
             used_concurrent = False
             concurrent_paid_hash = None
+            concurrent_manual_hash = None
             with meta_lock():
                 fresh_meta = read_meta()
                 concurrent_pending = fresh_meta.get("pendingRenewal")
@@ -4035,8 +4203,11 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
                     and c_exp is not None
                     and now < c_exp
                 ):
-                    reusable_pending = dict(concurrent_pending)
-                    used_concurrent = True
+                    if _dashboard_duration(concurrent_pending.get("duration")) != resolved_duration:
+                        concurrent_manual_hash = c_hash
+                    else:
+                        reusable_pending = dict(concurrent_pending)
+                        used_concurrent = True
                 else:
                     fresh_meta["pendingRenewal"] = reusable_pending
                     hash_to_clear = c_hash if c_hash else stale_hash
@@ -4051,6 +4222,12 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
             if concurrent_paid_hash is not None:
                 settle_pending(now=now)
                 return {"result": "already-paid", "paymentHash": concurrent_paid_hash}
+            if concurrent_manual_hash is not None:
+                return {
+                    "result": "manual-pending",
+                    "paymentHash": concurrent_manual_hash,
+                    "message": "A manual renewal invoice for a different duration was created concurrently.",
+                }
             if used_concurrent:
                 payment_hash = reusable_pending["paymentHash"]
                 invoice = reusable_pending["invoice"]
@@ -4068,6 +4245,14 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
                 _record_nwc_failure(wg_pubkey, None, e, now, force_fallback=True)
                 return {"result": "verification-failed", "message": str(e)}
 
+        paid_months = int((_dashboard_duration(reusable_pending.get("duration")) or resolved_duration)[:-1])
+        max_sats = _nwc_max_renewal_sats(paid_months, meta.get("lastAmountSats"), last_months)
+        try:
+            verified_sats = _verify_bolt11_invoice(invoice, payment_hash, max_sats=max_sats)
+        except NwcVerificationError as e:
+            _record_nwc_failure(wg_pubkey, payment_hash, e, now, force_fallback=True)
+            return {"result": "verification-failed", "message": str(e)}
+
         # Pre-flight budget/balance check before calling pay_invoice
         budget_ok, budget_code, budget_msg = _nwc_preflight_budget_check(
             parsed_uri,
@@ -4083,6 +4268,10 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
         # replaced during invoice creation / budget preflight, and mark
         # nwcAttempted = True before sending pay_invoice.
         with meta_lock():
+            if not is_enabled():
+                return {"result": "disabled", "message": "TunnelSats was disabled before payment."}
+            if _superseded(wg_pubkey):
+                return {"result": "superseded", "message": "The configured key changed before payment."}
             pre_pay_meta = read_meta()
             latest_wallet_doc = _read_json_object(NWC_WALLET_FILE_PATH)
             if (
@@ -4108,6 +4297,7 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
                     "message": "Pending renewal changed before payment; not paying the discarded invoice.",
                 }
             cur_pending["nwcAttempted"] = True
+            cur_pending["nwcPayInFlightUntil"] = _iso(now + timedelta(seconds=60))
             atomic_write_json(META_FILE_PATH, pre_pay_meta)
 
         try:
@@ -4131,6 +4321,14 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
                 "paymentHash": payment_hash,
                 "message": str(e),
             }
+        except Exception:
+            with meta_lock():
+                err_meta = read_meta()
+                err_pending = err_meta.get("pendingRenewal")
+                if isinstance(err_pending, dict) and err_pending.get("paymentHash") == payment_hash:
+                    err_pending.pop("nwcPayInFlightUntil", None)
+                    atomic_write_json(META_FILE_PATH, err_meta)
+            raise
 
         # Payment succeeded! Mark received and record NWC payment metadata.
         # Note: lastPaidNewExpiry stays None until _settle_renewal confirms the
@@ -4140,10 +4338,11 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
             fresh_meta = read_meta()
             current_pending = fresh_meta.get("pendingRenewal")
             if isinstance(current_pending, dict) and current_pending.get("paymentHash") == payment_hash:
+                current_pending.pop("nwcPayInFlightUntil", None)
                 current_pending["paymentReceivedFor"] = payment_hash
                 current_pending["paidViaNwc"] = True
                 current_pending["raisePayTask"] = False
-            fresh_meta["lastDuration"] = months
+            fresh_meta["lastDuration"] = paid_months
             fresh_meta["lastAmountSats"] = verified_sats
             post_pay_wallet = _read_json_object(NWC_WALLET_FILE_PATH)
             if (
@@ -4164,7 +4363,7 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
                     "restoreReconnectNeeded": False,
                     "lastPaidHash": payment_hash,
                     "lastPaidAt": _iso(now),
-                    "lastPaidDuration": months,
+                    "lastPaidDuration": paid_months,
                     "lastPaidAmountSats": verified_sats,
                     "lastPaidNewExpiry": None,
                 })

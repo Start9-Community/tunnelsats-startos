@@ -1,12 +1,9 @@
 name: Tag and Release
 
-# Manual only until launch. On push to main this workflow force-moves the
-# version tag and rebuilds the GitHub release whenever the manifest version
-# is not on the community registry yet, which would publish the unreleased
-# storefront package as the "Latest" download. Restore the push trigger
-# (branches: [main]) once the launch gates in README.md are cleared and the
-# package version has been bumped past the legacy 0.4.0:5 release.
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:

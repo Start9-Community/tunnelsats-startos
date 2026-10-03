@@ -37,17 +37,17 @@ fake_config() {
     printf '{"enabled": %s, "target-node": "%s"}' "$1" "$2" > "$DATA_DIR/config.json"
 }
 
-# Serves $1 as /api/status on a free loopback port.
+# Serves $1 as /api/dashboard on a free loopback port.
 serve_status() {
     mkdir -p "$FAKE/web/api"
-    printf '%s' "$1" > "$FAKE/web/api/status"
+    printf '%s' "$1" > "$FAKE/web/api/dashboard"
     local port
     port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
     python3 -m http.server "$port" --bind 127.0.0.1 --directory "$FAKE/web" >/dev/null 2>&1 &
     WEB_PID=$!
     export TUNNELSATS_WEB_URL="http://127.0.0.1:$port"
     for _ in $(seq 50); do
-        python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1] + "/api/status", timeout=1)' "$TUNNELSATS_WEB_URL" 2>/dev/null && return 0
+        python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1] + "/api/dashboard", timeout=1)' "$TUNNELSATS_WEB_URL" 2>/dev/null && return 0
         sleep 0.1
     done
     return 1
@@ -62,7 +62,7 @@ refute_match() {
     fi
 }
 
-STATUS_OK='{"configured": true, "server": "de2.tunnelsats.com", "vpn_port": 24556, "allow_ipv6": false}'
+STATUS_OK='{"configured": true, "connection": {"server": "de2.tunnelsats.com", "vpnPort": 24556, "allowIpv6": false}}'
 
 healthy_service() {
     fake_bridge '{"result": "ok", "message": "Active until 2026-12-31"}' 0
@@ -148,7 +148,7 @@ fake_config_with_endpoint() {
 
 @test "verify.sh names the Endpoint host, not the # Server: name, as the public address" {
     # The node task announces the Endpoint host with the forwarded port;
-    # /api/status.server prefers the `# Server:` comment.
+    # /api/dashboard connection.server prefers the `# Server:` comment.
     fake_bridge '{"result": "ok", "message": "Active until 2026-12-31"}' 0
     fake_config_with_endpoint
     serve_status "$STATUS_OK"

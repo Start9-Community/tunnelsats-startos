@@ -182,7 +182,11 @@ class TestNwcAutoRenew(unittest.TestCase):
         self.wallet_secret = "11" * 32
         self.client_secret = "22" * 32
         self.wallet_pubkey = bridge._nostr_pubkey_from_secret(self.wallet_secret)
-        self.wg_pubkey = "wgTestPubKey1234567890abcdefghijklmnopqrstu="
+        self.wg_private_key = base64.b64encode(bytes([51]) * 32).decode("ascii")
+        self.wg_pubkey = bridge.derive_wg_pubkey(self.wg_private_key)
+        with open(self.config_path, "w") as f:
+            f.write(f"[Interface]\nPrivateKey = {self.wg_private_key}\n")
+        bridge.atomic_write_json(self.app_config_path, {"enabled": True})
         self.payment_hash = "ab" * 32
         self.valid_invoice = _build_test_bolt11("45u", self.payment_hash)  # 45u BTC = 4,500 sats
 
@@ -375,6 +379,7 @@ class TestNwcAutoRenew(unittest.TestCase):
                 persisted = bridge.read_meta().get("pendingRenewal")
                 self.assertIsNotNone(persisted)
                 self.assertEqual(persisted["paymentHash"], self.payment_hash)
+                self.assertIsNotNone(persisted.get("nwcPayInFlightUntil"))
                 return {"preimage": "00" * 32}
             return {}
 
@@ -412,6 +417,7 @@ class TestNwcAutoRenew(unittest.TestCase):
         # lastPaidNewExpiry is None until _clear_pending confirms the extended expiry!
         self.assertIsNone(meta_after["nwcAutoRenewState"]["lastPaidNewExpiry"])
         self.assertEqual(meta_after["pendingRenewal"]["paymentReceivedFor"], self.payment_hash)
+        self.assertIsNone(meta_after["pendingRenewal"].get("nwcPayInFlightUntil"))
 
         # Calling maybe_nwc_auto_renew again while pendingRenewal has paymentReceivedFor is idempotent
         nwc_calls.clear()
@@ -463,7 +469,7 @@ class TestNwcAutoRenew(unittest.TestCase):
         entry.update(extra)
         return entry
 
-    def _run_auto_renew(self, now, concurrent_write=None, during_preflight=None):
+    def _run_auto_renew(self, now, concurrent_write=None, during_preflight=None, payment_state="expired"):
         """Runs the real maybe_nwc_auto_renew (including the real settle_pending)
         with only API/NWC transport patched. concurrent_write, if given, is
         written as pendingRenewal while the /subscription/renew call is in
@@ -495,7 +501,7 @@ class TestNwcAutoRenew(unittest.TestCase):
 
         with (
             patch.object(bridge, "_api_call", side_effect=fake_api_call),
-            patch.object(bridge, "_payment_state", return_value="expired"),
+            patch.object(bridge, "_payment_state", return_value=payment_state),
             patch.object(bridge, "nwc_execute_command", side_effect=fake_nwc),
         ):
             res = bridge.maybe_nwc_auto_renew(self.wg_pubkey, now=now)
@@ -554,6 +560,91 @@ class TestNwcAutoRenew(unittest.TestCase):
         self.assertEqual(res["paymentHash"], other_hash)
         self.assertEqual(paid, [other_invoice])
         self.assertEqual(bridge.read_meta()["pendingRenewal"]["paymentHash"], other_hash)
+
+    def test_auto_renew_skips_mismatched_duration_pending_renewal(self):
+        now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+        other_hash = "ef" * 32
+        other_invoice = _build_test_bolt11("45u", other_hash)
+        manual_12m = self._pending(now, other_hash, other_invoice, expires_in_minutes=30, duration=12)
+
+        # 1. Existing unpaid 12m pendingRenewal when NWC auto-renew resolves to 1m:
+        # neither paid nor overwritten.
+        self._seed_auto_renew_state(now, manual_12m)
+        res, paid = self._run_auto_renew(now, payment_state="unpaid")
+        self.assertEqual(res["result"], "manual-pending")
+        self.assertEqual(res["paymentHash"], other_hash)
+        self.assertEqual(paid, [])
+        self.assertEqual(bridge.read_meta()["pendingRenewal"]["paymentHash"], other_hash)
+        self.assertEqual(bridge.read_meta()["pendingRenewal"]["duration"], 12)
+
+        # 2. Concurrent unpaid 12m pendingRenewal created while /subscription/renew is in flight:
+        # neither paid nor overwritten.
+        self._seed_auto_renew_state(now)
+        res_conc, paid_conc = self._run_auto_renew(now, concurrent_write=manual_12m)
+        self.assertEqual(res_conc["result"], "manual-pending")
+        self.assertEqual(res_conc["paymentHash"], other_hash)
+        self.assertEqual(paid_conc, [])
+        self.assertEqual(bridge.read_meta()["pendingRenewal"]["paymentHash"], other_hash)
+        self.assertEqual(bridge.read_meta()["pendingRenewal"]["duration"], 12)
+
+    def test_auto_renew_does_not_pay_after_disable_during_preflight(self):
+        now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+        self._seed_auto_renew_state(now)
+
+        def disable():
+            bridge.atomic_write_json(self.app_config_path, {"enabled": False})
+            os.remove(self.config_path)
+
+        res, paid = self._run_auto_renew(now, during_preflight=disable)
+
+        self.assertEqual(res["result"], "disabled")
+        self.assertEqual(paid, [])
+        self.assertFalse(bridge.read_meta()["pendingRenewal"]["nwcAttempted"])
+
+    def test_auto_renew_does_not_pay_after_key_change_during_preflight(self):
+        now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+        self._seed_auto_renew_state(now)
+
+        def replace_key():
+            private_key = base64.b64encode(bytes([68]) * 32).decode("ascii")
+            bridge.atomic_write_file(self.config_path, f"[Interface]\nPrivateKey = {private_key}\n")
+
+        res, paid = self._run_auto_renew(now, during_preflight=replace_key)
+
+        self.assertEqual(res["result"], "superseded")
+        self.assertEqual(paid, [])
+        self.assertFalse(bridge.read_meta()["pendingRenewal"]["nwcAttempted"])
+
+    def test_auto_renew_rejects_invoice_above_duration_ceiling_and_raises_fallback(self):
+        now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+        self._seed_auto_renew_state(now)
+        # 2m BTC = 200,000 sats: below the 500k global cap, but above the 50,000-sat 1m ceiling
+        overpriced_1m_invoice = _build_test_bolt11("2m", self.payment_hash)
+        paid_invoices = []
+
+        def fake_api_call(method, path, payload=None):
+            if method == "POST" and path == "/subscription/renew":
+                return 200, {"renewalId": "fresh", "paymentHash": self.payment_hash, "invoice": overpriced_1m_invoice}
+            return 200, {}
+
+        def fake_nwc(_parsed, method, params, **_kw):
+            if method == "pay_invoice":
+                paid_invoices.append(params["invoice"])
+            return {}
+
+        with (
+            patch.object(bridge, "_api_call", side_effect=fake_api_call),
+            patch.object(bridge, "_payment_state", return_value="expired"),
+            patch.object(bridge, "nwc_execute_command", side_effect=fake_nwc),
+        ):
+            res = bridge.maybe_nwc_auto_renew(self.wg_pubkey, now=now)
+
+        self.assertEqual(res["result"], "verification-failed")
+        self.assertEqual(paid_invoices, [])
+        meta = bridge.read_meta()
+        self.assertTrue(meta["nwcAutoRenewState"]["fallbackTaskRaised"])
+        self.assertTrue(meta["pendingRenewal"]["raisePayTask"])
+        self.assertEqual(meta["pendingRenewal"]["paymentHash"], self.payment_hash)
 
     def test_auto_renew_never_overwrites_or_repays_concurrent_paid_renewal(self):
         now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)

@@ -43,8 +43,8 @@ log_fail() {
 }
 log_step() { echo -e "\n${BLUE}==> $1${NC}"; }
 
-# Prints field $2 of the JSON object in $1 (or in its last line), or nothing
-# if absent/unparseable.
+# Prints field $2 (supporting dotted paths like connection.server) of the JSON
+# object in $1 (or in its last line), or nothing if absent/unparseable.
 json_field() {
     printf '%s' "$1" | python3 -c '
 import json, sys
@@ -54,7 +54,9 @@ try:
         data = json.loads(text)
     except ValueError:
         data = json.loads(text.splitlines()[-1])
-    value = data.get(sys.argv[1])
+    value = data
+    for key in sys.argv[1].split("."):
+        value = value.get(key) if isinstance(value, dict) else None
 except Exception:
     sys.exit(0)
 if value is not None:
@@ -140,15 +142,18 @@ VPN_PORT=""
 ALLOW_IPV6=""
 API_DATA=$(python3 -c '
 import sys, urllib.request
-req = urllib.request.Request(sys.argv[1] + "/api/status", headers={"Host": "localhost"})
+req = urllib.request.Request(sys.argv[1] + "/api/dashboard", headers={"Host": "localhost"})
 with urllib.request.urlopen(req, timeout=5) as r:
     print(r.read().decode("utf-8"))
 ' "$WEB_URL" 2>/dev/null || true)
 if [ -n "$(json_field "$API_DATA" "configured")" ]; then
-    log_ok "Web dashboard API reachable ($WEB_URL/api/status)."
-    SERVER=$(json_field "$API_DATA" "server")
-    VPN_PORT=$(json_field "$API_DATA" "vpn_port")
-    ALLOW_IPV6=$(json_field "$API_DATA" "allow_ipv6")
+    log_ok "Web dashboard API reachable ($WEB_URL/api/dashboard)."
+    SERVER=$(json_field "$API_DATA" "connection.server")
+    [ -z "$SERVER" ] && SERVER=$(json_field "$API_DATA" "server")
+    VPN_PORT=$(json_field "$API_DATA" "connection.vpnPort")
+    [ -z "$VPN_PORT" ] && VPN_PORT=$(json_field "$API_DATA" "vpn_port")
+    ALLOW_IPV6=$(json_field "$API_DATA" "connection.allowIpv6")
+    [ -z "$ALLOW_IPV6" ] && ALLOW_IPV6=$(json_field "$API_DATA" "allow_ipv6")
     if [ "$(json_field "$API_DATA" "configured")" == "True" ] && [ -n "$SERVER" ] &&
         [ "$SERVER" != "Unknown" ] && [ -n "$VPN_PORT" ]; then
         log_ok "Configured TunnelSats server: ${SERVER}, forwarded port: ${VPN_PORT}"
@@ -156,7 +161,7 @@ if [ -n "$(json_field "$API_DATA" "configured")" ]; then
         log_fail "The service reports no usable server/forwarded port."
     fi
 else
-    log_fail "Web dashboard API unreachable or invalid at $WEB_URL/api/status."
+    log_fail "Web dashboard API unreachable or invalid at $WEB_URL/api/dashboard."
 fi
 
 # 5. Node-side checks: printed, never executed or claimed
@@ -179,7 +184,7 @@ else
 fi
 # The node task announces the Endpoint host of the stored config with the
 # forwarded port (getAnnounceEndpoint), not the `# Server:` comment that
-# /api/status reports as the server.
+# /api/dashboard reports as the server.
 ENDPOINT=$(json_field "$APP_CONFIG" "tunnelsats-conf" | python3 -c '
 import re, sys
 m = re.search(r"^\s*Endpoint\s*=\s*([^\s#]+)", sys.stdin.read(), re.IGNORECASE | re.MULTILINE)

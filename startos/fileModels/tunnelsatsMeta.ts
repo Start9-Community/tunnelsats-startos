@@ -1,6 +1,24 @@
 import { FileHelper, z } from '@start9labs/start-sdk'
 import { sdk } from '../sdk'
 
+export const pendingOrderShape = z.object({
+  paymentHash: z.string(),
+  orderId: z.string(),
+  privateKey: z.string(),
+  publicKey: z.string(),
+  targetNode: z.enum(['lnd', 'cln', 'eclair']),
+  serverId: z.string(),
+  createdAt: z.string(),
+  duration: z.number().optional().catch(undefined),
+  invoice: z.string().optional().catch(undefined),
+  amountSats: z.number().optional().catch(undefined),
+  expiresAt: z.string().optional().catch(undefined),
+  paymentReceivedFor: z.string().optional().catch(undefined),
+  /** Set by the settlement tick (bridge.py) after a failed attempt. */
+  lastError: z.string().optional().catch(undefined),
+  nextAttemptAt: z.string().optional().catch(undefined),
+})
+
 export const metaShape = z.object({
   expiresAt: z.string().optional(),
   /**
@@ -31,26 +49,12 @@ export const metaShape = z.object({
   notFoundSince: z.string().optional().catch(undefined),
   /** Public key of the last settled purchase (bridge.py save_configuration). */
   provisionedKey: z.string().optional().catch(undefined),
-  pendingOrder: z
-    .object({
-      paymentHash: z.string(),
-      orderId: z.string(),
-      privateKey: z.string(),
-      publicKey: z.string(),
-      targetNode: z.enum(['lnd', 'cln', 'eclair']),
-      serverId: z.string(),
-      createdAt: z.string(),
-      duration: z.number().optional().catch(undefined),
-      invoice: z.string().optional().catch(undefined),
-      amountSats: z.number().optional().catch(undefined),
-      expiresAt: z.string().optional().catch(undefined),
-      paymentReceivedFor: z.string().optional().catch(undefined),
-      /** Set by the settlement tick (bridge.py) after a failed attempt. */
-      lastError: z.string().optional().catch(undefined),
-      nextAttemptAt: z.string().optional().catch(undefined),
-    })
-    .optional()
-    .nullable(),
+  pendingOrder: pendingOrderShape.optional().nullable(),
+  /**
+   * Replaced pending orders whose invoices have not expired yet, retained so
+   * bridge.py can still claim an earlier invoice if the operator pays it.
+   */
+  previousPendingOrders: z.array(pendingOrderShape).optional().catch(undefined),
   pendingRenewal: z
     .object({
       paymentHash: z.string(),
@@ -73,6 +77,8 @@ export const metaShape = z.object({
       paidViaNwc: z.boolean().optional().catch(undefined),
       /** True when an NWC pay_invoice attempt has been dispatched for this invoice. */
       nwcAttempted: z.boolean().optional().catch(undefined),
+      /** ISO timestamp until which an in-flight NWC pay_invoice holds the renewal. */
+      nwcPayInFlightUntil: z.string().optional().catch(undefined),
       /** True when NWC fell back and the node's Pay Invoice task must be raised. */
       raisePayTask: z.boolean().optional().catch(undefined),
     })

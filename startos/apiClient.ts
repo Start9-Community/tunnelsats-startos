@@ -170,6 +170,8 @@ export async function createSubscriptionOrder(
   })
 }
 
+export type OrderPaymentState = 'paid' | 'processing' | 'unpaid' | 'unknown'
+
 /**
  * Polls payment settlement status for a given payment hash.
  */
@@ -179,6 +181,36 @@ export async function pollInvoiceSettlement(
 ): Promise<OrderStatus> {
   const url = `${baseUrl.replace(/\/$/, '')}/api/public/v1/subscription/${paymentHash}`
   return await fetchJson<OrderStatus>(url, { method: 'GET' })
+}
+
+/**
+ * Reads the live payment state of a subscription order or renewal, mirroring
+ * `_payment_state` in bridge.py: 404 is `'unknown'`, 202 or `'processing'` is
+ * `'processing'`, `'paid'` is `'paid'`, `'unpaid'`/`'pending'` is `'unpaid'`.
+ */
+export async function fetchOrderPaymentStatus(
+  paymentHash: string,
+  baseUrl = DEFAULT_API_BASE,
+): Promise<OrderPaymentState> {
+  const url = `${baseUrl.replace(/\/$/, '')}/api/public/v1/subscription/${encodeURIComponent(paymentHash)}`
+  let status: number
+  let data: Record<string, unknown>
+  try {
+    ;({ status, data } = await fetchJsonWithStatus<Record<string, unknown>>(
+      url,
+      { method: 'GET' },
+    ))
+  } catch (e) {
+    if (e instanceof ApiHttpError && e.status === 404) return 'unknown'
+    throw e
+  }
+  const state = data?.status
+  if (status === 202 || state === 'processing') return 'processing'
+  if (state === 'paid') return 'paid'
+  if (state === 'unpaid' || state === 'pending') return 'unpaid'
+  throw new Error(
+    `TunnelSats API returned an unknown payment status: ${JSON.stringify(state)?.slice(0, 40)}`,
+  )
 }
 
 // Claim field validation, mirroring bridge.py (assemble_claimed_config).

@@ -13,6 +13,9 @@ import {
 } from '../apiClient'
 import {
   NothingToResumeError,
+  PendingPaymentConflictError,
+  isNwcRenewalInFlight,
+  isPaymentReceived,
   payTaskReplayId,
   recordThenRaise,
   runPaymentExclusive,
@@ -20,13 +23,14 @@ import {
 } from '../settlement'
 import {
   INVOICE_TTL_MS,
-  PendingPaymentConflictError,
   VALID_DURATIONS,
   payableUntil,
   unsettledUntil,
   untilText,
 } from './buySubscription'
 import { resolvePayInvoice } from './resolvePayInvoice'
+
+export { PendingPaymentConflictError }
 
 export interface PendingRenewalRecord {
   paymentHash: string
@@ -41,6 +45,12 @@ export interface PendingRenewalRecord {
   paymentReceivedFor?: string
   publicKey?: string
   targetNode?: TargetNode
+  lastError?: string
+  nextAttemptAt?: string
+  paidViaNwc?: boolean
+  nwcAttempted?: boolean
+  nwcPayInFlightUntil?: string
+  raisePayTask?: boolean
 }
 
 export interface RenewalInput {
@@ -115,6 +125,7 @@ export function reusablePendingRenewal(
   now: Date,
 ): (PendingRenewalRecord & { invoice: string; expiresAt: string }) | null {
   if (!pending || pending.publicKey !== publicKey) return null
+  if (isNwcRenewalInFlight(pending, now)) return null
   const expiresMs = payableUntil(pending, now)
   if (expiresMs === null || !pending.invoice) return null
   const node = pending.targetNode ?? targetNode
@@ -157,27 +168,37 @@ export async function runRenewal(
   return runPaymentExclusive(async () => {
     const current = await ops.readCurrent()
     const pending = current?.pending ?? null
-    if (
-      pending &&
-      pending.publicKey === publicKey &&
-      pending.paymentReceivedFor === pending.paymentHash &&
-      input.keepPayable
-    ) {
-      // Only a request for the same plan is that payment; a record without
-      // a duration cannot be matched and is treated as different.
-      if (pending.duration !== input.duration) {
+    if (pending && isPaymentReceived(pending)) {
+      if (pending.publicKey === publicKey && input.keepPayable) {
+        // Only a request for the same plan is that payment; a record without
+        // a duration cannot be matched and is treated as different.
+        if (pending.duration !== input.duration) {
+          throw new PendingPaymentConflictError(
+            `A renewal payment (${pending.duration ?? '?'} month(s)) was received and is still being applied. Try again once it has finished.`,
+          )
+        }
+        return {
+          kind: 'already-paid',
+          paymentHash: pending.paymentHash,
+          targetNode: pending.targetNode ?? targetNode,
+        }
+      }
+      if (pending.publicKey !== publicKey) {
         throw new PendingPaymentConflictError(
-          `A renewal payment (${pending.duration ?? '?'} month(s)) was received and is still being applied. Try again once it has finished.`,
+          'A renewal for the previous subscription key was paid and is still being settled. Try again once it has settled.',
         )
       }
-      return {
-        kind: 'already-paid',
-        paymentHash: pending.paymentHash,
-        targetNode: pending.targetNode ?? targetNode,
-      }
+      throw new PendingPaymentConflictError(
+        `A renewal payment (${pending.duration ?? '?'} month(s)) was received and is still being applied. Try again once it has finished.`,
+      )
     }
 
     const now = ops.now()
+    if (pending && isNwcRenewalInFlight(pending, now)) {
+      throw new PendingPaymentConflictError(
+        'An automatic NWC renewal payment is already in progress or awaiting confirmation for this subscription. Wait for it to settle before starting another renewal.',
+      )
+    }
     const reusable = reusablePendingRenewal(
       pending,
       publicKey,
@@ -217,7 +238,7 @@ export async function runRenewal(
           `A renewal invoice for the previous subscription key is still payable${untilText(previousUntil)}. Pay it, or replace it with the Renew Subscription action in StartOS.`,
         )
       }
-      if (pending.paymentReceivedFor === pending.paymentHash) {
+      if (isPaymentReceived(pending)) {
         throw new PendingPaymentConflictError(
           'A renewal for the previous subscription key was paid and is still being settled. Try again once it has settled.',
         )
@@ -261,6 +282,7 @@ export async function runRenewal(
     }
 
     await recordThenRaise('renewal', renewal.paymentHash, {
+      now: ops.now,
       lockMeta: ops.lockMeta,
       readCurrent: ops.readCurrent,
       record: (patch) => ops.record(entry, patch),
@@ -318,6 +340,8 @@ export function startRenewal(
           lastError: undefined,
           nextAttemptAt: undefined,
           paidViaNwc: undefined,
+          nwcAttempted: undefined,
+          nwcPayInFlightUntil: undefined,
           raisePayTask: undefined,
         },
         ...(typeof entry.duration === 'number'

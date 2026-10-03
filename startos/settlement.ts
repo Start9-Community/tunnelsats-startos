@@ -55,6 +55,136 @@ export function replacedPayTaskId(
   )
 }
 
+export const INVOICE_TTL_MS = 60 * 60 * 1000
+export const MAX_PREVIOUS_PENDING_ORDERS = 5
+
+/**
+ * Matches settlement lastError messages written by bridge.py only after
+ * payment was received (mirroring _PAID_ERROR_RE in bridge.py).
+ */
+export const PAID_ERROR_RE =
+  /payment was received|already been paid|renewal is paid|bandwidth reset was applied|bandwidth reset failed|claim|provisioning failed|stored private key/i
+
+export interface PendingOrderRecord {
+  paymentHash: string
+  orderId: string
+  privateKey: string
+  publicKey: string
+  targetNode: TargetNode
+  serverId: string
+  createdAt: string
+  duration?: number
+  invoice?: string
+  amountSats?: number
+  expiresAt?: string
+  paymentReceivedFor?: string
+  lastError?: string
+  nextAttemptAt?: string
+}
+
+/**
+ * A request that would replace a paid invoice awaiting settlement, an
+ * in-flight NWC auto-renewal, or (for dashboard intents) a still-payable
+ * invoice of the same kind.
+ */
+export class PendingPaymentConflictError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'PendingPaymentConflictError'
+  }
+}
+
+/**
+ * True when a pending entry has already been paid locally or recorded a
+ * post-payment settlement error, so it must never be overwritten before the
+ * settlement tick finishes it.
+ */
+export function isPaymentReceived(
+  pending:
+    | {
+        paymentHash?: string
+        paymentReceivedFor?: string
+        paidViaNwc?: boolean
+        lastError?: string
+      }
+    | null
+    | undefined,
+): boolean {
+  if (!pending || !pending.paymentHash) return false
+  return (
+    pending.paymentReceivedFor === pending.paymentHash ||
+    pending.paidViaNwc === true ||
+    Boolean(
+      typeof pending.lastError === 'string' &&
+      PAID_ERROR_RE.test(pending.lastError),
+    )
+  )
+}
+
+/**
+ * Until when (epoch ms) an unpaid pending payment may still be paid, whether
+ * or not its invoice was stored: records written before invoices were kept
+ * have none, yet their invoice can still be paid on the node. Returns
+ * Infinity when the record has no usable time (fail closed), null when
+ * nothing unpaid is pending or it has expired. Paid records return null;
+ * callers check isPaymentReceived separately.
+ */
+export function unsettledUntil(
+  pending:
+    | {
+        paymentHash?: string
+        paymentReceivedFor?: string
+        paidViaNwc?: boolean
+        lastError?: string
+        createdAt?: string
+        expiresAt?: string
+      }
+    | null
+    | undefined,
+  now: Date,
+): number | null {
+  if (!pending || !pending.paymentHash) return null
+  if (isPaymentReceived(pending)) return null
+  const createdMs = pending.createdAt ? Date.parse(pending.createdAt) : NaN
+  const expiresMs = pending.expiresAt
+    ? Date.parse(pending.expiresAt)
+    : createdMs + INVOICE_TTL_MS
+  if (!Number.isFinite(expiresMs)) return Number.POSITIVE_INFINITY
+  return expiresMs > now.getTime() ? expiresMs : null
+}
+
+/**
+ * True when an automatic NWC renewal payment has been dispatched for an
+ * unexpired renewal invoice or has an active in-flight hold.
+ */
+export function isNwcRenewalInFlight(
+  pending:
+    | {
+        paymentHash?: string
+        paymentReceivedFor?: string
+        paidViaNwc?: boolean
+        lastError?: string
+        nwcAttempted?: boolean
+        nwcPayInFlightUntil?: string
+        raisePayTask?: boolean
+        createdAt?: string
+        expiresAt?: string
+      }
+    | null
+    | undefined,
+  now: Date,
+): boolean {
+  if (!pending || !pending.paymentHash) return false
+  const inFlightMs = pending.nwcPayInFlightUntil
+    ? Date.parse(pending.nwcPayInFlightUntil)
+    : NaN
+  if (Number.isFinite(inFlightMs) && inFlightMs > now.getTime()) {
+    return true
+  }
+  if (pending.raisePayTask === true) return false
+  return pending.nwcAttempted === true && unsettledUntil(pending, now) !== null
+}
+
 /**
  * The metadata patch a Buy/Renew merges together with its new pending entry:
  * it queues the replaced payment's pay task in payTasksToClear, so the
@@ -81,8 +211,131 @@ export function replacedPayTaskPatch(
   }
 }
 
+/**
+ * Preserves an unexpired replaced `pendingOrder` (including its `privateKey`)
+ * in `previousPendingOrders` alongside any still-unexpired entries, deduplicated
+ * by `paymentHash` and capped at the 5 most recent.
+ */
+export function replacedOrderPatch(
+  previous:
+    | {
+        paymentHash?: string
+        orderId?: string
+        privateKey?: string
+        publicKey?: string
+        targetNode?: string
+        serverId?: string
+        createdAt?: string
+        duration?: number
+        invoice?: string
+        amountSats?: number
+        expiresAt?: string
+        paymentReceivedFor?: string
+        lastError?: string
+        nextAttemptAt?: string
+      }
+    | null
+    | undefined,
+  existingPrevious: readonly PendingOrderRecord[] | null | undefined,
+  newHash: string,
+  now: Date,
+): { previousPendingOrders?: PendingOrderRecord[] } {
+  const canRetainPrevious = Boolean(
+    previous &&
+    typeof previous.paymentHash === 'string' &&
+    previous.paymentHash.length > 0 &&
+    previous.paymentHash !== newHash &&
+    typeof previous.orderId === 'string' &&
+    previous.orderId.length > 0 &&
+    typeof previous.privateKey === 'string' &&
+    previous.privateKey.length > 0 &&
+    typeof previous.publicKey === 'string' &&
+    previous.publicKey.length > 0 &&
+    typeof previous.targetNode === 'string' &&
+    TARGET_NODES.includes(previous.targetNode) &&
+    typeof previous.serverId === 'string' &&
+    previous.serverId.length > 0 &&
+    typeof previous.createdAt === 'string' &&
+    previous.createdAt.length > 0 &&
+    unsettledUntil(previous, now) !== null,
+  )
+
+  if (!canRetainPrevious && existingPrevious === undefined) {
+    return {}
+  }
+
+  const deduped: PendingOrderRecord[] = []
+  for (const item of existingPrevious ?? []) {
+    if (
+      !item ||
+      typeof item.paymentHash !== 'string' ||
+      !item.paymentHash ||
+      item.paymentHash === newHash ||
+      typeof item.privateKey !== 'string' ||
+      !item.privateKey ||
+      typeof item.publicKey !== 'string' ||
+      !item.publicKey ||
+      (unsettledUntil(item, now) === null && !isPaymentReceived(item))
+    ) {
+      continue
+    }
+    const existingIdx = deduped.findIndex(
+      (x) => x.paymentHash === item.paymentHash,
+    )
+    if (existingIdx !== -1) deduped.splice(existingIdx, 1)
+    deduped.push(item)
+  }
+
+  if (canRetainPrevious && previous) {
+    const entry: PendingOrderRecord = {
+      paymentHash: previous.paymentHash!,
+      orderId: previous.orderId!,
+      privateKey: previous.privateKey!,
+      publicKey: previous.publicKey!,
+      targetNode: previous.targetNode as TargetNode,
+      serverId: previous.serverId!,
+      createdAt: previous.createdAt!,
+      ...(previous.duration !== undefined
+        ? { duration: previous.duration }
+        : {}),
+      ...(previous.invoice !== undefined ? { invoice: previous.invoice } : {}),
+      ...(previous.amountSats !== undefined
+        ? { amountSats: previous.amountSats }
+        : {}),
+      ...(previous.expiresAt !== undefined
+        ? { expiresAt: previous.expiresAt }
+        : {}),
+      ...(previous.paymentReceivedFor !== undefined
+        ? { paymentReceivedFor: previous.paymentReceivedFor }
+        : {}),
+      ...(previous.lastError !== undefined
+        ? { lastError: previous.lastError }
+        : {}),
+      ...(previous.nextAttemptAt !== undefined
+        ? { nextAttemptAt: previous.nextAttemptAt }
+        : {}),
+    }
+    const existingIdx = deduped.findIndex(
+      (x) => x.paymentHash === entry.paymentHash,
+    )
+    if (existingIdx !== -1) deduped.splice(existingIdx, 1)
+    deduped.push(entry)
+  }
+
+  return {
+    previousPendingOrders: deduped.slice(-MAX_PREVIOUS_PENDING_ORDERS),
+  }
+}
+
+export interface PaymentRecordPatch {
+  payTasksToClear?: string[]
+  previousPendingOrders?: PendingOrderRecord[]
+}
+
 /** What recordPaymentThenRaiseTask needs from the package; injected. */
 export interface PaymentRecordOps {
+  /** Current clock; defaults to `() => new Date()` when omitted. */
+  now?(): Date
   /**
    * The cross-runtime metadata lock (metaLockFor): the read and the record
    * run under it, so a bridge.py write cannot land between them.
@@ -90,11 +343,31 @@ export interface PaymentRecordOps {
   lockMeta: MetaLock
   /** A fresh read of the pending entry being replaced and the queue. */
   readCurrent(): Promise<{
-    pending?: { paymentHash?: string; targetNode?: string } | null
+    pending?: {
+      paymentHash?: string
+      targetNode?: string
+      paymentReceivedFor?: string
+      lastError?: string
+      paidViaNwc?: boolean
+      nwcAttempted?: boolean
+      nwcPayInFlightUntil?: string
+      raisePayTask?: boolean
+      createdAt?: string
+      expiresAt?: string
+      invoice?: string
+      orderId?: string
+      privateKey?: string
+      publicKey?: string
+      serverId?: string
+      duration?: number
+      amountSats?: number
+      nextAttemptAt?: string
+    } | null
+    previousPendingOrders?: PendingOrderRecord[]
     payTasksToClear?: string[]
   } | null>
   /** Writes the new pending entry together with the given patch. */
-  record(patch: { payTasksToClear?: string[] }): Promise<unknown>
+  record(patch: PaymentRecordPatch): Promise<unknown>
   /** Raises the new payment's Pay Invoice task. */
   raiseTask(): Promise<unknown>
 }
@@ -142,14 +415,33 @@ export async function recordThenRaise(
   // for bridge.py or StartOS.
   await ops.lockMeta(async () => {
     const current = await ops.readCurrent()
-    await ops.record(
-      replacedPayTaskPatch(
-        kind,
-        current?.pending,
-        current?.payTasksToClear,
-        newHash,
-      ),
-    )
+    const now = (ops.now ?? (() => new Date()))()
+    const pending = current?.pending
+    if (pending?.paymentHash && pending.paymentHash !== newHash) {
+      if (isPaymentReceived(pending)) {
+        throw new PendingPaymentConflictError(
+          kind === 'renewal'
+            ? 'A previous renewal has already been paid and is being applied. Wait for it to finish settling before starting another renewal.'
+            : 'A previous subscription order has already been paid and is being provisioned. Wait for it to finish settling before starting a new purchase.',
+        )
+      }
+      if (kind === 'renewal' && isNwcRenewalInFlight(pending, now)) {
+        throw new PendingPaymentConflictError(
+          'An automatic NWC renewal payment is already in progress or awaiting confirmation for this subscription. Wait for it to settle before starting another renewal.',
+        )
+      }
+    }
+    await ops.record({
+      ...replacedPayTaskPatch(kind, pending, current?.payTasksToClear, newHash),
+      ...(kind === 'order'
+        ? replacedOrderPatch(
+            pending,
+            current?.previousPendingOrders,
+            newHash,
+            now,
+          )
+        : {}),
+    })
   })
   await ops.raiseTask()
 }

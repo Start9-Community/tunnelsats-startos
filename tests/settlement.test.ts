@@ -7,8 +7,11 @@ import { join } from 'node:path'
 import { FileHelper } from '@start9labs/start-sdk'
 import { metaShape } from '../startos/fileModels/tunnelsatsMeta'
 import {
+  PendingPaymentConflictError,
   payTaskReplayId,
   recordPaymentThenRaiseTask,
+  recordThenRaise,
+  replacedOrderPatch,
   replacedPayTaskPatch,
   replacedPayTaskId,
   runSettlementTick,
@@ -528,4 +531,100 @@ test('recordPaymentThenRaiseTask: a failed read records nothing and raises no ta
     /EIO/,
   )
   assert.deepEqual(calls, [])
+})
+
+test('recordThenRaise refuses to overwrite pending when concurrent settlement tick marks it paid', async () => {
+  const oldHash = '1'.repeat(64)
+  const newHash = '2'.repeat(64)
+
+  for (const [kind, pending] of [
+    ['order', { paymentHash: oldHash, paymentReceivedFor: oldHash }],
+    ['order', { paymentHash: oldHash, paidViaNwc: true }],
+    [
+      'order',
+      {
+        paymentHash: oldHash,
+        lastError: 'The payment was received, but claim failed.',
+      },
+    ],
+    [
+      'renewal',
+      {
+        paymentHash: oldHash,
+        lastError: 'The renewal is paid, but status refresh failed.',
+      },
+    ],
+  ] as const) {
+    const calls: string[] = []
+    await assert.rejects(
+      recordThenRaise(kind, newHash, {
+        lockMeta: testMetaLock,
+        readCurrent: async () => ({ pending }),
+        record: async () => {
+          calls.push('record')
+        },
+        raiseTask: async () => {
+          calls.push('raise')
+        },
+      }),
+      PendingPaymentConflictError,
+    )
+    assert.deepEqual(calls, [])
+  }
+})
+
+test('recordThenRaise refuses to overwrite an unexpired renewal when nwcAttempted is true', async () => {
+  const now = new Date('2026-10-01T12:00:00.000Z')
+  const oldHash = '3'.repeat(64)
+  const newHash = '4'.repeat(64)
+  const calls: string[] = []
+
+  await assert.rejects(
+    recordThenRaise('renewal', newHash, {
+      now: () => now,
+      lockMeta: testMetaLock,
+      readCurrent: async () => ({
+        pending: {
+          paymentHash: oldHash,
+          nwcAttempted: true,
+          expiresAt: new Date(now.getTime() + 30 * 60_000).toISOString(),
+        },
+      }),
+      record: async () => {
+        calls.push('record')
+      },
+      raiseTask: async () => {
+        calls.push('raise')
+      },
+    }),
+    (err: unknown) =>
+      err instanceof PendingPaymentConflictError &&
+      /automatic NWC renewal payment is already in progress/.test(err.message),
+  )
+  assert.deepEqual(calls, [])
+})
+
+test('replacedOrderPatch preserves unexpired replaced pendingOrder and prunes expired ones', () => {
+  const now = new Date('2026-10-01T12:00:00.000Z')
+  const unexpired = {
+    paymentHash: 'a'.repeat(64),
+    orderId: 'ord-a',
+    privateKey: 'priv-a',
+    publicKey: 'pub-a',
+    targetNode: 'lnd' as const,
+    serverId: 'eu-de',
+    createdAt: new Date(now.getTime() - 5 * 60_000).toISOString(),
+    expiresAt: new Date(now.getTime() + 55 * 60_000).toISOString(),
+  }
+  const expired = {
+    ...unexpired,
+    paymentHash: 'e'.repeat(64),
+    orderId: 'ord-e',
+    expiresAt: new Date(now.getTime() - 1_000).toISOString(),
+  }
+
+  const patch = replacedOrderPatch(unexpired, [expired], 'b'.repeat(64), now)
+  assert.equal(patch.previousPendingOrders?.length, 1)
+  assert.equal(patch.previousPendingOrders?.[0]?.paymentHash, 'a'.repeat(64))
+  assert.equal(patch.previousPendingOrders?.[0]?.privateKey, 'priv-a')
 })

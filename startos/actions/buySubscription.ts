@@ -7,35 +7,40 @@ import { generateWireguardKeypair } from '../keygen'
 import {
   bolt11AmountSats,
   createSubscriptionOrder,
+  fetchOrderPaymentStatus,
+  type OrderPaymentState,
   type SubscriptionOrder,
 } from '../apiClient'
 import {
+  INVOICE_TTL_MS,
+  MAX_PREVIOUS_PENDING_ORDERS,
   NothingToResumeError,
+  PAID_ERROR_RE,
+  PendingPaymentConflictError,
+  isPaymentReceived,
   payTaskReplayId,
   recordThenRaise,
+  replacedOrderPatch,
   runPaymentExclusive,
+  unsettledUntil,
+  type PaymentRecordPatch,
+  type PendingOrderRecord,
   type TargetNode,
 } from '../settlement'
 import { resolvePayInvoice } from './resolvePayInvoice'
 import { defaultServerRegion, loadServerRegions } from '../serverRegions'
 
-export const INVOICE_TTL_MS = 60 * 60 * 1000
-export const VALID_DURATIONS = [1, 3, 6, 12] as const
-
-export interface PendingOrderRecord {
-  paymentHash: string
-  orderId: string
-  privateKey: string
-  publicKey: string
-  targetNode: TargetNode
-  serverId: string
-  createdAt: string
-  duration?: number
-  invoice?: string
-  amountSats?: number
-  expiresAt?: string
-  paymentReceivedFor?: string
+export {
+  INVOICE_TTL_MS,
+  MAX_PREVIOUS_PENDING_ORDERS,
+  PAID_ERROR_RE,
+  PendingPaymentConflictError,
+  isPaymentReceived,
+  replacedOrderPatch,
+  unsettledUntil,
+  type PendingOrderRecord,
 }
+export const VALID_DURATIONS = [1, 3, 6, 12] as const
 
 export interface PurchaseInput {
   targetNode: TargetNode
@@ -56,17 +61,6 @@ export interface PurchaseInput {
   reuseOnly?: boolean
 }
 
-/**
- * A dashboard request that would replace a still-payable invoice of the same
- * kind. Only an operator-authenticated StartOS action may do that.
- */
-export class PendingPaymentConflictError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'PendingPaymentConflictError'
-  }
-}
-
 /** " until <ISO time>", or "" when the pending record has no usable time. */
 export function untilText(untilMs: number): string {
   return Number.isFinite(untilMs)
@@ -80,18 +74,21 @@ export interface PurchaseOps {
   lockMeta: MetaLock
   readCurrent(): Promise<{
     pending?: PendingOrderRecord | null
+    previousPendingOrders?: PendingOrderRecord[]
     payTasksToClear?: string[]
   } | null>
+  /**
+   * Live payment check before replacing an existing pendingOrder, so an
+   * order paid since the last settlement tick is never overwritten.
+   */
+  fetchPaymentState?(paymentHash: string): Promise<OrderPaymentState>
   generateKeypair(): { privateKey: string; publicKey: string }
   createOrder(params: {
     serverId: string
     duration: number
     wgPublicKey: string
   }): Promise<SubscriptionOrder>
-  record(
-    entry: PendingOrderRecord,
-    patch: { payTasksToClear?: string[] },
-  ): Promise<unknown>
+  record(entry: PendingOrderRecord, patch: PaymentRecordPatch): Promise<unknown>
   raiseTask(task: {
     invoice: string
     paymentHash: string
@@ -128,6 +125,8 @@ export function payableUntil(
         paymentHash?: string
         invoice?: string
         paymentReceivedFor?: string
+        paidViaNwc?: boolean
+        lastError?: string
         createdAt: string
         expiresAt?: string
       }
@@ -136,7 +135,7 @@ export function payableUntil(
   now: Date,
 ): number | null {
   if (!pending || !pending.paymentHash || !pending.invoice) return null
-  if (pending.paymentReceivedFor === pending.paymentHash) return null
+  if (isPaymentReceived(pending)) return null
   const createdMs = Date.parse(pending.createdAt)
   const expiresMs = pending.expiresAt
     ? Date.parse(pending.expiresAt)
@@ -145,36 +144,6 @@ export function payableUntil(
       : NaN
   if (!Number.isFinite(expiresMs) || expiresMs <= now.getTime()) return null
   return expiresMs
-}
-
-/**
- * Until when (epoch ms) an unpaid pending payment may still be paid, whether
- * or not its invoice was stored: records written before invoices were kept
- * have none, yet their invoice can still be paid on the node. Returns
- * Infinity when the record has no usable time (fail closed), null when
- * nothing unpaid is pending or it has expired. Paid records return null;
- * callers check paymentReceivedFor separately.
- */
-export function unsettledUntil(
-  pending:
-    | {
-        paymentHash?: string
-        paymentReceivedFor?: string
-        createdAt?: string
-        expiresAt?: string
-      }
-    | null
-    | undefined,
-  now: Date,
-): number | null {
-  if (!pending || !pending.paymentHash) return null
-  if (pending.paymentReceivedFor === pending.paymentHash) return null
-  const createdMs = pending.createdAt ? Date.parse(pending.createdAt) : NaN
-  const expiresMs = pending.expiresAt
-    ? Date.parse(pending.expiresAt)
-    : createdMs + INVOICE_TTL_MS
-  if (!Number.isFinite(expiresMs)) return Number.POSITIVE_INFINITY
-  return expiresMs > now.getTime() ? expiresMs : null
 }
 
 /** A payable pending order for exactly this server, plan and node, or null. */
@@ -220,28 +189,26 @@ export function runPurchase(
   return runPaymentExclusive(async () => {
     const current = await ops.readCurrent()
     const pending = current?.pending ?? null
-    if (
-      pending &&
-      pending.paymentReceivedFor === pending.paymentHash &&
-      input.keepPayable
-    ) {
-      // Paid, not claimed yet: the settlement watcher finishes it. Only the
-      // same selection is that payment; any other request would be marked
-      // done without an invoice for what was asked.
+    if (pending && isPaymentReceived(pending)) {
+      // Paid, not claimed yet: the settlement watcher finishes it. Never
+      // replace a paid pendingOrder (which would overwrite its private key
+      // before bridge.py claims and saves it). Only a dashboard request for
+      // the same selection returns already-paid; anything else conflicts.
       if (
-        pending.serverId !== input.serverRegion ||
-        pending.duration !== input.duration ||
-        pending.targetNode !== input.targetNode
+        input.keepPayable &&
+        pending.serverId === input.serverRegion &&
+        pending.duration === input.duration &&
+        pending.targetNode === input.targetNode
       ) {
-        throw new PendingPaymentConflictError(
-          `A subscription payment (${pending.serverId}, ${pending.duration ?? '?'} month(s), ${pending.targetNode}) was received and is still being set up. Try again once it has finished.`,
-        )
+        return {
+          kind: 'already-paid',
+          paymentHash: pending.paymentHash,
+          targetNode: pending.targetNode,
+        }
       }
-      return {
-        kind: 'already-paid',
-        paymentHash: pending.paymentHash,
-        targetNode: pending.targetNode,
-      }
+      throw new PendingPaymentConflictError(
+        `A previous subscription order (${pending.serverId}, ${pending.duration ?? '?'} month(s), ${pending.targetNode}) has already been paid — payment was received and is still being set up and provisioned. Wait for it to finish settling before starting a new purchase.`,
+      )
     }
 
     const now = ops.now()
@@ -277,6 +244,15 @@ export function runPurchase(
     }
     if (input.reuseOnly) throw new NothingToResumeError()
 
+    if (pending && ops.fetchPaymentState) {
+      const liveState = await ops.fetchPaymentState(pending.paymentHash)
+      if (liveState === 'paid' || liveState === 'processing') {
+        throw new PendingPaymentConflictError(
+          'A previous subscription order has already been paid and is being provisioned. Wait for it to finish settling before starting a new purchase.',
+        )
+      }
+    }
+
     const keypair = ops.generateKeypair()
     const order = await ops.createOrder({
       serverId: input.serverRegion,
@@ -303,6 +279,7 @@ export function runPurchase(
     }
 
     await recordThenRaise('order', order.paymentHash, {
+      now: ops.now,
       lockMeta: ops.lockMeta,
       readCurrent: ops.readCurrent,
       record: (patch) => ops.record(entry, patch),
@@ -336,10 +313,12 @@ export function startPurchase(
       return (
         current && {
           pending: current.pendingOrder,
+          previousPendingOrders: current.previousPendingOrders,
           payTasksToClear: current.payTasksToClear,
         }
       )
     },
+    fetchPaymentState: (paymentHash) => fetchOrderPaymentStatus(paymentHash),
     generateKeypair: () => generateWireguardKeypair(),
     createOrder: (params) => createSubscriptionOrder(params),
     record: (entry, patch) =>

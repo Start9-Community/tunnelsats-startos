@@ -1,9 +1,11 @@
 /**
  * StartOS notifications for the subscription (G8): 7 and 3 days before the
  * confirmed expiry, on lapse, and when TunnelSats has no subscription for
- * the configured key. Also once per paid replaced order that the settlement
- * watcher recovered without replacing the active tunnel: its outcome is
- * otherwise only shown while the settlement tick reports it.
+ * the configured key. Also when the settlement watcher recovered a paid
+ * replaced order without replacing the active tunnel, since its outcome is
+ * otherwise only shown while the settlement tick reports it. The metadata
+ * holds the latest recovery only (lastRecoveredOrder), so recoveries between
+ * two runs share one notice; Export lists every recovered configuration.
  *
  * sdk.notification.create is not idempotent, so what was sent is persisted
  * (subscription-notices.json) and each notice goes out once per period. A

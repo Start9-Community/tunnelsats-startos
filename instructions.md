@@ -56,7 +56,7 @@ Use the **Configure** action to switch TunnelSats off, pick a different target n
 
 You retain full ownership and sovereignty over your cryptographic keys and WireGuard tunnel:
 
-- Copy your active `.conf` anytime via **Services** &rarr; **TunnelSats** &rarr; **Actions** &rarr; **Export WireGuard Configuration**. This action also lists configurations recovered from paid invoices that you replaced. A recovered order never replaces a tunnel you already have (bought or imported); use **Import Subscription** to activate one of the recovered configurations.
+- Copy your active `.conf` anytime via **Services** &rarr; **TunnelSats** &rarr; **Actions** &rarr; **Export WireGuard Configuration**. This action also lists configurations recovered from paid invoices that you replaced. A recovered order never replaces a tunnel you already have (bought, imported, or switched off in **Configure**); use **Import Subscription** to activate one of the recovered configurations.
 - If **Buy Subscription** reports too many replaced orders awaiting settlement, wait for their payments to settle or their unpaid invoices to expire. Their private keys are kept until payment status has been checked.
 - WireGuard configurations and subscription metadata are securely preserved in encrypted StartOS system backups. For security, the NWC spending credential (`/data/nwc-wallet.json`) is excluded from StartOS backups; restoring from a backup raises a **Connect Wallet** task prompting you to reconnect your wallet.
 

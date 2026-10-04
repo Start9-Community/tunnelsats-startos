@@ -500,6 +500,44 @@ class TestOrderSettlement(SettlementTestBase):
         # Recorded for the health check's one-time notice.
         self.assertEqual(meta["lastRecoveredOrder"], {"paymentHash": old_hash, "recoveredAt": bridge._iso(NOW)})
 
+    def test_paid_replaced_order_never_replaces_a_switched_off_configuration(self):
+        # Switching TunnelSats off in Configure removes the conf file and
+        # keeps the configuration in config.json only. It is still the
+        # operator's tunnel: it must be neither replaced nor switched back on.
+        imported_priv, _ = new_keypair()
+        switched_off = {
+            "enabled": False,
+            "target-node": "eclair",
+            "tunnelsats-conf": f"[Interface]\nPrivateKey = {imported_priv}\nAddress = 10.9.0.9/32\n",
+            "allow-ipv6": False,
+        }
+        with open(bridge.APP_CONFIG_PATH, "w") as f:
+            json.dump(switched_off, f)
+        old_priv, old_pub = new_keypair()
+        old_hash = "c" * 64
+        old_task = "tunnelsats-order:eclair:" + old_hash[:16]
+        self.write_meta({"previousPendingOrders": [self.pending_order(
+            paymentHash=old_hash, privateKey=old_priv, publicKey=old_pub,
+            expiresAt=iso(NOW + timedelta(minutes=30)),
+        )]})
+        self.api.on("GET", f"/subscription/{old_hash}", response({"status": "paid"}))
+        payload = self.claim_payload()
+        payload["peer"]["publicKey"] = old_pub
+        self.api.on("POST", "/subscription/claim", response(payload))
+
+        result = self.settle()
+
+        self.assertEqual((self.only(result)["kind"], self.only(result)["result"]), ("order", "superseded"))
+        with open(bridge.APP_CONFIG_PATH) as f:
+            self.assertEqual(json.load(f), switched_off)
+        self.assertFalse(os.path.exists(bridge.CONFIG_PATH))
+        meta = self.read_meta()
+        self.assertIn(f"PrivateKey = {old_priv}", meta["recoveredOrderConfigs"][old_hash])
+        self.assertNotIn("previousPendingOrders", meta)
+        self.assertNotIn("provisionedKey", meta)
+        self.assertIn(old_task, result["clearPayTasks"])
+        self.assertEqual(meta["lastRecoveredOrder"]["paymentHash"], old_hash)
+
     def test_a_tunnel_imported_while_a_recovered_order_is_activated_is_never_replaced(self):
         # The decision and the configuration write are separate lock holds;
         # save_configuration checks again under its own, so an Import that
@@ -559,6 +597,60 @@ class TestOrderSettlement(SettlementTestBase):
             with open(bridge.CONFIG_PATH, "w") as f:
                 f.write(content)
             self.assertEqual(bridge._tunnel_configured(), expected, content)
+
+    def test_a_switched_off_or_unreadable_configuration_counts_as_a_tunnel(self):
+        # Only a missing file counts as absent. When in doubt a tunnel is
+        # reported, which keeps the operator's tunnel.
+        priv, _ = new_keypair()
+        self.assertFalse(bridge._tunnel_configured())
+        for app_config, expected in (
+            ({"enabled": False, "tunnelsats-conf": f"[Interface]\nPrivateKey = {priv}\n"}, True),
+            ({"enabled": False, "tunnelsats-conf": f"[Interface]\n# PrivateKey = {priv}\n"}, False),
+            ({"enabled": False, "target-node": "lnd"}, False),
+            ({"enabled": False, "tunnelsats-conf": None}, False),
+        ):
+            with open(bridge.APP_CONFIG_PATH, "w") as f:
+                json.dump(app_config, f)
+            self.assertEqual(bridge._tunnel_configured(), expected, app_config)
+        for corrupt in ("{not json", "[]"):
+            with open(bridge.APP_CONFIG_PATH, "w") as f:
+                f.write(corrupt)
+            self.assertTrue(bridge._tunnel_configured(), corrupt)
+        os.remove(bridge.APP_CONFIG_PATH)
+        os.mkdir(bridge.CONFIG_PATH)  # cannot be read: open() fails with EISDIR
+        self.assertTrue(bridge._tunnel_configured())
+
+    def test_a_paid_replaced_order_is_not_activated_while_a_newer_order_is_provisioned(self):
+        # The newer order was paid in this tick and is still being
+        # provisioned, so no tunnel is stored or provisioned yet. Only the
+        # tick-local check keeps the older order from becoming a tunnel that
+        # the newer one replaces moments later.
+        old_priv, old_pub = new_keypair()
+        old_hash = "c" * 64
+        self.write_meta({
+            "pendingOrder": self.pending_order(),
+            "previousPendingOrders": [self.pending_order(
+                paymentHash=old_hash, privateKey=old_priv, publicKey=old_pub,
+                expiresAt=iso(NOW + timedelta(minutes=30)),
+            )],
+        })
+        self.api.on("GET", f"/subscription/{HASH}", response({"status": "processing"}, status=202))
+        self.api.on("GET", f"/subscription/{old_hash}", response({"status": "paid"}))
+        payload = self.claim_payload()
+        payload["peer"]["publicKey"] = old_pub
+        self.api.on("POST", "/subscription/claim", response(payload))
+
+        result = self.settle()
+
+        self.assertEqual(
+            [(o["kind"], o["result"]) for o in result["outcomes"]],
+            [("order", "waiting"), ("order", "superseded")],
+        )
+        self.assertFalse(os.path.exists(bridge.CONFIG_PATH))
+        meta = self.read_meta()
+        self.assertEqual(meta["pendingOrder"]["paymentHash"], HASH)
+        self.assertIn(f"PrivateKey = {old_priv}", meta["recoveredOrderConfigs"][old_hash])
+        self.assertEqual(meta["lastRecoveredOrder"]["paymentHash"], old_hash)
 
     def test_expired_previous_order_is_kept_while_its_status_cannot_be_checked(self):
         old_priv, old_pub = new_keypair()

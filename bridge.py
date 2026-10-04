@@ -1450,20 +1450,41 @@ def _update_previous_pending_order(payment_hash, fields):
             atomic_write_json(META_FILE_PATH, meta)
 
 
+_PRIVATE_KEY_LINE = re.compile(r'^\s*(?!#|;)\s*PrivateKey\s*=\s*\S', re.IGNORECASE | re.MULTILINE)
+
+
 def _tunnel_configured():
     """Whether a WireGuard configuration with a private key is stored,
-    whether it was bought, imported or entered in Configure (all of them
-    write CONFIG_PATH). Reads the file only: no `wg` call that could fail and
-    make a stored tunnel look absent. The pattern is the one
+    whether it was bought, imported or entered in Configure. An enabled
+    tunnel is in CONFIG_PATH. One switched off in Configure is kept in
+    config.json ("tunnelsats-conf") only, since Configure removes the conf
+    file, so both are checked. Reads the files only: no `wg` call that could
+    fail and make a stored tunnel look absent. The pattern is the one
     parseWireguardTunnelInfo (startos/utils.ts) uses, so both runtimes agree
-    on what a stored key is; when in doubt it reports a tunnel, which keeps
-    the active one."""
+    on what a stored key is. When in doubt it reports a tunnel, which keeps
+    the operator's: only a missing file counts as absent, and a file that
+    cannot be read or parsed counts as a tunnel. Every writer of both files
+    holds meta_lock."""
+    stored = []
     try:
         with open(CONFIG_PATH, "r") as f:
-            content = f.read()
-    except OSError:
-        return False
-    return re.search(r'^\s*(?!#|;)\s*PrivateKey\s*=\s*\S', content, re.IGNORECASE | re.MULTILINE) is not None
+            stored.append(f.read())
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError):
+        return True
+    try:
+        with open(APP_CONFIG_PATH, "r") as f:
+            app_config = json.load(f)
+    except FileNotFoundError:
+        app_config = {}
+    except (OSError, ValueError):
+        return True
+    if not isinstance(app_config, dict):
+        return True
+    if isinstance(app_config.get("tunnelsats-conf"), str):
+        stored.append(app_config["tunnelsats-conf"])
+    return any(_PRIVATE_KEY_LINE.search(conf) for conf in stored)
 
 
 def _retire_recovered_order(meta, payment_hash, now):
@@ -1485,7 +1506,8 @@ def _settle_previous_orders(now, newer_order_provisioned=False):
     order's key is never discarded. It becomes the active tunnel only when
     there is no tunnel it could replace: none was provisioned before
     (provisionedKey, persisted across ticks), none is stored (an imported
-    configuration sets no provisionedKey), and no newer order was
+    configuration sets no provisionedKey; one switched off in Configure is
+    kept in config.json only), and no newer order was
     provisioned or paid in this tick. The check is repeated under the lock
     of the configuration write, so a tunnel imported in between is never
     replaced. Otherwise the active tunnel stays, the order is announced once

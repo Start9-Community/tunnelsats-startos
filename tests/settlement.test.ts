@@ -604,7 +604,7 @@ test('recordThenRaise refuses to overwrite an unexpired renewal when nwcAttempte
   assert.deepEqual(calls, [])
 })
 
-test('replacedOrderPatch preserves unexpired replaced pendingOrder and prunes expired ones', () => {
+test('replacedOrderPatch preserves keys until settlement confirms an order can be retired', () => {
   const now = new Date('2026-10-01T12:00:00.000Z')
   const unexpired = {
     paymentHash: 'a'.repeat(64),
@@ -623,8 +623,47 @@ test('replacedOrderPatch preserves unexpired replaced pendingOrder and prunes ex
     expiresAt: new Date(now.getTime() - 1_000).toISOString(),
   }
 
-  const patch = replacedOrderPatch(unexpired, [expired], 'b'.repeat(64), now)
-  assert.equal(patch.previousPendingOrders?.length, 1)
-  assert.equal(patch.previousPendingOrders?.[0]?.paymentHash, 'a'.repeat(64))
-  assert.equal(patch.previousPendingOrders?.[0]?.privateKey, 'priv-a')
+  const patch = replacedOrderPatch(unexpired, [expired], 'b'.repeat(64))
+  assert.equal(patch.previousPendingOrders?.length, 2)
+  assert.equal(patch.previousPendingOrders?.[0]?.paymentHash, 'e'.repeat(64))
+  assert.equal(patch.previousPendingOrders?.[1]?.privateKey, 'priv-a')
+  const expiredPatch = replacedOrderPatch(expired, [], 'b'.repeat(64))
+  assert.equal(expiredPatch.previousPendingOrders?.[0]?.privateKey, 'priv-a')
+})
+
+test('recordThenRaise refuses replacement when the retained order queue is full', async () => {
+  const now = new Date('2026-10-01T12:00:00.000Z')
+  const entry = {
+    paymentHash: 'a'.repeat(64),
+    orderId: 'order-a',
+    privateKey: 'private-a',
+    publicKey: 'public-a',
+    targetNode: 'lnd' as const,
+    serverId: 'eu-de',
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 60 * 60_000).toISOString(),
+  }
+  const retained = Array.from({ length: 5 }, (_, n) => ({
+    ...entry,
+    paymentHash: String(n).repeat(64),
+  }))
+  const calls: string[] = []
+  await assert.rejects(
+    recordThenRaise('order', 'b'.repeat(64), {
+      now: () => now,
+      lockMeta: testMetaLock,
+      readCurrent: async () => ({
+        pending: entry,
+        previousPendingOrders: retained,
+      }),
+      record: async () => {
+        calls.push('record')
+      },
+      raiseTask: async () => {
+        calls.push('raise')
+      },
+    }),
+    PendingPaymentConflictError,
+  )
+  assert.deepEqual(calls, [])
 })

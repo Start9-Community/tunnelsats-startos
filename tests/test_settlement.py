@@ -166,6 +166,22 @@ class TestOrderSettlement(SettlementTestBase):
         self.assertEqual((outcome["kind"], outcome["result"]), ("order", "waiting"))
         self.assertEqual(self.read_meta()["pendingOrder"]["privateKey"], self.priv)
 
+    def test_payment_history_changes_only_after_payment_is_received(self):
+        self.write_meta({
+            "pendingOrder": self.pending_order(duration=12, amountSats=45_000),
+            "lastDuration": 1,
+            "lastAmountSats": 4500,
+        })
+        self.api.on("GET", f"/subscription/{HASH}", response({"status": "unpaid"}))
+        self.settle()
+        meta = self.read_meta()
+        self.assertEqual((meta["lastDuration"], meta["lastAmountSats"]), (1, 4500))
+
+        self.api.on("GET", f"/subscription/{HASH}", response({"status": "processing"}, status=202))
+        self.settle()
+        meta = self.read_meta()
+        self.assertEqual((meta["lastDuration"], meta["lastAmountSats"]), (12, 45_000))
+
     def test_order_being_provisioned_keeps_waiting(self):
         self.write_meta({"pendingOrder": self.pending_order()})
         self.api.on("GET", f"/subscription/{HASH}", response({"status": "processing"}, status=202))
@@ -373,12 +389,16 @@ class TestOrderSettlement(SettlementTestBase):
             orderId="order-old",
             privateKey=old_priv,
             publicKey=old_pub,
+            duration=12,
+            amountSats=45_000,
             expiresAt=iso(NOW + timedelta(minutes=30)),
         )
         new_order = self.pending_order()
         self.write_meta({
             "pendingOrder": new_order,
             "previousPendingOrders": [old_order],
+            "lastDuration": 1,
+            "lastAmountSats": 4500,
         })
         self.api.on("GET", f"/subscription/{HASH}", response({"status": "unpaid"}))
         self.api.on("GET", f"/subscription/{old_hash}", response({"status": "paid"}))
@@ -399,6 +419,188 @@ class TestOrderSettlement(SettlementTestBase):
         self.assertNotIn("previousPendingOrders", meta)
         self.assertEqual(meta["pendingOrder"]["paymentHash"], HASH)
         self.assertIn(old_task, result["clearPayTasks"])
+        # Activated, not merely recovered: nothing for the notice to announce,
+        # and its plan is the last paid plan.
+        self.assertNotIn("lastRecoveredOrder", meta)
+        self.assertEqual((meta["lastDuration"], meta["lastAmountSats"]), (12, 45_000))
+        self.assertEqual(meta["provisionedKey"], old_pub)
+
+    def test_two_paid_orders_keep_both_configs_without_replacing_the_newer_one(self):
+        old_priv, old_pub = new_keypair()
+        old_hash = "c" * 64
+        old_order = self.pending_order(paymentHash=old_hash, privateKey=old_priv, publicKey=old_pub)
+        self.write_meta({"pendingOrder": self.pending_order(), "previousPendingOrders": [old_order]})
+        self.api.on("GET", f"/subscription/{HASH}", response({"status": "paid"}))
+        self.api.on("GET", f"/subscription/{old_hash}", response({"status": "paid"}))
+
+        def claim(body):
+            payload = self.claim_payload()
+            payload["peer"]["publicKey"] = body["wgPublicKey"]
+            return response(payload)
+
+        self.api.on("POST", "/subscription/claim", claim)
+        self.settle()
+
+        self.assertEqual(bridge.get_wg_pubkey(), self.pub)
+        recovered = self.read_meta().get("recoveredOrderConfigs", {}).get(old_hash)
+        self.assertIsNotNone(recovered, "A paid replaced order must retain its claimed config")
+        self.assertIn(f"PrivateKey = {old_priv}", recovered)
+        self.assertNotIn("previousPendingOrders", self.read_meta())
+
+    def test_late_payment_after_newer_order_settled_does_not_replace_active_config(self):
+        old_priv, old_pub = new_keypair()
+        old_hash = "c" * 64
+        old_order = self.pending_order(
+            paymentHash=old_hash, privateKey=old_priv, publicKey=old_pub,
+            expiresAt=iso(NOW + timedelta(minutes=30)),
+        )
+        self.write_meta({"pendingOrder": self.pending_order(), "previousPendingOrders": [old_order]})
+        self.api.on("GET", f"/subscription/{HASH}", response({"status": "paid"}))
+        self.api.on("GET", f"/subscription/{old_hash}", response({"status": "unpaid"}))
+        self.api.on("POST", "/subscription/claim", response(self.claim_payload()))
+        self.settle()
+        self.assertEqual(bridge.get_wg_pubkey(), self.pub)
+
+        self.api.on("GET", f"/subscription/{old_hash}", response({"status": "paid"}))
+        payload = self.claim_payload()
+        payload["peer"]["publicKey"] = old_pub
+        self.api.on("POST", "/subscription/claim", response(payload))
+        self.settle(now=NOW + timedelta(seconds=20))
+
+        self.assertEqual(bridge.get_wg_pubkey(), self.pub)
+        self.assertIn(f"PrivateKey = {old_priv}", self.read_meta()["recoveredOrderConfigs"][old_hash])
+
+    def test_paid_replaced_order_never_replaces_an_imported_configuration(self):
+        # An imported (or Configure-entered) tunnel sets no provisionedKey:
+        # the stored configuration itself must keep it from being replaced.
+        imported_priv, imported_pub = new_keypair()
+        with open(bridge.CONFIG_PATH, "w") as f:
+            f.write(f"[Interface]\nPrivateKey = {imported_priv}\nAddress = 10.9.0.9/32\n")
+        old_priv, old_pub = new_keypair()
+        old_hash = "c" * 64
+        old_task = "tunnelsats-order:eclair:" + old_hash[:16]
+        self.write_meta({"previousPendingOrders": [self.pending_order(
+            paymentHash=old_hash, privateKey=old_priv, publicKey=old_pub,
+            expiresAt=iso(NOW + timedelta(minutes=30)),
+        )]})
+        self.api.on("GET", f"/subscription/{old_hash}", response({"status": "paid"}))
+        payload = self.claim_payload()
+        payload["peer"]["publicKey"] = old_pub
+        self.api.on("POST", "/subscription/claim", response(payload))
+
+        result = self.settle()
+
+        self.assertEqual((self.only(result)["kind"], self.only(result)["result"]), ("order", "superseded"))
+        self.assertEqual(bridge.get_wg_pubkey(), imported_pub)
+        meta = self.read_meta()
+        self.assertIn(f"PrivateKey = {old_priv}", meta["recoveredOrderConfigs"][old_hash])
+        self.assertNotIn("previousPendingOrders", meta)
+        self.assertNotIn("provisionedKey", meta)
+        self.assertIn(old_task, result["clearPayTasks"])
+        # Recorded for the health check's one-time notice.
+        self.assertEqual(meta["lastRecoveredOrder"], {"paymentHash": old_hash, "recoveredAt": bridge._iso(NOW)})
+
+    def test_a_tunnel_imported_while_a_recovered_order_is_activated_is_never_replaced(self):
+        # The decision and the configuration write are separate lock holds;
+        # save_configuration checks again under its own, so an Import that
+        # lands in between keeps its tunnel.
+        imported_priv, imported_pub = new_keypair()
+        old_priv, old_pub = new_keypair()
+        old_hash = "c" * 64
+        self.write_meta({
+            "previousPendingOrders": [self.pending_order(
+                paymentHash=old_hash, privateKey=old_priv, publicKey=old_pub,
+                duration=12, amountSats=45_000, expiresAt=iso(NOW + timedelta(minutes=30)),
+            )],
+            "lastDuration": 1,
+            "lastAmountSats": 4500,
+        })
+        self.api.on("GET", f"/subscription/{old_hash}", response({"status": "paid"}))
+        payload = self.claim_payload()
+        payload["peer"]["publicKey"] = old_pub
+        self.api.on("POST", "/subscription/claim", response(payload))
+        real_check = bridge._tunnel_configured
+        checks = []
+
+        def import_after_the_first_check():
+            configured = real_check()
+            if not checks:
+                with open(bridge.CONFIG_PATH, "w") as f:
+                    f.write(f"[Interface]\nPrivateKey = {imported_priv}\nAddress = 10.9.0.9/32\n")
+            checks.append(configured)
+            return configured
+
+        with patch("bridge._tunnel_configured", side_effect=import_after_the_first_check):
+            result = self.settle()
+
+        self.assertEqual(checks, [False, True])
+        self.assertEqual(self.only(result)["result"], "superseded")
+        self.assertEqual(bridge.get_wg_pubkey(), imported_pub)
+        meta = self.read_meta()
+        self.assertIn(f"PrivateKey = {old_priv}", meta["recoveredOrderConfigs"][old_hash])
+        self.assertNotIn("previousPendingOrders", meta)
+        self.assertNotIn("provisionedKey", meta)
+        self.assertEqual(meta["lastRecoveredOrder"]["paymentHash"], old_hash)
+        # Not activated, so its plan does not become the last paid plan.
+        self.assertEqual((meta["lastDuration"], meta["lastAmountSats"]), (1, 4500))
+
+    def test_a_stored_key_is_detected_only_on_an_uncommented_private_key_line(self):
+        if os.path.exists(bridge.CONFIG_PATH):
+            os.remove(bridge.CONFIG_PATH)
+        self.assertFalse(bridge._tunnel_configured())
+        priv, _ = new_keypair()
+        for content, expected in (
+            (f"[Interface]\n# PrivateKey = {priv}\nAddress = 10.9.0.9/32\n", False),
+            (f"[Interface]\n; PrivateKey = {priv}\n", False),
+            ("[Interface]\nAddress = 10.9.0.9/32\n", False),
+            (f"[Interface]\nPrivateKey = {priv}\n", True),
+            (f"[Interface]\n  privatekey={priv}\n", True),
+        ):
+            with open(bridge.CONFIG_PATH, "w") as f:
+                f.write(content)
+            self.assertEqual(bridge._tunnel_configured(), expected, content)
+
+    def test_expired_previous_order_is_kept_while_its_status_cannot_be_checked(self):
+        old_priv, old_pub = new_keypair()
+        old_hash = "c" * 64
+        self.write_meta({"previousPendingOrders": [self.pending_order(
+            paymentHash=old_hash, privateKey=old_priv, publicKey=old_pub,
+            expiresAt=iso(NOW - timedelta(minutes=5)),
+        )]})
+        self.api.on("GET", f"/subscription/{old_hash}",
+                    http_error(f"https://example.invalid/subscription/{old_hash}", 503, {"error": "unavailable"}))
+
+        failed = self.settle()
+
+        self.assertEqual(self.only(failed)["result"], "failed")
+        kept = self.read_meta()["previousPendingOrders"]
+        self.assertEqual([p["paymentHash"] for p in kept], [old_hash])
+        self.assertEqual(kept[0]["privateKey"], old_priv)
+
+        # Retired only once a status check confirms the expired invoice unpaid.
+        self.api.on("GET", f"/subscription/{old_hash}", response({"status": "unpaid"}))
+        self.settle(now=NOW + bridge.SETTLE_RETRY_DELAY + timedelta(seconds=1))
+        self.assertNotIn("previousPendingOrders", self.read_meta())
+
+    def test_received_payment_is_recorded_once_without_rewriting_each_tick(self):
+        self.write_meta({
+            "pendingOrder": self.pending_order(duration=12, amountSats=45_000),
+            "lastDuration": 1,
+            "lastAmountSats": 4500,
+        })
+        self.api.on("GET", f"/subscription/{HASH}", response({"status": "processing"}, status=202))
+        self.settle()
+        meta = self.read_meta()
+        self.assertEqual(meta["pendingOrder"]["paymentReceivedFor"], HASH)
+        self.assertEqual((meta["lastDuration"], meta["lastAmountSats"]), (12, 45_000))
+
+        with patch("bridge.atomic_write_json", wraps=bridge.atomic_write_json) as writes:
+            self.settle(now=NOW + timedelta(seconds=20))
+        self.assertEqual(
+            [c for c in writes.call_args_list if c.args and c.args[0] == bridge.META_FILE_PATH],
+            [],
+            "an already recorded payment must not rewrite the metadata on every tick",
+        )
 
     def test_unpaid_previous_pending_order_waits_and_is_pruned_once_expired(self):
         old_priv, old_pub = new_keypair()

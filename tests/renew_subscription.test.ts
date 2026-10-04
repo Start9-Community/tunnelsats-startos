@@ -13,7 +13,7 @@ import {
   type PendingRenewalRecord,
   type RenewalOps,
 } from '../startos/actions/renewSubscription'
-import { metaShape } from '../startos/fileModels/tunnelsatsMeta'
+import { metaShape, tunnelsatsMeta } from '../startos/fileModels/tunnelsatsMeta'
 import { derivePublicKey, generateWireguardKeypair } from '../startos/keygen'
 
 const NOW = new Date('2026-10-01T12:00:00.000Z')
@@ -24,6 +24,47 @@ const RENEW_HASH_1 = '3'.repeat(64)
 const RENEW_HASH_2 = '4'.repeat(64)
 const RENEW_INVOICE =
   'lnbc500u1p0renewinvoice000000000000000000000000000000000000000000'
+
+test('creating a manual renewal does not change the last paid plan used by NWC Match Last Purchase', async () => {
+  const kp = generateWireguardKeypair()
+  const originalMerge = tunnelsatsMeta.merge
+  let recorded: any
+  tunnelsatsMeta.merge = (async (_effects: unknown, patch: unknown) => {
+    recorded = patch
+  }) as any
+  try {
+    await startRenewal(
+      {} as never,
+      { duration: 12 },
+      {
+        now: () => NOW,
+        lockMeta: testMetaLock,
+        readConfig: async () => ({
+          enabled: true,
+          'target-node': 'lnd',
+          'tunnelsats-conf': `[Interface]\nPrivateKey = ${kp.privateKey}\n`,
+        }),
+        readServerMeta: async () => ({ serverDomain: 'eu-de' }),
+        readCurrent: async () => null,
+        requestRenewal: async () => ({
+          paymentHash: RENEW_HASH_2,
+          invoice: RENEW_INVOICE,
+          renewalId: 'renewal-12',
+          oldExpiry: inMs(5 * 24 * 60 * 60_000),
+          newExpiry: inMs(370 * 24 * 60 * 60_000),
+          amountSats: 45_000,
+        }),
+        raiseTask: async () => undefined,
+      },
+    )
+    assert.equal(recorded.pendingRenewal.duration, 12)
+    assert.equal(recorded.pendingRenewal.amountSats, 45_000)
+    assert.ok(!Object.hasOwn(recorded, 'lastDuration'))
+    assert.ok(!Object.hasOwn(recorded, 'lastAmountSats'))
+  } finally {
+    tunnelsatsMeta.merge = originalMerge
+  }
+})
 
 test('runRenewal refuses to replace an unexpired pendingRenewal with nwcAttempted: true or nwcPayInFlightUntil in the future', async () => {
   const kp = generateWireguardKeypair()

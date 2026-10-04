@@ -226,6 +226,9 @@ class TestDashboardReadModel(DashboardStateTestBase):
 
     def test_read_model_never_carries_secrets(self):
         s = self.full_state()
+        meta = bridge.read_meta()
+        meta["recoveredOrderConfigs"] = {ORDER_HASH: s["conf"]}
+        self.write_json(bridge.META_FILE_PATH, meta)
         model = bridge.get_dashboard()
 
         self.assertEqual(forbidden_keys(model), [])
@@ -241,6 +244,7 @@ class TestDashboardReadModel(DashboardStateTestBase):
         self.assertNotIn(s["order_pub"], body)
         self.assertNotIn("payTasksToClear", body)
         self.assertNotIn("handedOutKeys", body)
+        self.assertNotIn("recoveredOrderConfigs", body)
 
     def test_payable_invoice_omitted_when_paid_expired_or_malformed(self):
         order_priv, order_pub = new_keypair()

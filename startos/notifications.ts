@@ -1,7 +1,9 @@
 /**
  * StartOS notifications for the subscription (G8): 7 and 3 days before the
  * confirmed expiry, on lapse, and when TunnelSats has no subscription for
- * the configured key.
+ * the configured key. Also once per paid replaced order that the settlement
+ * watcher recovered without replacing the active tunnel: its outcome is
+ * otherwise only shown while the settlement tick reports it.
  *
  * sdk.notification.create is not idempotent, so what was sent is persisted
  * (subscription-notices.json) and each notice goes out once per period. A
@@ -34,7 +36,12 @@ import { i18n } from './i18n'
 
 export type ExpiryStage = '7d' | '3d' | 'lapsed'
 export type NoticeKind =
-  ExpiryStage | 'unknown-key' | 'nwc-renewed' | 'nwc-fallback' | 'nwc-restore'
+  | ExpiryStage
+  | 'unknown-key'
+  | 'nwc-renewed'
+  | 'nwc-fallback'
+  | 'nwc-restore'
+  | 'recovered-order'
 
 /** Mildest first. */
 const STAGES: readonly ExpiryStage[] = ['7d', '3d', 'lapsed']
@@ -86,6 +93,13 @@ export interface NoticeInputs {
   }
   /** Set when nwcConnected is true in meta but /data/nwc-wallet.json is missing after restore. */
   nwcRestoreNeeded?: boolean
+  /**
+   * The latest paid replaced order that the settlement watcher recovered
+   * (claimed and kept for Export) without replacing the active tunnel.
+   */
+  recoveredOrder?: {
+    paymentHash: string
+  }
 }
 
 export interface NoticeState {
@@ -111,6 +125,8 @@ export interface NoticeState {
   nwcFallbackKey?: string
   /** True while the post-restore reconnect notice has been sent. */
   nwcRestoreNotified?: boolean
+  /** Payment hash of the last recovered order announced. */
+  recoveredOrderHash?: string
 }
 
 export interface Notice {
@@ -228,6 +244,15 @@ export function noticeFor(
         title: i18n('Reconnect NWC wallet after backup restore'),
         message: i18n(
           'Your NWC wallet secret is excluded from StartOS backups. Run Connect Wallet in TunnelSats to reconnect automatic renewals.',
+        ),
+      }
+    case 'recovered-order':
+      return {
+        kind,
+        level: 'warning',
+        title: i18n('TunnelSats recovered a paid order you had replaced'),
+        message: i18n(
+          'A TunnelSats order you replaced with a newer one was paid. TunnelSats claimed it and kept its WireGuard configuration; your active tunnel is unchanged. Run Export WireGuard Configuration to retrieve it, and Import Subscription to use it instead.',
         ),
       }
   }
@@ -353,6 +378,24 @@ export function planNotifications(
     })
     state = after
   }
+  // Once per payment hash. Like nwcRenewedHash (and unlike the fallback and
+  // restore markers), the marker stays while the input is absent: a hash
+  // identifies one recovery for good.
+  if (
+    input.recoveredOrder?.paymentHash &&
+    state.recoveredOrderHash !== input.recoveredOrder.paymentHash
+  ) {
+    const after = {
+      ...state,
+      recoveredOrderHash: input.recoveredOrder.paymentHash,
+    }
+    steps.push({
+      notice: noticeFor('recovered-order', expiry),
+      before: state,
+      after,
+    })
+    state = after
+  }
   if (stageDue && expiry) {
     const upTo = STAGES.indexOf(stageDue)
     const iso = expiry.toISOString()
@@ -384,6 +427,7 @@ export function noticeStateRecord(state: NoticeState): {
   nwcRenewedHash?: string
   nwcFallbackKey?: string
   nwcRestoreNotified?: boolean
+  recoveredOrderHash?: string
 } {
   return {
     publicKey: state.publicKey,
@@ -402,6 +446,9 @@ export function noticeStateRecord(state: NoticeState): {
     ...(state.nwcRestoreNotified !== undefined
       ? { nwcRestoreNotified: state.nwcRestoreNotified }
       : {}),
+    ...(state.recoveredOrderHash !== undefined
+      ? { recoveredOrderHash: state.recoveredOrderHash }
+      : {}),
   }
 }
 
@@ -417,6 +464,7 @@ function sameState(a: NoticeState | null | undefined, b: NoticeState) {
     a.nwcRenewedHash === b.nwcRenewedHash &&
     a.nwcFallbackKey === b.nwcFallbackKey &&
     a.nwcRestoreNotified === b.nwcRestoreNotified &&
+    a.recoveredOrderHash === b.recoveredOrderHash &&
     sentStages(a).join(',') === sentStages(b).join(',')
   )
 }

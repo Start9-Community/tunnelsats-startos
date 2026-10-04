@@ -27,7 +27,7 @@ const dict = {
   'Configuration Saved': 24,
   'TunnelSats is switched off and your WireGuard configuration is kept. If a Lightning node used the tunnel, it will ask you to turn it off.': 25,
   'Export WireGuard Configuration': 26,
-  'View and export the active TunnelSats WireGuard configuration file (.conf).': 27,
+  'View and export active and recovered TunnelSats WireGuard configurations (.conf).': 27,
   'No Configuration Found': 28,
   'No active WireGuard configuration found. Please purchase a subscription or configure a tunnel first.': 29,
   'Active WireGuard Configuration': 30,
@@ -127,6 +127,10 @@ const dict = {
   'Automatic NWC renewal could not complete (${reason}). A manual Pay Invoice task has been raised on your Lightning node, or you can update your wallet in Connect Wallet.': 124,
   'Reconnect NWC wallet after backup restore': 125,
   'Your NWC wallet secret is excluded from StartOS backups. Run Connect Wallet in TunnelSats to reconnect automatic renewals.': 126,
+  'Recovered Order': 127,
+  'Recovered configurations belong to paid replaced orders. Import one to activate it. Keep all private keys confidential.': 128,
+  'TunnelSats recovered a paid order you had replaced': 129,
+  'A TunnelSats order you replaced with a newer one was paid. TunnelSats claimed it and kept its WireGuard configuration; your active tunnel is unchanged. Run Export WireGuard Configuration to retrieve it, and Import Subscription to use it instead.': 130,
 } as const
 
 /**

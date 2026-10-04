@@ -666,3 +666,92 @@ test('a rollback that could not be written is retried, so the notice is not lost
     'notify:7d',
   ])
 })
+
+// --- recovered paid replaced orders
+
+test('a recovered order is announced once per payment hash', () => {
+  const hashA = 'a'.repeat(64)
+  const first = planNotifications(
+    inputs({ recoveredOrder: { paymentHash: hashA } }),
+    null,
+    NOW,
+  )
+  assert.deepEqual(
+    first.steps.map((s) => s.notice.kind),
+    ['recovered-order'],
+  )
+  const notice = first.steps[0].notice
+  assert.equal(notice.level, 'warning')
+  assert.match(notice.message, /active tunnel is unchanged/)
+  assert.match(notice.message, /Export WireGuard Configuration/)
+  assert.match(notice.message, /Import Subscription/)
+  assert.equal(first.next.recoveredOrderHash, hashA)
+
+  // The same recovery is never announced again, also once the input is gone.
+  assert.deepEqual(
+    planNotifications(
+      inputs({ recoveredOrder: { paymentHash: hashA } }),
+      first.next,
+      NOW,
+    ).steps,
+    [],
+  )
+  const absent = planNotifications(inputs(), first.next, NOW)
+  assert.deepEqual(absent.steps, [])
+  assert.equal(absent.next.recoveredOrderHash, hashA)
+
+  // A later recovery is announced.
+  assert.deepEqual(
+    planNotifications(
+      inputs({ recoveredOrder: { paymentHash: 'b'.repeat(64) } }),
+      first.next,
+      NOW,
+    ).steps.map((s) => s.notice.kind),
+    ['recovered-order'],
+  )
+})
+
+test('noticeInputsFor maps the latest recovered order from the metadata', () => {
+  const kp = generateWireguardKeypair()
+  const config = {
+    enabled: true,
+    'tunnelsats-conf': `[Interface]\nPrivateKey = ${kp.privateKey}\nAddress = 10.9.0.2/32\n`,
+  }
+  const hash = 'c'.repeat(64)
+  assert.deepEqual(
+    noticeInputsFor(config, {
+      lastRecoveredOrder: {
+        paymentHash: hash,
+        recoveredAt: '2026-10-01T00:00:00Z',
+      },
+    })?.recoveredOrder,
+    { paymentHash: hash },
+  )
+  assert.equal(noticeInputsFor(config, {})?.recoveredOrder, undefined)
+})
+
+test('the recovered-order marker survives the notices file model', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'notices-'))
+  try {
+    const file = subscriptionNotices.withPath(join(dir, 'notices.json'))
+    const posted: string[] = []
+    const run = createNoticeRunner({
+      readInputs: async () =>
+        inputs({ recoveredOrder: { paymentHash: 'd'.repeat(64) } }),
+      readState: async () => (await file.read().once()) ?? null,
+      writeState: async (state) => {
+        await file.write({} as T.Effects, noticeStateRecord(state))
+      },
+      notify: async (notice) => {
+        posted.push(notice.kind)
+      },
+      now: () => NOW,
+    })
+    await run()
+    await run()
+    assert.deepEqual(posted, ['recovered-order'])
+    assert.equal((await file.read().once())?.recoveredOrderHash, 'd'.repeat(64))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

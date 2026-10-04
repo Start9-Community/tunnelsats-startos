@@ -118,6 +118,10 @@ export interface SubscriptionMeta {
     publicKey?: string
     raisePayTask?: boolean
   } | null
+  lastRecoveredOrder?: {
+    paymentHash: string
+    recoveredAt?: string
+  }
 }
 
 export interface SubscriptionExpiryTask {
@@ -401,6 +405,7 @@ export function noticeInputsFor(
             st?.lastError || 'insufficient wallet budget or relay failure',
         }
       : undefined
+  const recoveredHash = meta?.lastRecoveredOrder?.paymentHash
 
   return {
     publicKey,
@@ -409,6 +414,9 @@ export function noticeInputsFor(
     ...(nwcRestoreNeeded ? { nwcRestoreNeeded: true } : {}),
     ...(nwcRenewed ? { nwcRenewed } : {}),
     ...(nwcFallback ? { nwcFallback } : {}),
+    ...(recoveredHash
+      ? { recoveredOrder: { paymentHash: recoveredHash } }
+      : {}),
   }
 }
 

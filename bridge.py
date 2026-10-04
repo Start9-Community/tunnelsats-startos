@@ -250,7 +250,8 @@ def validate_config(wg_conf):
 
 TARGET_NODES = ("lnd", "cln", "eclair")
 
-def save_configuration(conf_content, target_node="lnd", clear_pending_order=None, provisioned_key=None):
+def save_configuration(conf_content, target_node="lnd", clear_pending_order=None, provisioned_key=None,
+                       only_if_no_tunnel=False, paid_plan=None):
     """Saves a WireGuard configuration for target_node and resets the
     metadata for it. clear_pending_order (a payment hash) is set by the
     settlement watcher: when it still matches pendingOrder, the settled order
@@ -258,6 +259,13 @@ def save_configuration(conf_content, target_node="lnd", clear_pending_order=None
     task is queued for clearing. provisioned_key (the public key the settled
     order was claimed for) is recorded as provisionedKey: TunnelSats issued
     that key, so _record_not_found gives it the long grace.
+
+    only_if_no_tunnel (a recovered replaced order) saves nothing when a
+    tunnel was provisioned or a configuration is stored, checked under the
+    lock of the write itself: Import and Configure write the configuration
+    under the same lock, so a tunnel stored after the caller decided is never
+    replaced. paid_plan, a paid Buy record, becomes the last paid plan
+    (_record_paid_plan) in the same write. Returns whether it saved.
 
     The configuration is stored exactly as given: the node's clearnet-vpn
     task accepts this string verbatim, so rewriting it (e.g. stripping the
@@ -276,6 +284,8 @@ def save_configuration(conf_content, target_node="lnd", clear_pending_order=None
     hints = parse_config_comments(conf_content)
     hints.pop("expiresAt", None)
     with meta_lock():
+        if only_if_no_tunnel and (read_meta().get("provisionedKey") or _tunnel_configured()):
+            return False
         atomic_write_file(CONFIG_PATH, conf_content)
 
         app_config = {}
@@ -306,7 +316,10 @@ def save_configuration(conf_content, target_node="lnd", clear_pending_order=None
         if clear_pending_order:
             _clear_pending(meta, "pendingOrder", clear_pending_order)
             _remove_previous_pending_order(meta, clear_pending_order, queue_pay_task=True)
+        if paid_plan is not None:
+            _record_paid_plan(meta, paid_plan)
         atomic_write_json(META_FILE_PATH, meta)
+    return True
 
 def get_default_gateway():
     if hasattr(get_default_gateway, "_cache"):
@@ -1168,14 +1181,58 @@ def _unpaid(kind, key, pending, state, now):
     return _outcome(kind, "waiting", "Waiting for the invoice to be paid.", pending["paymentHash"])
 
 
+PLAN_KEYS = ("pendingOrder", "pendingRenewal")
+
+
+def _record_paid_plan(meta, record):
+    """Makes the plan of a paid Buy or Renew record the last paid plan:
+    lastDuration is what NWC's Match Last Purchase renews, lastAmountSats
+    bounds the amount NWC pays unattended (_nwc_max_renewal_sats). Called
+    only once a payment is received, never when an invoice is created, so an
+    unpaid quote changes neither. Caller holds meta_lock and writes meta;
+    returns whether meta changed."""
+    changed = False
+    duration = _dashboard_duration(record.get("duration"))
+    if duration is not None:
+        months = int(duration[:-1])
+        if meta.get("lastDuration") != months:
+            meta["lastDuration"] = months
+            changed = True
+    amount = _dashboard_amount(record.get("amountSats"))
+    if amount is None and isinstance(record.get("invoice"), str):
+        amount = _bolt11_amount_sats(record["invoice"])
+    if amount is not None and amount > 0 and meta.get("lastAmountSats") != amount:
+        meta["lastAmountSats"] = amount
+        changed = True
+    return changed
+
+
 def _mark_payment_received(key, pending, payment_hash):
-    """Records that payment_hash was paid or is processing. Keyed by
+    """Records, once, that payment_hash was paid or is processing. Keyed by
     payment_hash so a replacement Buy/Renew/Reset that deep-merges over
     meta[key] without clearing extra keys never inherits the old payment's
-    received state."""
-    if pending.get("paymentReceivedFor") != payment_hash:
-        pending["paymentReceivedFor"] = payment_hash
-        _update_pending(key, payment_hash, {"paymentReceivedFor": payment_hash})
+    received state. The first time a Buy or Renew payment is seen, its plan
+    becomes the last paid plan (_record_paid_plan), also when a newer
+    invoice replaced it meanwhile: the payment happened all the same. Later
+    ticks return early, without rewriting the metadata."""
+    if pending.get("paymentReceivedFor") == payment_hash:
+        return
+    pending["paymentReceivedFor"] = payment_hash
+    with meta_lock():
+        meta = read_meta()
+        current = meta.get(key)
+        changed = False
+        if isinstance(current, dict) and current.get("paymentHash") == payment_hash:
+            if current.get("paymentReceivedFor") == payment_hash:
+                # Marked by another writer (the NWC payment, an earlier
+                # tick), which recorded the plan in the same write.
+                return
+            current["paymentReceivedFor"] = payment_hash
+            changed = True
+        if key in PLAN_KEYS:
+            changed = _record_paid_plan(meta, pending) or changed
+        if changed:
+            atomic_write_json(META_FILE_PATH, meta)
 
 
 def _settle_order(pending, now):
@@ -1393,10 +1450,51 @@ def _update_previous_pending_order(payment_hash, fields):
             atomic_write_json(META_FILE_PATH, meta)
 
 
+def _tunnel_configured():
+    """Whether a WireGuard configuration with a private key is stored,
+    whether it was bought, imported or entered in Configure (all of them
+    write CONFIG_PATH). Reads the file only: no `wg` call that could fail and
+    make a stored tunnel look absent. The pattern is the one
+    parseWireguardTunnelInfo (startos/utils.ts) uses, so both runtimes agree
+    on what a stored key is; when in doubt it reports a tunnel, which keeps
+    the active one."""
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            content = f.read()
+    except OSError:
+        return False
+    return re.search(r'^\s*(?!#|;)\s*PrivateKey\s*=\s*\S', content, re.IGNORECASE | re.MULTILINE) is not None
+
+
+def _retire_recovered_order(meta, payment_hash, now):
+    """Retires a paid replaced order whose claimed configuration was kept in
+    recoveredOrderConfigs without becoming the active tunnel: its retained
+    entry goes (its pay task is queued for clearing), and lastRecoveredOrder
+    records it for the health check's one-time notice, since the settlement
+    outcome is only shown per tick. Caller holds meta_lock and writes meta."""
+    _remove_previous_pending_order(meta, payment_hash, queue_pay_task=True)
+    meta["lastRecoveredOrder"] = {"paymentHash": payment_hash, "recoveredAt": _iso(now)}
+
+
 def _settle_previous_orders(now, newer_order_provisioned=False):
-    """Checks replaced unexpired orders retained in meta['previousPendingOrders'].
-    Paid orders are claimed and provisioned with their retained privateKey;
-    unpaid orders are kept until their invoice expires and then pruned."""
+    """Checks the replaced orders retained in meta['previousPendingOrders'].
+
+    A paid order is always claimed with its retained privateKey, and the
+    claimed configuration is kept in meta['recoveredOrderConfigs'] (Export
+    WireGuard Configuration lists it) before the entry is retired, so a paid
+    order's key is never discarded. It becomes the active tunnel only when
+    there is no tunnel it could replace: none was provisioned before
+    (provisionedKey, persisted across ticks), none is stored (an imported
+    configuration sets no provisionedKey), and no newer order was
+    provisioned or paid in this tick. The check is repeated under the lock
+    of the configuration write, so a tunnel imported in between is never
+    replaced. Otherwise the active tunnel stays, the order is announced once
+    (lastRecoveredOrder), and the operator activates it with Import
+    Subscription.
+
+    An unpaid order is retired only after a status check, once its invoice
+    has expired: expiry alone never discards a key, since a payment made
+    before expiry may not have been seen yet."""
     with meta_lock():
         meta = read_meta()
         raw_list = meta.get("previousPendingOrders")
@@ -1414,6 +1512,8 @@ def _settle_previous_orders(now, newer_order_provisioned=False):
             atomic_write_json(META_FILE_PATH, meta)
 
     outcomes = []
+    # Tick-local: a newer order was provisioned or paid in this tick. The
+    # persisted checks run when a paid order is claimed (see below).
     provisioned = newer_order_provisioned
     for prev in cleaned:
         p_hash = prev["paymentHash"]
@@ -1449,14 +1549,6 @@ def _settle_previous_orders(now, newer_order_provisioned=False):
                     _update_previous_pending_order(p_hash, {"lastError": None, "nextAttemptAt": None})
                 continue
 
-            if provisioned:
-                with meta_lock():
-                    m = read_meta()
-                    if _remove_previous_pending_order(m, p_hash, queue_pay_task=True):
-                        atomic_write_json(META_FILE_PATH, m)
-                outcomes.append(_outcome("order", "superseded", "A newer tunnel order was already provisioned.", p_hash))
-                continue
-
             status, claim = _api_call(
                 "POST",
                 "/subscription/claim",
@@ -1467,12 +1559,43 @@ def _settle_previous_orders(now, newer_order_provisioned=False):
                 outcomes.append(_outcome("order", "waiting", "Payment received; the tunnel is being provisioned.", p_hash))
                 continue
             conf = assemble_claimed_config(claim, prev)
-            save_configuration(
+            # Kept before anything else happens, so a paid order's config
+            # survives a failed activation or a crash. The decision uses
+            # fresh state: an import or a provisioning since the tick began
+            # counts as a tunnel this order must not replace.
+            with meta_lock():
+                m = read_meta()
+                existing = m.get("recoveredOrderConfigs")
+                recovered = dict(existing) if isinstance(existing, dict) else {}
+                recovered[p_hash] = conf
+                m["recoveredOrderConfigs"] = recovered
+                activate = not (provisioned or m.get("provisionedKey") or _tunnel_configured())
+                if not activate:
+                    _retire_recovered_order(m, p_hash, now)
+                atomic_write_json(META_FILE_PATH, m)
+            # save_configuration checks again under the lock of its write: a
+            # tunnel stored since the decision above is never replaced.
+            if activate and not save_configuration(
                 conf,
                 prev.get("targetNode"),
                 clear_pending_order=p_hash,
                 provisioned_key=prev.get("publicKey"),
-            )
+                only_if_no_tunnel=True,
+                paid_plan=prev,
+            ):
+                with meta_lock():
+                    m = read_meta()
+                    _retire_recovered_order(m, p_hash, now)
+                    atomic_write_json(META_FILE_PATH, m)
+                activate = False
+            if not activate:
+                outcomes.append(_outcome(
+                    "order", "superseded",
+                    "A paid order you had replaced was recovered; your active tunnel is unchanged. "
+                    "Run Export WireGuard Configuration to retrieve it and Import Subscription to use it.",
+                    p_hash,
+                ))
+                continue
             provisioned = True
             outcomes.append(_outcome("order", "provisioned", "The new tunnel was configured.", p_hash))
         except Exception as e:
@@ -4339,8 +4462,7 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
                 current_pending["paymentReceivedFor"] = payment_hash
                 current_pending["paidViaNwc"] = True
                 current_pending["raisePayTask"] = False
-            fresh_meta["lastDuration"] = paid_months
-            fresh_meta["lastAmountSats"] = verified_sats
+            _record_paid_plan(fresh_meta, {"duration": paid_months, "amountSats": verified_sats})
             post_pay_wallet = _read_json_object(NWC_WALLET_FILE_PATH)
             if (
                 fresh_meta.get("nwcConnected") is True

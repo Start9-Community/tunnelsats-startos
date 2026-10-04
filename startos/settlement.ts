@@ -212,9 +212,8 @@ export function replacedPayTaskPatch(
 }
 
 /**
- * Preserves an unexpired replaced `pendingOrder` (including its `privateKey`)
- * in `previousPendingOrders` alongside any still-unexpired entries, deduplicated
- * by `paymentHash` and capped at the 5 most recent.
+ * Retains replaced order keys until the settlement watcher retires them.
+ * Throws when retention is full rather than evicting an unresolved order.
  */
 export function replacedOrderPatch(
   previous:
@@ -238,7 +237,6 @@ export function replacedOrderPatch(
     | undefined,
   existingPrevious: readonly PendingOrderRecord[] | null | undefined,
   newHash: string,
-  now: Date,
 ): { previousPendingOrders?: PendingOrderRecord[] } {
   const canRetainPrevious = Boolean(
     previous &&
@@ -256,8 +254,7 @@ export function replacedOrderPatch(
     typeof previous.serverId === 'string' &&
     previous.serverId.length > 0 &&
     typeof previous.createdAt === 'string' &&
-    previous.createdAt.length > 0 &&
-    unsettledUntil(previous, now) !== null,
+    previous.createdAt.length > 0,
   )
 
   if (!canRetainPrevious && existingPrevious === undefined) {
@@ -274,8 +271,7 @@ export function replacedOrderPatch(
       typeof item.privateKey !== 'string' ||
       !item.privateKey ||
       typeof item.publicKey !== 'string' ||
-      !item.publicKey ||
-      (unsettledUntil(item, now) === null && !isPaymentReceived(item))
+      !item.publicKey
     ) {
       continue
     }
@@ -322,9 +318,12 @@ export function replacedOrderPatch(
     deduped.push(entry)
   }
 
-  return {
-    previousPendingOrders: deduped.slice(-MAX_PREVIOUS_PENDING_ORDERS),
+  if (deduped.length > MAX_PREVIOUS_PENDING_ORDERS) {
+    throw new PendingPaymentConflictError(
+      'Too many replaced subscription orders are awaiting settlement. Wait for them to settle or expire before replacing another invoice.',
+    )
   }
+  return { previousPendingOrders: deduped }
 }
 
 export interface PaymentRecordPatch {
@@ -434,12 +433,7 @@ export async function recordThenRaise(
     await ops.record({
       ...replacedPayTaskPatch(kind, pending, current?.payTasksToClear, newHash),
       ...(kind === 'order'
-        ? replacedOrderPatch(
-            pending,
-            current?.previousPendingOrders,
-            newHash,
-            now,
-          )
+        ? replacedOrderPatch(pending, current?.previousPendingOrders, newHash)
         : {}),
     })
   })

@@ -27,7 +27,7 @@ export const es_ES: LangDict = {
   24: 'Configuración guardada',
   25: 'TunnelSats está desactivado y tu configuración de WireGuard se conserva. Si un nodo Lightning usaba el túnel, te pedirá que lo desactives.',
   26: 'Exportar configuración de WireGuard',
-  27: 'Vea y exporte el archivo de configuración activo de WireGuard (.conf) de TunnelSats.',
+  27: 'Vea y exporte las configuraciones WireGuard activas y recuperadas (.conf) de TunnelSats.',
   28: 'No se encontró ninguna configuración',
   29: 'No se encontró ninguna configuración activa de WireGuard. Compre una suscripción o configure un túnel primero.',
   30: 'Configuración activa de WireGuard',
@@ -127,6 +127,10 @@ export const es_ES: LangDict = {
   124: 'La renovación automática NWC no pudo completarse (${reason}). Se ha creado una tarea manual de pago de factura en tu nodo Lightning, o puedes actualizar tu billetera en Conectar Billetera.',
   125: 'Reconectar billetera NWC tras restaurar copia de seguridad',
   126: 'El secreto de tu billetera NWC se excluye de las copias de seguridad de StartOS. Ejecuta Conectar Billetera en TunnelSats para reconectar las renovaciones automáticas.',
+  127: 'Pedido recuperado',
+  128: 'Las configuraciones recuperadas pertenecen a pedidos sustituidos que se pagaron. Importa una para activarla. Mantén todas las claves privadas en secreto.',
+  129: 'TunnelSats recuperó un pedido pagado que habías sustituido',
+  130: 'Se pagó un pedido de TunnelSats que habías sustituido por uno más reciente. TunnelSats lo reclamó y conservó su configuración de WireGuard; tu túnel activo no cambia. Ejecuta Exportar configuración de WireGuard para obtenerla e Importar Suscripción para usarla en su lugar.',
 }
 
 export const de_DE: LangDict = {
@@ -156,7 +160,7 @@ export const de_DE: LangDict = {
   24: 'Konfiguration gespeichert',
   25: 'TunnelSats ist ausgeschaltet, Ihre WireGuard-Konfiguration bleibt erhalten. Falls ein Lightning-Knoten den Tunnel genutzt hat, fordert er Sie auf, ihn abzuschalten.',
   26: 'WireGuard-Konfiguration exportieren',
-  27: 'Anzeigen und Exportieren der aktiven TunnelSats WireGuard-Konfigurationsdatei (.conf).',
+  27: 'Aktive und wiederhergestellte TunnelSats-WireGuard-Konfigurationen (.conf) anzeigen und exportieren.',
   28: 'Keine Konfiguration gefunden',
   29: 'Keine aktive WireGuard-Konfiguration gefunden. Bitte erwerben Sie ein Abonnement oder konfigurieren Sie zuerst einen Tunnel.',
   30: 'Aktive WireGuard-Konfiguration',
@@ -256,6 +260,10 @@ export const de_DE: LangDict = {
   124: 'Die automatische NWC-Verlängerung konnte nicht abgeschlossen werden (${reason}). Auf Ihrem Lightning-Knoten wurde eine manuelle Zahlungsaufgabe erstellt, oder Sie können Ihre Wallet unter „Wallet verbinden“ aktualisieren.',
   125: 'NWC-Wallet nach Backup-Wiederherstellung neu verbinden',
   126: 'Ihr NWC-Wallet-Geheimnis ist von StartOS-Backups ausgeschlossen. Führen Sie in TunnelSats „Wallet verbinden“ aus, um automatische Verlängerungen wiederherzustellen.',
+  127: 'Wiederhergestellte Bestellung',
+  128: 'Wiederhergestellte Konfigurationen gehören zu bezahlten, ersetzten Bestellungen. Importieren Sie eine, um sie zu aktivieren. Halten Sie alle privaten Schlüssel geheim.',
+  129: 'TunnelSats hat eine bezahlte, ersetzte Bestellung wiederhergestellt',
+  130: 'Eine TunnelSats-Bestellung, die Sie durch eine neuere ersetzt hatten, wurde bezahlt. TunnelSats hat sie abgerufen und ihre WireGuard-Konfiguration aufbewahrt; Ihr aktiver Tunnel bleibt unverändert. Führen Sie „WireGuard-Konfiguration exportieren“ aus, um sie abzurufen, und „Abonnement importieren“, um sie stattdessen zu verwenden.',
 }
 
 export const pl_PL: LangDict = {
@@ -285,7 +293,7 @@ export const pl_PL: LangDict = {
   24: 'Konfiguracja zapisana',
   25: 'TunnelSats jest wyłączony, a Twoja konfiguracja WireGuard zostaje zachowana. Jeśli węzeł Lightning korzystał z tunelu, poprosi Cię o jego wyłączenie.',
   26: 'Eksportuj konfigurację WireGuard',
-  27: 'Wyświetl i wyeksportuj aktywny plik konfiguracyjny WireGuard (.conf) TunnelSats.',
+  27: 'Wyświetl i wyeksportuj aktywne i odzyskane konfiguracje WireGuard (.conf) TunnelSats.',
   28: 'Nie znaleziono konfiguracji',
   29: 'Nie znaleziono aktywnej konfiguracji WireGuard. Najpierw wykup subskrypcję lub skonfiguruj tunel.',
   30: 'Aktywna konfiguracja WireGuard',
@@ -385,6 +393,10 @@ export const pl_PL: LangDict = {
   124: 'Automatyczne odnowienie NWC nie powiodło się (${reason}). W węźle Lightning utworzono ręczne zadanie płatności; możesz też zaktualizować portfel w akcji Połącz portfel.',
   125: 'Połącz ponownie portfel NWC po przywróceniu kopii zapasowej',
   126: 'Sekret Twojego portfela NWC jest wykluczony z kopii zapasowych StartOS. Uruchom Połącz portfel w TunnelSats, aby przywrócić automatyczne odnawianie.',
+  127: 'Odzyskane zamówienie',
+  128: 'Odzyskane konfiguracje należą do opłaconych, zastąpionych zamówień. Zaimportuj jedną, aby ją aktywować. Zachowaj wszystkie klucze prywatne w tajemnicy.',
+  129: 'TunnelSats odzyskał opłacone zamówienie, które zastąpiłeś',
+  130: 'Zamówienie TunnelSats, które zastąpiłeś nowszym, zostało opłacone. TunnelSats je odebrał i zachował jego konfigurację WireGuard; Twój aktywny tunel pozostaje bez zmian. Uruchom Eksportuj konfigurację WireGuard, aby ją pobrać, i Importuj subskrypcję, aby użyć jej zamiast obecnej.',
 }
 
 export const fr_FR: LangDict = {
@@ -414,7 +426,7 @@ export const fr_FR: LangDict = {
   24: 'Configuration enregistrée',
   25: 'TunnelSats est désactivé et votre configuration WireGuard est conservée. Si un nœud Lightning utilisait le tunnel, il vous demandera de le couper.',
   26: 'Exporter la configuration WireGuard',
-  27: 'Affichez et exportez le fichier de configuration WireGuard actif (.conf) de TunnelSats.',
+  27: 'Affichez et exportez les configurations WireGuard actives et récupérées (.conf) de TunnelSats.',
   28: 'Aucune configuration trouvée',
   29: 'Aucune configuration WireGuard active trouvée. Veuillez souscrire un abonnement ou configurer un tunnel au préalable.',
   30: 'Configuration WireGuard active',
@@ -514,6 +526,10 @@ export const fr_FR: LangDict = {
   124: "Le renouvellement automatique NWC n'a pas pu aboutir (${reason}). Une tâche manuelle de paiement a été créée sur votre nœud Lightning, ou vous pouvez mettre à jour votre portefeuille dans Connecter un portefeuille.",
   125: 'Reconnecter le portefeuille NWC après restauration',
   126: 'Le secret de votre portefeuille NWC est exclu des sauvegardes StartOS. Lancez Connecter un portefeuille dans TunnelSats pour réactiver les renouvellements automatiques.',
+  127: 'Commande récupérée',
+  128: 'Les configurations récupérées appartiennent à des commandes remplacées et payées. Importez-en une pour l’activer. Gardez toutes les clés privées confidentielles.',
+  129: 'TunnelSats a récupéré une commande payée que vous aviez remplacée',
+  130: 'Une commande TunnelSats que vous aviez remplacée par une plus récente a été payée. TunnelSats l’a réclamée et a conservé sa configuration WireGuard ; votre tunnel actif reste inchangé. Lancez Exporter la configuration WireGuard pour la récupérer, puis Importer un abonnement pour l’utiliser à la place.',
 }
 
 export default {

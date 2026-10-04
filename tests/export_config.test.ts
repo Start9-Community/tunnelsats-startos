@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { exportConfig } from '../startos/actions/exportConfig'
 import { tunnelsatsConf } from '../startos/fileModels/tunnelsatsConf'
 import { configJson } from '../startos/fileModels/config.json'
+import { tunnelsatsMeta } from '../startos/fileModels/tunnelsatsMeta'
 
 test('exportConfig action is registered with correct metadata', () => {
   assert.equal(exportConfig.id, 'export-config')
@@ -42,8 +43,15 @@ test('exportConfig returns No Configuration Found when no config is present', as
 })
 
 /** Runs the production export with tunnelsatsv3.conf reading `stored`. */
-async function exportStored(stored: string) {
+async function exportStored(
+  stored: string,
+  recovered?: Record<string, string>,
+) {
   const origTunnelsatsConfRead = tunnelsatsConf.read
+  const origMetaRead = tunnelsatsMeta.read
+  const origConfigRead = configJson.read
+  tunnelsatsMeta.read = () => ({ once: async () => recovered }) as any
+  configJson.read = () => ({ once: async () => null }) as any
   tunnelsatsConf.read = () =>
     ({
       once: async () => stored,
@@ -53,8 +61,49 @@ async function exportStored(stored: string) {
     return await (exportConfig as any).run({ effects: {} })
   } finally {
     tunnelsatsConf.read = origTunnelsatsConfRead
+    tunnelsatsMeta.read = origMetaRead
+    configJson.read = origConfigRead
   }
 }
+
+test('exportConfig returns recovered paid configurations, including without an active config', async () => {
+  const hash = 'a'.repeat(64)
+  const recovered = '[Interface]\nPrivateKey = recovered-secret\n'
+  for (const active of ['', '[Interface]\nPrivateKey = active-secret\n']) {
+    const response = await exportStored(active, { [hash]: recovered })
+    assert.equal(response.result.type, 'group')
+    const values = response.result.value
+    assert.equal(values.length, active ? 2 : 1)
+    assert.equal(values.at(-1).value, recovered)
+    assert.equal(values.at(-1).name, 'Recovered Order ' + hash)
+    for (const value of values) {
+      assert.equal(value.masked, true)
+      assert.equal(value.copyable, true)
+      assert.equal(value.qr, false)
+    }
+  }
+})
+
+test('exportConfig lists an activated recovered order once, as the active configuration', async () => {
+  const active = '[Interface]\nPrivateKey = active-secret\n# VPNPort: 24556\n'
+  // The same key as recorded at recovery, before a port marker rewrite.
+  const activated = '[Interface]\nPrivateKey = active-secret\n'
+  const single = await exportStored(active, { ['a'.repeat(64)]: activated })
+  assert.equal(single.title, 'Active WireGuard Configuration')
+  assert.equal(single.result.type, 'single')
+  assert.equal(single.result.value, active)
+
+  const other = '[Interface]\nPrivateKey = other-secret\n'
+  const group = await exportStored(active, {
+    ['a'.repeat(64)]: activated,
+    ['b'.repeat(64)]: other,
+  })
+  assert.equal(group.result.type, 'group')
+  assert.deepEqual(
+    group.result.value.map((v: { name: string }) => v.name),
+    ['Active WireGuard Configuration', 'Recovered Order ' + 'b'.repeat(64)],
+  )
+})
 
 test('exportConfig returns the stored configuration as-is, masked and copyable', async () => {
   const sampleConf = `[Interface]

@@ -51,10 +51,33 @@ export const metaShape = z.object({
   provisionedKey: z.string().optional().catch(undefined),
   pendingOrder: pendingOrderShape.optional().nullable(),
   /**
-   * Replaced pending orders whose invoices have not expired yet, retained so
-   * bridge.py can still claim an earlier invoice if the operator pays it.
+   * Replaced pending orders, retained so bridge.py can still claim an
+   * earlier invoice the operator pays. An entry and its key stay until the
+   * settlement watcher retires it: claimed once paid, or reported unpaid
+   * (or unknown) by a status check after its invoice expired. Never evicted
+   * to make room.
    */
   previousPendingOrders: z.array(pendingOrderShape).optional().catch(undefined),
+  /**
+   * WireGuard configurations of paid replaced orders, claimed by bridge.py
+   * and keyed by payment hash. Export WireGuard Configuration lists them;
+   * never served to the dashboard.
+   */
+  recoveredOrderConfigs: z
+    .record(z.string(), z.string())
+    .optional()
+    .catch(undefined),
+  /**
+   * The latest paid replaced order bridge.py recovered without replacing
+   * the active tunnel; drives the one-time recovered-order notice.
+   */
+  lastRecoveredOrder: z
+    .object({
+      paymentHash: z.string(),
+      recoveredAt: z.string().optional().catch(undefined),
+    })
+    .optional()
+    .catch(undefined),
   pendingRenewal: z
     .object({
       paymentHash: z.string(),
@@ -115,9 +138,16 @@ export const metaShape = z.object({
    * the settlement health check has cleared them.
    */
   payTasksToClear: z.array(z.string()).optional().catch(undefined),
-  /** Duration in months (1, 3, 6, 12) of the most recent Buy/Renew invoice. */
+  /**
+   * Duration in months (1, 3, 6, 12) of the last paid Buy/Renew, recorded by
+   * bridge.py once its payment is received (never for an unpaid invoice).
+   * NWC's Match Last Purchase renews this duration.
+   */
   lastDuration: z.number().optional().catch(undefined),
-  /** Satoshi amount of the most recent Buy/Renew invoice, used for 1.2x NWC budget guidance. */
+  /**
+   * Satoshi amount of the last paid Buy/Renew, recorded with lastDuration.
+   * Bounds what NWC pays unattended and sizes the 1.2x budget guidance.
+   */
   lastAmountSats: z.number().optional().catch(undefined),
   /** Non-secret NWC status mirrored from nwc-wallet.json. */
   nwcConnected: z.boolean().optional().catch(undefined),

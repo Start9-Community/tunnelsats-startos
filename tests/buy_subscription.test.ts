@@ -22,6 +22,7 @@ import {
 import {
   metaShape,
   pendingOrderShape,
+  tunnelsatsMeta,
 } from '../startos/fileModels/tunnelsatsMeta'
 import { generateWireguardKeypair } from '../startos/keygen'
 import { payTaskReplayId } from '../startos/settlement'
@@ -56,6 +57,38 @@ function makePendingOrder(
     ...overrides,
   }
 }
+
+test('creating an unpaid Buy does not change the last paid plan used by NWC', async () => {
+  const originalMerge = tunnelsatsMeta.merge
+  let recorded: any
+  tunnelsatsMeta.merge = (async (_effects: unknown, patch: unknown) => {
+    recorded = patch
+  }) as any
+  try {
+    await startPurchase(
+      {} as never,
+      { targetNode: 'lnd', serverRegion: 'eu-de', duration: 12 },
+      {
+        now: () => NOW,
+        lockMeta: testMetaLock,
+        readCurrent: async () => null,
+        createOrder: async () => ({
+          paymentHash: HASH_2,
+          invoice: INVOICE_2,
+          orderId: 'order-12',
+          amountSats: 45_000,
+        }),
+        raiseTask: async () => undefined,
+      },
+    )
+    assert.equal(recorded.pendingOrder.duration, 12)
+    assert.equal(recorded.pendingOrder.amountSats, 45_000)
+    assert.ok(!Object.hasOwn(recorded, 'lastDuration'))
+    assert.ok(!Object.hasOwn(recorded, 'lastAmountSats'))
+  } finally {
+    tunnelsatsMeta.merge = originalMerge
+  }
+})
 
 test('Buy Subscription action (keepPayable unset/false) refuses to replace a paid pendingOrder', async () => {
   const paidByMarker = makePendingOrder({ paymentReceivedFor: HASH_1 })
@@ -183,7 +216,81 @@ test('runPurchase checks fetchPaymentState before replacing an unpaid pendingOrd
   }
 })
 
-test('startPurchase / runPurchase retains unexpired replaced pendingOrder in previousPendingOrders, deduplicates, caps at 5, and prunes expired entries', async () => {
+test('runPurchase refuses a replacement the retained queue cannot hold before creating an order', async () => {
+  const existing = makePendingOrder()
+  const retained = (count: number) =>
+    Array.from({ length: count }, (_, n) =>
+      makePendingOrder({
+        paymentHash: String.fromCharCode(97 + n).repeat(64),
+        orderId: `ord-retained-${n}`,
+        // Expired invoices still count: only the settlement watcher retires
+        // an entry, after checking its payment status.
+        expiresAt: inMs(-60_000),
+      }),
+    )
+
+  let keygenCalls = 0
+  let createCalls = 0
+  const fullOps: PurchaseOps = {
+    now: () => NOW,
+    lockMeta: testMetaLock,
+    readCurrent: async () => ({
+      pending: existing,
+      previousPendingOrders: retained(MAX_PREVIOUS_PENDING_ORDERS),
+    }),
+    fetchPaymentState: async () => 'unpaid',
+    generateKeypair: () => {
+      keygenCalls += 1
+      return generateWireguardKeypair()
+    },
+    createOrder: async () => {
+      createCalls += 1
+      throw new Error('must not create an order the record would refuse')
+    },
+    record: async () => {
+      throw new Error('must not record')
+    },
+    raiseTask: async () => undefined,
+  }
+  await assert.rejects(
+    runPurchase(
+      { targetNode: 'cln', serverRegion: 'us-east', duration: 6 },
+      fullOps,
+    ),
+    (err: unknown) =>
+      err instanceof PendingPaymentConflictError &&
+      /Too many replaced subscription orders/.test(err.message),
+  )
+  assert.equal(keygenCalls, 0)
+  assert.equal(createCalls, 0)
+
+  // One slot left: the replaced order takes it and the purchase proceeds.
+  let recorded: PendingOrderRecord | null = null
+  const res = await runPurchase(
+    { targetNode: 'cln', serverRegion: 'us-east', duration: 6 },
+    {
+      ...fullOps,
+      readCurrent: async () => ({
+        pending: existing,
+        previousPendingOrders: retained(MAX_PREVIOUS_PENDING_ORDERS - 1),
+      }),
+      generateKeypair: () => generateWireguardKeypair(),
+      createOrder: async () => ({
+        invoice: INVOICE_2,
+        paymentHash: HASH_2,
+        amountSats: 50_000,
+        orderId: 'ord-2',
+      }),
+      record: async (entry) => {
+        recorded = entry
+      },
+    },
+  )
+  assert.equal(res.kind, 'created')
+  assert.equal(recorded?.paymentHash, HASH_2)
+})
+
+test('startPurchase retains replaced keys, including expired invoices awaiting a status check', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'buy-prev-orders-'))
   try {
     const metaFile = FileHelper.json(join(dir, 'meta.json'), metaShape)
@@ -247,19 +354,21 @@ test('startPurchase / runPurchase retains unexpired replaced pendingOrder in pre
     const saved = await metaFile.read().once()
     assert.equal(saved?.pendingOrder?.paymentHash, HASH_2)
     assert.equal(saved?.pendingOrder?.privateKey, kp2.privateKey)
-    assert.equal(saved?.previousPendingOrders?.length, 1)
-    assert.equal(saved?.previousPendingOrders?.[0]?.paymentHash, HASH_1)
+    assert.equal(saved?.previousPendingOrders?.length, 2)
     assert.equal(
-      saved?.previousPendingOrders?.[0]?.privateKey,
+      saved?.previousPendingOrders?.[0]?.paymentHash,
+      expiredPrev.paymentHash,
+    )
+    assert.equal(saved?.previousPendingOrders?.[1]?.paymentHash, HASH_1)
+    assert.equal(
+      saved?.previousPendingOrders?.[1]?.privateKey,
       activeOrder1.privateKey,
     )
     assert.deepEqual(saved?.payTasksToClear, [
       payTaskReplayId('order', 'lnd', HASH_1),
     ])
 
-    // Replace 5 more times so 6 total unexpired orders have been replaced:
-    // only the 5 most recent are kept, and pendingOrderShape validates each.
-    for (let i = 3; i <= 7; i++) {
+    for (let i = 3; i <= 5; i++) {
       const kp = generateWireguardKeypair()
       const nextHash = String(i).repeat(64)
       await startPurchase(
@@ -312,7 +421,7 @@ test('startPurchase / runPurchase retains unexpired replaced pendingOrder in pre
     )
     assert.deepEqual(
       capped?.previousPendingOrders?.map((o) => o.paymentHash),
-      [HASH_2, '3'.repeat(64), '4'.repeat(64), '5'.repeat(64), '6'.repeat(64)],
+      [expiredPrev.paymentHash, HASH_1, HASH_2, '3'.repeat(64), '4'.repeat(64)],
     )
     for (const item of capped?.previousPendingOrders ?? []) {
       assert.ok(pendingOrderShape.parse(item).privateKey)

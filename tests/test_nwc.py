@@ -587,6 +587,23 @@ class TestNwcAutoRenew(unittest.TestCase):
         self.assertEqual(bridge.read_meta()["pendingRenewal"]["paymentHash"], other_hash)
         self.assertEqual(bridge.read_meta()["pendingRenewal"]["duration"], 12)
 
+    def test_match_last_purchase_skips_unpaid_manual_renewal_with_a_different_duration(self):
+        now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+        pending = self._pending(now, self.payment_hash, self.valid_invoice, expires_in_minutes=30, duration=12)
+        self._seed_auto_renew_state(now, pending)
+        meta = bridge.read_meta()
+        meta["nwcAutoRenewDuration"] = "match"
+        bridge.atomic_write_json(self.meta_path, meta)
+        wallet = bridge._read_json_object(self.wallet_path)
+        wallet["autoRenewDuration"] = "match"
+        bridge.atomic_write_json(self.wallet_path, wallet)
+
+        res, paid = self._run_auto_renew(now, payment_state="unpaid")
+
+        self.assertEqual(res["result"], "manual-pending")
+        self.assertEqual(paid, [])
+        self.assertEqual(bridge.read_meta()["lastDuration"], 1)
+
     def test_auto_renew_does_not_pay_after_disable_during_preflight(self):
         now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
         self._seed_auto_renew_state(now)

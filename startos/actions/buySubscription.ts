@@ -253,6 +253,12 @@ export function runPurchase(
       }
     }
 
+    // Dry run of the retention recordThenRaise applies under the metadata
+    // lock: a full queue of replaced orders is refused here, before a key is
+    // generated and an order is created on the server. The new order's hash
+    // is not known yet; it can't match a retained one.
+    replacedOrderPatch(pending, current?.previousPendingOrders, '')
+
     const keypair = ops.generateKeypair()
     const order = await ops.createOrder({
       serverId: input.serverRegion,
@@ -331,12 +337,6 @@ export function startPurchase(
           lastError: undefined,
           nextAttemptAt: undefined,
         },
-        ...(typeof entry.duration === 'number'
-          ? { lastDuration: entry.duration }
-          : {}),
-        ...(typeof entry.amountSats === 'number' && entry.amountSats > 0
-          ? { lastAmountSats: entry.amountSats }
-          : {}),
         ...patch,
       }),
     raiseTask: ({ invoice, paymentHash, amountSats, targetNode }) => {

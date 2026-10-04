@@ -68,15 +68,11 @@ os.umask(0o077)
 _enabled_cache = None
 _enabled_cache_mtime = 0
 _pubkey_cache = None
-_csrf_lock = threading.Lock()
+# Created once at import, before any request thread exists, so reading it
+# needs no lock.
 _csrf_token = secrets.token_hex(32)
 
 def get_csrf_token():
-    global _csrf_token
-    if _csrf_token is None:
-        with _csrf_lock:
-            if _csrf_token is None:
-                _csrf_token = secrets.token_hex(32)
     return _csrf_token
 
 def validate_csrf_token(token):

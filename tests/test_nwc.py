@@ -646,6 +646,21 @@ class TestNwcAutoRenew(unittest.TestCase):
         self.assertTrue(meta["pendingRenewal"]["raisePayTask"])
         self.assertEqual(meta["pendingRenewal"]["paymentHash"], self.payment_hash)
 
+    def test_auto_renew_never_pays_a_reused_invoice_whose_hash_does_not_match(self):
+        # Reused invoices are verified by the capped check alone; it still
+        # checks the payment hash before anything is paid unattended.
+        now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+        foreign_invoice = _build_test_bolt11("45u", "cd" * 32)
+        self._seed_auto_renew_state(
+            now, self._pending(now, self.payment_hash, foreign_invoice, expires_in_minutes=30)
+        )
+
+        res, paid = self._run_auto_renew(now, payment_state="unpaid")
+
+        self.assertEqual(res["result"], "verification-failed")
+        self.assertEqual(paid, [])
+        self.assertEqual(bridge.read_meta()["pendingRenewal"]["invoice"], foreign_invoice)
+
     def test_auto_renew_never_overwrites_or_repays_concurrent_paid_renewal(self):
         now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
         other_hash = "ef" * 32

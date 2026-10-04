@@ -4145,6 +4145,11 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
 
             payment_hash = str(renew_data.get("paymentHash") or "").strip().lower()
             invoice = str(renew_data.get("invoice") or "").strip()
+            # Structural check before the invoice is persisted: its payment
+            # hash, and an amount above zero and below the global ceiling. A
+            # malformed invoice is never stored or offered as a Pay Invoice
+            # task. Whether NWC may pay it unattended is the capped check
+            # below; above that cap it falls back to the Pay Invoice task.
             try:
                 verified_sats = _verify_bolt11_invoice(invoice, payment_hash)
             except NwcVerificationError as e:
@@ -4227,20 +4232,16 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
             if used_concurrent:
                 payment_hash = reusable_pending["paymentHash"]
                 invoice = reusable_pending["invoice"]
-                try:
-                    verified_sats = _verify_bolt11_invoice(invoice, payment_hash)
-                except NwcVerificationError as e:
-                    _record_nwc_failure(wg_pubkey, None, e, now, force_fallback=True)
-                    return {"result": "verification-failed", "message": str(e)}
         else:
             payment_hash = reusable_pending["paymentHash"]
             invoice = reusable_pending["invoice"]
-            try:
-                verified_sats = _verify_bolt11_invoice(invoice, payment_hash)
-            except NwcVerificationError as e:
-                _record_nwc_failure(wg_pubkey, None, e, now, force_fallback=True)
-                return {"result": "verification-failed", "message": str(e)}
 
+        # The one check that decides whether NWC may pay unattended: payment
+        # hash, and an amount within the ceiling for this duration and the
+        # last paid price. A reused invoice is verified here only; a freshly
+        # created one was also checked before it was persisted (above), so a
+        # malformed invoice is never stored. An invoice that fails here falls
+        # back to the node's Pay Invoice task.
         paid_months = int((_dashboard_duration(reusable_pending.get("duration")) or resolved_duration)[:-1])
         max_sats = _nwc_max_renewal_sats(paid_months, meta.get("lastAmountSats"), last_months)
         try:

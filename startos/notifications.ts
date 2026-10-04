@@ -26,8 +26,8 @@
  * Renew and unknown-key tasks keep reminding in that case.
  *
  * Limitation: the notices are driven by the Subscription health check, so
- * nothing is sent while TunnelSats is stopped; a due notice goes out once it
- * runs again. The Renew task raised by setDependencies stays the persistent
+ * nothing is sent while TunnelSats is stopped or switched off (main.ts runs
+ * them only while it is enabled); a due notice goes out once it runs again. The Renew task raised by setDependencies stays the persistent
  * reminder.
  *
  * SDK-free on purpose (the caller passes the effects-bound operations), so

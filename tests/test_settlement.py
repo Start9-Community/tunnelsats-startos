@@ -617,6 +617,10 @@ class TestOrderSettlement(SettlementTestBase):
                 f.write(corrupt)
             self.assertTrue(bridge._tunnel_configured(), corrupt)
         os.remove(bridge.APP_CONFIG_PATH)
+        with open(bridge.CONFIG_PATH, "wb") as f:
+            f.write(b"[Interface]\n\xff\n")  # not UTF-8: cannot be decoded
+        self.assertTrue(bridge._tunnel_configured())
+        os.remove(bridge.CONFIG_PATH)
         os.mkdir(bridge.CONFIG_PATH)  # cannot be read: open() fails with EISDIR
         self.assertTrue(bridge._tunnel_configured())
 

@@ -1467,14 +1467,14 @@ def _tunnel_configured():
     holds meta_lock."""
     stored = []
     try:
-        with open(CONFIG_PATH, "r") as f:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             stored.append(f.read())
     except FileNotFoundError:
         pass
     except (OSError, ValueError):
         return True
     try:
-        with open(APP_CONFIG_PATH, "r") as f:
+        with open(APP_CONFIG_PATH, "r", encoding="utf-8") as f:
             app_config = json.load(f)
     except FileNotFoundError:
         app_config = {}
@@ -1613,7 +1613,7 @@ def _settle_previous_orders(now, newer_order_provisioned=False):
             if not activate:
                 outcomes.append(_outcome(
                     "order", "superseded",
-                    "A paid order you had replaced was recovered; your active tunnel is unchanged. "
+                    "A paid order you had replaced was recovered; your tunnel is unchanged. "
                     "Run Export WireGuard Configuration to retrieve it and Import Subscription to use it.",
                     p_hash,
                 ))

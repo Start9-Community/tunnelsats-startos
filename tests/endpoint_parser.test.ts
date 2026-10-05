@@ -32,7 +32,9 @@ test('getAnnounceEndpoint returns null for missing or invalid inputs', () => {
   assert.equal(getAnnounceEndpoint(null), null)
   assert.equal(getAnnounceEndpoint(''), null)
   assert.equal(
-    getAnnounceEndpoint(`[Interface]\nPrivateKey = secret\n[Peer]\nEndpoint = ch1.tunnelsats.com:51820`),
+    getAnnounceEndpoint(
+      `[Interface]\nPrivateKey = secret\n[Peer]\nEndpoint = ch1.tunnelsats.com:51820`,
+    ),
     null,
   )
 })

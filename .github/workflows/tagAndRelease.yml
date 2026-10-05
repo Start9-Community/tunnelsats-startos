@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,7 +12,7 @@ permissions:
 jobs:
   tag-and-release:
     name: Tag and Release
-    uses: Start9Labs/start-technologies/.github/workflows/tagAndRelease.yml@be6d7dc7613bb7a7abe1d2318ba1d233cdef725e # master
+    uses: Start9Labs/start-technologies/.github/workflows/tagAndRelease.yml@ead412242eec62379eb68cc84db1155fcade10a8 # master
     with:
       REFERENCE_REGISTRY: 'https://community-registry.start9.com'
     secrets:

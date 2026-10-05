@@ -1,6 +1,6 @@
 version: 2
 updates:
-  # NPM (StartOS TypeScript SDK & tooling)
+  # NPM (StartOS TypeScript SDK, companion dependencies & tooling)
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
@@ -10,6 +10,11 @@ updates:
       timezone: "Europe/Berlin"
     
     groups:
+      startos-packages:
+        patterns:
+          - "cln-startos"
+          - "lnd-startos"
+
       minor-and-patch:
         patterns:
           - "*"
@@ -55,4 +60,3 @@ updates:
       - "github-actions"
     commit-message:
       prefix: "chore(ci)"
-

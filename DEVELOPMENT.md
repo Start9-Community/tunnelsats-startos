@@ -12,10 +12,10 @@ TunnelSats is built using the StartOS TypeScript SDK (`@start9labs/start-sdk`).
 
 - **`startos/manifest/index.ts`**: Defines package identity, container images, volume mounts, and dynamic dependencies.
 - **`startos/main.ts`**: Sets up the primary daemon, readiness probes for the Web Dashboard on port 80, and registers background subscription health checks.
-- **`startos/actions/configure.ts`**: Strongly-typed UI configuration action where users input WireGuard configs, choose their target Lightning node (`lnd` vs `cln`), and configure IPv6 coexistence settings.
-- **`startos/dependencies.ts`**: Dynamic dependency management and automated 1-Click UI Task generation for target node external host announcements and subscription expiry alerts.
-- **`bridge.py`**: Python orchestrator managing the Web Dashboard, `/api/status`, `/api/properties`, and telemetry synchronization.
-- **`verify.sh`**: Standalone diagnostic script auditing container namespace routing, IPv6 leak prevention, Tor coexistence, and node announcement alignment.
+- **`startos/actions/`**: Storefront actions: Buy, Renew and Import Subscription, Reset Bandwidth, Export WireGuard Configuration, and Configure (enable/disable TunnelSats, pick the target node `lnd` / `cln` / `eclair`, replace the WireGuard config, IPv6 coexistence).
+- **`startos/dependencies.ts`** / **`startos/vpnHandoff.ts`**: Dynamic dependencies, the Renew reminder task, and the clearnet-vpn handoff: an on-task on the target node's `clearnet-vpn` action (which runs the tunnel as `wg0` inside the node container) and an off-task for a node that used the tunnel before.
+- **`bridge.py`**: Python orchestrator serving the Web Dashboard and its API (`GET /api/dashboard`, `GET /api/servers` for the cached server list, `POST /api/intents` for dashboard-started Buy / Renew / Reset Bandwidth, `POST /api/reachability` for the rate-limited inbound ping test), plus telemetry synchronization and payment settlement. The POST endpoints require a trusted request with the CSRF token.
+- **`verify.sh`**: In-container diagnostics (stored config, subscription health, dashboard API). The tunnel runs on the node, so the node-side checks (`wg show`, `ip rule`, `ip route show table 51820`, egress probes) are printed as manual steps and never reported as verified.
 
 ---
 

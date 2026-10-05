@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { validateWireguardConfig, parseWireguardTunnelInfo } from '../startos/utils'
+import {
+  validateWireguardConfig,
+  parseWireguardTunnelInfo,
+} from '../startos/utils'
 
 test('validateWireguardConfig accepts valid WireGuard configuration', () => {
   const conf = `[Interface]

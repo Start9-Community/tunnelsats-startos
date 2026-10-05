@@ -23,7 +23,15 @@ fi
 
 # Resolve defaults from environment or fallback
 HOST="${HOST:-https://start9.local}"
-SDK_CLI="${SDK_CLI:-$(command -v start-cli 2>/dev/null || echo '/home/hakuna/.cargo/bin/start-cli')}"
+SDK_CLI="${SDK_CLI:-$(command -v start-cli 2>/dev/null || true)}"
+if [ -z "$SDK_CLI" ] && [ -x "$HOME/.cargo/bin/start-cli" ]; then
+    SDK_CLI="$HOME/.cargo/bin/start-cli"
+fi
+
+if [ -z "$SDK_CLI" ]; then
+    echo "Error: start-cli not found in PATH or \$HOME/.cargo/bin/start-cli"
+    exit 1
+fi
 
 if [ -z "$MASTER_PWD" ]; then
     echo "Error: password not found in \$MASTER_PWD or .env.local"

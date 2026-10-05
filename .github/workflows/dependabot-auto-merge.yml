@@ -1,11 +1,14 @@
-# Auto-approve and enable native auto-merge for Dependabot minor/patch updates.
+# Auto-approve and enable native auto-merge for Dependabot eligible updates:
+# - Minor and patch npm dependency updates
+# - StartOS companion packages (cln-startos, lnd-startos) git commit updates
+# - GitHub Actions updates (minor/patch/SHA bumps)
 #
 # Note: In tunnelsats-startos, merging to main does NOT publish a release to the StartOS store.
 # Release publishing strictly requires a signed tag (v*), preserving production air-gap safety.
 #
 # How it works:
 # 1. Triggers on pull_request_target for Dependabot PRs
-# 2. Uses dependabot/fetch-metadata to inspect semver update types (minor/patch)
+# 2. Uses dependabot/fetch-metadata to inspect dependency names, update types, and ecosystem
 # 3. Auto-approves the PR and enables native GitHub auto-merge (--auto --squash)
 # 4. GitHub automatically executes the merge ONLY AFTER 'Build StartOS Package' passes 100%
 
@@ -30,8 +33,13 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Auto-approve minor and patch updates
-        if: steps.metadata.outputs.update-type == 'version-update:semver-minor' || steps.metadata.outputs.update-type == 'version-update:semver-patch'
+      - name: Auto-approve eligible Dependabot updates
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
+          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          contains(steps.metadata.outputs.dependency-names, 'cln-startos') ||
+          contains(steps.metadata.outputs.dependency-names, 'lnd-startos') ||
+          (steps.metadata.outputs.package-ecosystem == 'github_actions' && steps.metadata.outputs.update-type != 'version-update:semver-major')
         run: |
           # Only approve if not already approved to reduce noise
           if ! gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json reviews -q '.reviews[].author.login' | grep -q 'github-actions'; then
@@ -43,8 +51,13 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Enable native auto-merge for minor and patch updates
-        if: steps.metadata.outputs.update-type == 'version-update:semver-minor' || steps.metadata.outputs.update-type == 'version-update:semver-patch'
+      - name: Enable native auto-merge for eligible Dependabot updates
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
+          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          contains(steps.metadata.outputs.dependency-names, 'cln-startos') ||
+          contains(steps.metadata.outputs.dependency-names, 'lnd-startos') ||
+          (steps.metadata.outputs.package-ecosystem == 'github_actions' && steps.metadata.outputs.update-type != 'version-update:semver-major')
         run: |
           # Enable auto-merge (--auto): PR queues and merges ONLY after Build StartOS Package passes
           gh pr merge "$PR_NUMBER" --auto --squash --repo "${{ github.repository }}"

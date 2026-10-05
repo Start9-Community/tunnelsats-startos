@@ -1,4 +1,5 @@
 import { isIP } from 'node:net'
+import { USER_AGENT } from './userAgent'
 export const DEFAULT_API_BASE = 'https://tunnelsats.com'
 export const MONTHLY_BANDWIDTH_LIMIT_GB = 100
 
@@ -95,7 +96,7 @@ async function fetchJsonWithStatus<T>(
       signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'TunnelSats-StartOS/0.4.0',
+        'User-Agent': USER_AGENT,
         ...(options.headers || {}),
       },
     })

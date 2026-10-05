@@ -570,7 +570,7 @@ def lazy_sync(wg_pubkey, require_usage=False):
         data=data,
         headers={
             "Content-Type": "application/json",
-            "User-Agent": f"TunnelSats-StartOS/{get_package_version()}"
+            "User-Agent": user_agent()
         },
         method="POST"
     )
@@ -946,7 +946,7 @@ def _api_call(method, path, body=None):
         data=json.dumps(body).encode("utf-8") if body is not None else None,
         headers={
             "Content-Type": "application/json",
-            "User-Agent": f"TunnelSats-StartOS/{get_package_version()}",
+            "User-Agent": user_agent(),
         },
         method=method,
     )
@@ -1680,31 +1680,47 @@ def ack_pay_tasks(replay_ids):
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _package_version_cache = None
+VERSION_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "version.json")
+# What may follow "TunnelSats-StartOS/" in a request header.
+_PACKAGE_VERSION_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+~-]{0,63}")
+
+
+def _package_semver(value):
+    """`value` without its ExVer revision ("1.0.0:0" -> "1.0.0"), or None
+    unless that is a plain version string."""
+    if not isinstance(value, str):
+        return None
+    semver = value.strip().partition(":")[0]
+    return semver if _PACKAGE_VERSION_RE.fullmatch(semver) else None
+
 
 def get_package_version():
+    """The package version without its ExVer revision: PACKAGE_VERSION, which
+    main passes from startos/versions/current.ts (startos/bridgeEnv.ts), else
+    version.json, which scripts/sync-version.js writes from the same file.
+    None if neither has one: never a guessed version."""
     global _package_version_cache
     if _package_version_cache is not None:
         return _package_version_cache
 
-    env_ver = os.environ.get("PACKAGE_VERSION")
-    if env_ver:
-        _package_version_cache = env_ver.partition(':')[0]
-        return _package_version_cache
-
-    vpath = os.path.join(os.path.dirname(__file__), "version.json")
-    if os.path.exists(vpath):
+    version = _package_semver(os.environ.get("PACKAGE_VERSION"))
+    if version is None:
         try:
-            with open(vpath, "r") as f:
+            with open(VERSION_JSON_PATH, "r") as f:
                 data = json.load(f)
-                ver = data.get("semver") or data.get("version")
-                if ver:
-                    _package_version_cache = ver.partition(':')[0]
-                    return _package_version_cache
-        except Exception:
+            if isinstance(data, dict):
+                version = _package_semver(data.get("semver") or data.get("version"))
+        except (OSError, ValueError):
             pass
 
-    _package_version_cache = "0.4.0"
-    return _package_version_cache
+    _package_version_cache = version
+    return version
+
+
+def user_agent():
+    """The User-Agent of every request bridge.py makes (TunnelSats API, NWC
+    relays). apiClient.ts sends the same value (startos/userAgent.ts)."""
+    return f"TunnelSats-StartOS/{get_package_version() or 'unknown'}"
 
 DASHBOARD_CSP = (
     "default-src 'self'; "
@@ -2051,37 +2067,6 @@ def extract_vpn_port(config_content):
     except (ValueError, IndexError):
         pass
     return DEFAULT_VPN_PORT
-
-def get_target_details():
-    """
-    Returns (target_host, target_port) based on the target node config.
-    """
-    env_addr = os.environ.get("TARGET_NODE_ADDR")
-    if env_addr:
-        try:
-            host, port = env_addr.split(":")
-            return host, int(port)
-        except Exception as e:
-            print(f"Error parsing TARGET_NODE_ADDR '{env_addr}': {e}", file=sys.stderr)
-
-    target = "lnd"
-    try:
-        if os.path.exists(APP_CONFIG_PATH):
-            with open(APP_CONFIG_PATH, 'r') as f:
-                config_data = json.load(f)
-                target = config_data.get("target-node", "lnd")
-    except Exception as e:
-        print(f"Error reading target node from config: {e}", file=sys.stderr)
-
-    # Map to StartOS service ID and default port
-    if target in ("cln", "c-lightning"):
-        hostname = "c-lightning.embassy"
-    elif target == "eclair":
-        hostname = "eclair.embassy"
-    else:
-        hostname = "lnd.embassy"
-    return hostname, 9735
-
 
 
 def get_wg_ip():
@@ -2859,7 +2844,7 @@ def _server_entry(entry):
 def _fetch_servers():
     req = urllib.request.Request(
         f"{TUNNELSATS_API_URL}/servers",
-        headers={"Accept": "application/json", "User-Agent": f"TunnelSats-StartOS/{get_package_version()}"},
+        headers={"Accept": "application/json", "User-Agent": user_agent()},
         method="GET",
     )
     with urllib.request.urlopen(req, timeout=10) as response:
@@ -2983,7 +2968,7 @@ def check_reachability(payload):
     req = urllib.request.Request(
         f"{TUNNELSATS_API_URL}/ping/test",
         data=json.dumps({"socket": f"{node_pubkey}@{host}:{port}"}).encode("utf-8"),
-        headers={"Content-Type": "application/json", "User-Agent": f"TunnelSats-StartOS/{get_package_version()}"},
+        headers={"Content-Type": "application/json", "User-Agent": user_agent()},
         method="POST",
     )
     try:
@@ -3132,8 +3117,13 @@ NWC_MAX_ATTEMPTS = 3
 NWC_RETRY_DELAY = timedelta(hours=1)
 NWC_TRIGGER_WINDOW = timedelta(days=7)
 NWC_GRACE_WINDOW = timedelta(days=7)
-TOR_SOCKS_HOST = os.getenv("TOR_SOCKS_HOST", "tor.embassy")
-TOR_SOCKS_PORT = int(os.getenv("TOR_SOCKS_PORT", "9050"))
+# The Tor service's SOCKS5 proxy, which Tor-routed relay connections dial: its
+# bridge address, passed by main (startos/bridgeEnv.ts). There is no default
+# (StartOS 0.3's tor.embassy does not resolve on 0.4); _tor_socks_address()
+# validates both when a connection is made, so a bad value disables only the
+# Tor path instead of failing the import.
+TOR_SOCKS_HOST = os.getenv("TOR_SOCKS_HOST", "")
+TOR_SOCKS_PORT = os.getenv("TOR_SOCKS_PORT", "")
 
 
 def _nwc_max_renewal_sats(duration_months, last_amount_sats=None, last_duration_months=None):
@@ -3688,16 +3678,38 @@ def _recv_exact(sock, length, deadline=None):
     return bytes(buf)
 
 
+_TOR_SOCKS_PORT_RE = re.compile(r"[0-9]{1,5}")
+
+
+def _tor_socks_address():
+    """The (host, port) of the Tor SOCKS5 proxy from TOR_SOCKS_HOST and
+    TOR_SOCKS_PORT. The host must be an IP address, so reaching the proxy needs
+    no DNS lookup. Raises NwcError if either is missing or invalid."""
+    host, port = str(TOR_SOCKS_HOST), str(TOR_SOCKS_PORT)
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        host = None
+    if host and _TOR_SOCKS_PORT_RE.fullmatch(port) and 1 <= int(port) <= 65535:
+        return host, int(port)
+    raise NwcError(
+        "Tor SOCKS5 proxy address is not set (TOR_SOCKS_HOST/TOR_SOCKS_PORT); "
+        "not connecting to the relay without Tor"
+    )
+
+
 def _connect_socks5h(target_host, target_port, timeout=15):
-    """Connects to (target_host, target_port) through the local Tor SOCKS5h
-    proxy (ATYP=0x03 domain name resolution on the proxy). Fails closed if the
-    SOCKS5 proxy is unreachable or rejects the connection."""
+    """Connects to (target_host, target_port) through the Tor SOCKS5h proxy at
+    _tor_socks_address() (ATYP=0x03 domain name resolution on the proxy). Fails
+    closed if the proxy address is not set, or the SOCKS5 proxy is unreachable
+    or rejects the connection."""
+    proxy_host, proxy_port = _tor_socks_address()
     host_bytes = target_host.encode("idna")
     if not (1 <= len(host_bytes) <= 255):
         raise NwcError("Invalid relay hostname for SOCKS5h proxy")
     deadline = time.monotonic() + timeout
     try:
-        sock = socket.create_connection((TOR_SOCKS_HOST, TOR_SOCKS_PORT), timeout=timeout)
+        sock = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
         sock.settimeout(timeout)
         # RFC 1928 Greeting: VER=5, NMETHODS=1, METHOD=0 (No Auth)
         sock.sendall(b"\x05\x01\x00")
@@ -3731,7 +3743,7 @@ def _connect_socks5h(target_host, target_port, timeout=15):
     except NwcError:
         raise
     except Exception as e:
-        raise NwcError(f"Tor SOCKS5 proxy ({TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}) connection failed: {e}")
+        raise NwcError(f"Tor SOCKS5 proxy ({proxy_host}:{proxy_port}) connection failed: {e}")
 
 
 def _ws_send_frame(sock, opcode, payload_bytes):
@@ -3841,7 +3853,7 @@ def _ws_open(relay_url, route_via_tor=False, timeout=15):
             "Connection: Upgrade\r\n"
             f"Sec-WebSocket-Key: {ws_key}\r\n"
             "Sec-WebSocket-Version: 13\r\n"
-            f"User-Agent: TunnelSats-StartOS/{get_package_version()}\r\n\r\n"
+            f"User-Agent: {user_agent()}\r\n\r\n"
         )
         sock.sendall(handshake.encode("ascii"))
 

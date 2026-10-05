@@ -23,9 +23,9 @@ export const inputSpec = InputSpec.of({
     ),
     default: 'lnd',
     values: {
-      lnd: 'LND (lnd.embassy)',
-      cln: 'Core Lightning (c-lightning.embassy)',
-      eclair: 'Eclair (eclair.embassy)',
+      lnd: 'LND',
+      cln: 'Core Lightning',
+      eclair: 'Eclair',
     },
   }),
   'tunnelsats-conf': Value.textarea({

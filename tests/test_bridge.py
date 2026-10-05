@@ -1,11 +1,17 @@
 import unittest
+import json
 import os
 import sys
+import tempfile
+from unittest.mock import MagicMock, patch
 
 # Add the parent directory to sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 import bridge
+from test_nwc import _LoopbackNip47Server
 
 class TestBridgeConfig(unittest.TestCase):
     def test_extract_vpn_port_found(self):
@@ -37,22 +43,74 @@ Address = 10.0.0.1/32
 if __name__ == '__main__':
     unittest.main()
 
+def _version_json_semver():
+    """The version bridge.py reports: version.json as the image ships it."""
+    with open(os.path.join(REPO_ROOT, "version.json")) as f:
+        return json.load(f)["semver"]
+
+
+def _response(payload):
+    """An urlopen() answer: only the transport is replaced, the request is real."""
+    resp = MagicMock()
+    resp.status = 200
+    resp.read.return_value = json.dumps(payload).encode()
+    resp.__enter__ = lambda s: s
+    resp.__exit__ = MagicMock(return_value=False)
+    return resp
+
+
 class TestPackageVersion(unittest.TestCase):
     def setUp(self):
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("PACKAGE_VERSION", None)
         bridge._package_version_cache = None
-
-    def tearDown(self):
-        bridge._package_version_cache = None
+        self.addCleanup(setattr, bridge, "_package_version_cache", None)
 
     def test_get_package_version_from_version_json(self):
-        ver = bridge.get_package_version()
-        self.assertEqual(ver, "1.0.0")
+        self.assertEqual(bridge.get_package_version(), _version_json_semver())
 
     def test_get_package_version_from_env(self):
-        with unittest.mock.patch.dict(os.environ, {"PACKAGE_VERSION": "1.2.3:4"}):
+        os.environ["PACKAGE_VERSION"] = "1.2.3:4"
+        self.assertEqual(bridge.get_package_version(), "1.2.3")
+
+    def test_version_is_unknown_without_env_or_version_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            with patch.object(bridge, "VERSION_JSON_PATH", os.path.join(d, "version.json")):
+                self.assertIsNone(bridge.get_package_version())
+                self.assertEqual(bridge.user_agent(), "TunnelSats-StartOS/unknown")
+
+    def test_a_malformed_version_is_never_sent(self):
+        os.environ["PACKAGE_VERSION"] = "1.0.0\r\nX-Injected: yes"
+        self.assertEqual(bridge.get_package_version(), _version_json_semver())
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "version.json")
+            with open(path, "w") as f:
+                json.dump({"version": "1.0.0:0", "semver": "1.0.0 (x)"}, f)
             bridge._package_version_cache = None
-            ver = bridge.get_package_version()
-            self.assertEqual(ver, "1.2.3")
+            with patch.object(bridge, "VERSION_JSON_PATH", path):
+                self.assertEqual(bridge.user_agent(), "TunnelSats-StartOS/unknown")
+
+    @patch("urllib.request.urlopen")
+    def test_api_requests_send_the_package_version_as_user_agent(self, urlopen):
+        urlopen.return_value = _response({"servers": [{"id": "eu-de", "country": "Germany", "status": "online"}]})
+        bridge._fetch_servers()
+        bridge._api_call("GET", "/subscription/" + "ab" * 32)
+        expected = f"TunnelSats-StartOS/{_version_json_semver()}"
+        sent = [c.args[0].get_header("User-agent") for c in urlopen.call_args_list]
+        self.assertEqual(sent, [expected, expected])
+
+    def test_nwc_relay_handshake_sends_the_package_version_as_user_agent(self):
+        server = _LoopbackNip47Server("11" * 32, lambda method, params: {"result_type": method, "result": {}})
+        self.addCleanup(server.close)
+        parsed = bridge.parse_nwc_uri(
+            f"nostr+walletconnect://{server.wallet_pubkey_hex}"
+            f"?relay=ws://testwallet.onion:8080/ws&secret={'22' * 32}"
+        )
+        with patch.object(bridge, "TOR_SOCKS_HOST", "127.0.0.1"), patch.object(bridge, "TOR_SOCKS_PORT", server.port):
+            bridge.nwc_execute_command(parsed, "get_budget", {}, route_via_tor=True, timeout=5)
+        self.assertEqual(server.user_agents, [f"TunnelSats-StartOS/{_version_json_semver()}"])
 
 class TestBridgeKeygenAndConfig(unittest.TestCase):
     def test_derive_wg_pubkey(self):

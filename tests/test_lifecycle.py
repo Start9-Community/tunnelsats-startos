@@ -31,22 +31,6 @@ class TestBridgeLifecycle(unittest.TestCase):
         port = bridge.extract_vpn_port(config)
         self.assertEqual(port, 9735)
 
-    @patch('os.path.exists')
-    @patch('builtins.open', new_callable=unittest.mock.mock_open, read_data='{"target-node": "cln"}')
-    def test_get_target_details_cln(self, mock_open, mock_exists):
-        mock_exists.return_value = True
-        host, port = bridge.get_target_details()
-        self.assertEqual(host, "c-lightning.embassy")
-        self.assertEqual(port, 9735)
-
-    @patch('os.path.exists')
-    @patch('builtins.open', new_callable=unittest.mock.mock_open, read_data='{"target-node": "lnd"}')
-    def test_get_target_details_lnd(self, mock_open, mock_exists):
-        mock_exists.return_value = True
-        host, port = bridge.get_target_details()
-        self.assertEqual(host, "lnd.embassy")
-        self.assertEqual(port, 9735)
-
     def test_validate_config_success(self):
         valid_conf = "[Interface]\nPrivateKey = hidden_key\nAddress = 10.x.x.x/32\n# VPNPort: 54321\n[Peer]\nEndpoint = 198.51.100.1:51820"
         bridge.validate_config(valid_conf) # Should not raise

@@ -11,29 +11,30 @@ import { dashboardIntents } from './fileModels/dashboardIntents'
 import { processDashboardIntents } from './intentRunner'
 import { createNoticeRunner, noticeStateRecord } from './notifications'
 import { noticeInputsFor } from './dependencies'
+import {
+  bridgeCommands,
+  bridgeDaemonExec,
+  bridgeEnv,
+  readTorSocksAddress,
+} from './bridgeEnv'
 
 export const main = sdk.setupMain(async ({ effects }) => {
   console.info(i18n('Starting TunnelSats!'))
 
   // 1. Read configuration reactively
   const config = await configJson.read().const(effects)
-  const targetNode = config?.['target-node'] ?? 'lnd'
 
-  // 2. Resolve target Lightning node internal DNS address
-  const targetAddr =
-    targetNode === 'cln'
-      ? 'c-lightning.embassy:9735'
-      : targetNode === 'eclair'
-        ? 'eclair.embassy:9735'
-        : 'lnd.embassy:9735'
-
-  // 3. Setup environment variables
-  const env: Record<string, string> = {}
-  if (config?.enabled && targetAddr) {
-    env.TARGET_NODE_ADDR = targetAddr
+  // 2. Environment of every bridge.py process started here (bridgeEnv.ts),
+  // including the Tor SOCKS proxy that Tor-routed NWC relay connections dial
+  const torSocks = await readTorSocksAddress(effects)
+  const env: Record<string, string> = bridgeEnv(torSocks)
+  if (!env.TOR_SOCKS_HOST) {
+    console.warn(
+      `TunnelSats: unexpected Tor SOCKS address ${JSON.stringify(torSocks)}; Tor-routed NWC connections are refused`,
+    )
   }
 
-  // 4. Create subcontainer reference
+  // 3. Create subcontainer reference, and the bridge.py commands run in it
   const subcontainer = sdk.SubContainer.of(
     effects,
     { imageId: 'main' },
@@ -45,8 +46,14 @@ export const main = sdk.setupMain(async ({ effects }) => {
     }),
     'main',
   )
+  const bridge = bridgeCommands(
+    (command, options, timeoutMs, abort) =>
+      subcontainer.exec(command, options, timeoutMs, abort),
+    env,
+    effects,
+  )
 
-  // 5. Subscription notices (7 and 3 days before expiry, lapse, unknown
+  // 4. Subscription notices (7 and 3 days before expiry, lapse, unknown
   // key, and NWC auto-renewal events), driven by the Subscription and
   // Settlement health checks. See notifications.ts.
   const runNotices = createNoticeRunner({
@@ -93,12 +100,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
         message: i18n('TunnelSats is disabled.'),
       }
     }
-    const res = await subcontainer.exec([
-      'python3',
-      '/app/bridge.py',
-      'health',
-      'subscription',
-    ])
+    const res = await bridge.healthSubscription()
     if (res.exitCode !== 0) {
       try {
         const errData = JSON.parse(
@@ -137,7 +139,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
     }
   }
 
-  // 6. Watch dashboard-intents.json (written by bridge.py POST /api/intents)
+  // 5. Watch dashboard-intents.json (written by bridge.py POST /api/intents)
   // so Buy/Renew/Reset requests from the dashboard run immediately through
   // the shared action core, with a fallback poll in the settlement health check.
   let intentsWatcherActive = true
@@ -154,14 +156,11 @@ export const main = sdk.setupMain(async ({ effects }) => {
     return { cancel: !intentsWatcherActive }
   })
 
-  // 7. Define daemons and health checks
+  // 6. Define daemons and health checks
   return sdk.Daemons.of(effects)
     .addDaemon('main', {
       subcontainer,
-      exec: {
-        command: ['/app/docker_entrypoint.sh'],
-        env,
-      },
+      exec: bridgeDaemonExec(env),
       ready: {
         display: i18n('Web Dashboard'),
         fn: async () => {
@@ -263,15 +262,8 @@ export const main = sdk.setupMain(async ({ effects }) => {
             console.warn(`TunnelSats dashboard intent check failed: ${e}`),
           )
           const status = await runSettlementTick({
-            settle: () =>
-              subcontainer.exec(['python3', '/app/bridge.py', 'settle']),
-            ack: (ids) =>
-              subcontainer.exec([
-                'python3',
-                '/app/bridge.py',
-                'settle-ack',
-                ...ids,
-              ]),
+            settle: bridge.settle,
+            ack: bridge.settleAck,
             clearTask: (id) => sdk.action.clearTask(effects, id),
           })
           switch (status.state) {

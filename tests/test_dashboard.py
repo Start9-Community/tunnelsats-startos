@@ -435,11 +435,19 @@ class TestDashboardReadModel(DashboardStateTestBase):
         self.assertEqual(model["handoff"], {"activeTarget": None, "pendingOff": ["lnd"], "unraised": []})
         self.assertIsNone(model["notices"])
 
-    def test_status_target_host_maps_eclair(self):
-        self.configure("eclair")
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("TARGET_NODE_ADDR", None)
-            self.assertEqual(bridge.get_target_details(), ("eclair.embassy", 9735))
+    def test_version_is_the_package_version_and_absent_when_unknown(self):
+        self.configure("lnd")
+        with open(os.path.join(os.path.dirname(__file__), "..", "version.json")) as f:
+            semver = json.load(f)["semver"]
+        with patch.dict(os.environ):
+            os.environ.pop("PACKAGE_VERSION", None)
+            self.addCleanup(setattr, bridge, "_package_version_cache", None)
+            bridge._package_version_cache = None
+            self.assertEqual(bridge.get_dashboard()["version"], semver)
+            bridge._package_version_cache = None
+            with patch.object(bridge, "VERSION_JSON_PATH", os.path.join(self._tmp.name, "version.json")):
+                # Never a guessed version: the dashboard footer stays empty.
+                self.assertIsNone(bridge.get_dashboard()["version"])
 
 
 class LoopbackServerTestBase(DashboardStateTestBase):

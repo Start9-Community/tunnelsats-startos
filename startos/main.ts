@@ -11,7 +11,7 @@ import { dashboardIntents } from './fileModels/dashboardIntents'
 import { processDashboardIntents } from './intentRunner'
 import { createNoticeRunner, noticeStateRecord } from './notifications'
 import { noticeInputsFor } from './dependencies'
-import { bridgeEnv } from './bridgeEnv'
+import { bridgeEnv, torSocksAddress } from './bridgeEnv'
 
 export const main = sdk.setupMain(async ({ effects }) => {
   console.info(i18n('Starting TunnelSats!'))
@@ -28,8 +28,15 @@ export const main = sdk.setupMain(async ({ effects }) => {
         ? 'eclair.embassy:9735'
         : 'lnd.embassy:9735'
 
-  // 3. Environment of every bridge.py process started here (bridgeEnv.ts)
-  const env: Record<string, string> = bridgeEnv()
+  // 3. Environment of every bridge.py process started here (bridgeEnv.ts),
+  // including the Tor SOCKS proxy that Tor-routed NWC relay connections dial
+  const torSocks = await torSocksAddress(effects).const()
+  const env: Record<string, string> = bridgeEnv(torSocks)
+  if (!env.TOR_SOCKS_HOST) {
+    console.warn(
+      `TunnelSats: unexpected Tor SOCKS address ${JSON.stringify(torSocks)}; Tor-routed NWC connections are refused`,
+    )
+  }
   if (config?.enabled && targetAddr) {
     env.TARGET_NODE_ADDR = targetAddr
   }

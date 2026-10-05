@@ -79,7 +79,7 @@ test('TunnelSats API requests send the package version as User-Agent', async () 
 })
 
 test('bridge.py processes get the package version of versions/current.ts', () => {
-  assert.equal(bridgeEnv().PACKAGE_VERSION, current.options.version)
+  assert.equal(bridgeEnv(null).PACKAGE_VERSION, current.options.version)
 })
 
 test('bridge.py sends the same User-Agent under the env main passes', () => {
@@ -95,7 +95,10 @@ test('bridge.py sends the same User-Agent under the env main passes', () => {
         { cwd: dir, env, encoding: 'utf8' },
       ).trim()
     const { PACKAGE_VERSION: _unset, ...withoutVersion } = process.env
-    assert.equal(userAgentOf({ ...withoutVersion, ...bridgeEnv() }), USER_AGENT)
+    assert.equal(
+      userAgentOf({ ...withoutVersion, ...bridgeEnv(null) }),
+      USER_AGENT,
+    )
     // Without either source the version is not guessed.
     assert.equal(userAgentOf(withoutVersion), 'TunnelSats-StartOS/unknown')
   } finally {

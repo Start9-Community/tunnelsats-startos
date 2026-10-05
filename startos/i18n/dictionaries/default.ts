@@ -111,7 +111,7 @@ const dict = {
   'Auto-Renew Duration': 108,
   'Select the subscription extension period to request when auto-renewing. Because BTC/fiat rates cannot be foreseen over 12 months, set your NWC wallet budget to at least 1.2x the current satoshi estimate for your chosen interval.': 109,
   'Route Wallet Traffic Through Tor': 110,
-  'Route NWC WebSocket relay connections through the StartOS Tor SOCKS5 proxy (tor.embassy:9050) so the relay never sees your home IP. Automatically enforced for .onion relays.': 111,
+  "Route NWC WebSocket relay connections through the Tor service's SOCKS5 proxy so the relay never sees your home IP. Automatically enforced for .onion relays.": 111,
   'NWC Wallet Connected': 112,
   'NWC auto-renewal is active via relay ${relayHost} (${transport}). TunnelSats will automatically renew for ${duration} month(s) when your confirmed subscription is within 7 days of expiry. Recommended NWC wallet budget (1.2x buffer): ${perRenewalSats} sats per renewal (${annualSats} sats/year).': 113,
   'Relay Host': 114,

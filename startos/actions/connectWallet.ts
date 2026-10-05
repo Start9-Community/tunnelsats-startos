@@ -207,7 +207,7 @@ export const inputSpec = InputSpec.of({
   routeViaTor: Value.toggle({
     name: i18n('Route Wallet Traffic Through Tor'),
     description: i18n(
-      'Route NWC WebSocket relay connections through the StartOS Tor SOCKS5 proxy (tor.embassy:9050) so the relay never sees your home IP. Automatically enforced for .onion relays.',
+      "Route NWC WebSocket relay connections through the Tor service's SOCKS5 proxy so the relay never sees your home IP. Automatically enforced for .onion relays.",
     ),
     default: false,
   }),
@@ -261,9 +261,7 @@ export const connectWallet = sdk.Action.withInput(
       }
     }
 
-    const transportLabel = outcome.routeViaTor
-      ? 'Tor SOCKS5 (tor.embassy:9050)'
-      : 'Clearnet WSS'
+    const transportLabel = outcome.routeViaTor ? 'Tor SOCKS5' : 'Clearnet WSS'
 
     return {
       version: '1' as const,

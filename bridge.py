@@ -3158,8 +3158,13 @@ NWC_MAX_ATTEMPTS = 3
 NWC_RETRY_DELAY = timedelta(hours=1)
 NWC_TRIGGER_WINDOW = timedelta(days=7)
 NWC_GRACE_WINDOW = timedelta(days=7)
-TOR_SOCKS_HOST = os.getenv("TOR_SOCKS_HOST", "tor.embassy")
-TOR_SOCKS_PORT = int(os.getenv("TOR_SOCKS_PORT", "9050"))
+# The Tor service's SOCKS5 proxy, which Tor-routed relay connections dial: its
+# bridge address, passed by main (startos/bridgeEnv.ts). There is no default
+# (StartOS 0.3's tor.embassy does not resolve on 0.4); _tor_socks_address()
+# validates both when a connection is made, so a bad value disables only the
+# Tor path instead of failing the import.
+TOR_SOCKS_HOST = os.getenv("TOR_SOCKS_HOST", "")
+TOR_SOCKS_PORT = os.getenv("TOR_SOCKS_PORT", "")
 
 
 def _nwc_max_renewal_sats(duration_months, last_amount_sats=None, last_duration_months=None):
@@ -3714,16 +3719,38 @@ def _recv_exact(sock, length, deadline=None):
     return bytes(buf)
 
 
+_TOR_SOCKS_PORT_RE = re.compile(r"[0-9]{1,5}")
+
+
+def _tor_socks_address():
+    """The (host, port) of the Tor SOCKS5 proxy from TOR_SOCKS_HOST and
+    TOR_SOCKS_PORT. The host must be an IP address, so reaching the proxy needs
+    no DNS lookup. Raises NwcError if either is missing or invalid."""
+    host, port = str(TOR_SOCKS_HOST), str(TOR_SOCKS_PORT)
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        host = None
+    if host and _TOR_SOCKS_PORT_RE.fullmatch(port) and 1 <= int(port) <= 65535:
+        return host, int(port)
+    raise NwcError(
+        "Tor SOCKS5 proxy address is not set (TOR_SOCKS_HOST/TOR_SOCKS_PORT); "
+        "not connecting to the relay without Tor"
+    )
+
+
 def _connect_socks5h(target_host, target_port, timeout=15):
-    """Connects to (target_host, target_port) through the local Tor SOCKS5h
-    proxy (ATYP=0x03 domain name resolution on the proxy). Fails closed if the
-    SOCKS5 proxy is unreachable or rejects the connection."""
+    """Connects to (target_host, target_port) through the Tor SOCKS5h proxy at
+    _tor_socks_address() (ATYP=0x03 domain name resolution on the proxy). Fails
+    closed if the proxy address is not set, or the SOCKS5 proxy is unreachable
+    or rejects the connection."""
+    proxy_host, proxy_port = _tor_socks_address()
     host_bytes = target_host.encode("idna")
     if not (1 <= len(host_bytes) <= 255):
         raise NwcError("Invalid relay hostname for SOCKS5h proxy")
     deadline = time.monotonic() + timeout
     try:
-        sock = socket.create_connection((TOR_SOCKS_HOST, TOR_SOCKS_PORT), timeout=timeout)
+        sock = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
         sock.settimeout(timeout)
         # RFC 1928 Greeting: VER=5, NMETHODS=1, METHOD=0 (No Auth)
         sock.sendall(b"\x05\x01\x00")
@@ -3757,7 +3784,7 @@ def _connect_socks5h(target_host, target_port, timeout=15):
     except NwcError:
         raise
     except Exception as e:
-        raise NwcError(f"Tor SOCKS5 proxy ({TOR_SOCKS_HOST}:{TOR_SOCKS_PORT}) connection failed: {e}")
+        raise NwcError(f"Tor SOCKS5 proxy ({proxy_host}:{proxy_port}) connection failed: {e}")
 
 
 def _ws_send_frame(sock, opcode, payload_bytes):

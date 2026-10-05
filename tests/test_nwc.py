@@ -3,6 +3,8 @@ import hashlib
 import json
 import os
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -10,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import bridge
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
 def _build_test_bolt11(hrp_amount: str, payment_hash_hex: str, include_p_tag: bool = True) -> str:
@@ -883,6 +887,88 @@ class TestNwcAutoRenew(unittest.TestCase):
         self.assertEqual(dash["nwc"]["relayHost"], "relay.getalby.com")
         self.assertEqual(dash["nwc"]["recommendedBudgetSats"], 12000)
         self.assertEqual(dash["nwc"]["recommendedAnnualSats"], 48000)
+
+
+class TestTorSocksAddress(unittest.TestCase):
+    """Tor-routed relay connections dial the Tor proxy at the bridge address
+    main passes (TOR_SOCKS_HOST/TOR_SOCKS_PORT, startos/bridgeEnv.ts). There is
+    no default: without a valid address nothing is dialled."""
+
+    WALLET_SECRET = "11" * 32
+    CLIENT_SECRET = "22" * 32
+
+    def _uri(self, relay):
+        wallet_pubkey = bridge._nostr_pubkey_from_secret(self.WALLET_SECRET)
+        return f"nostr+walletconnect://{wallet_pubkey}?relay={relay}&secret={self.CLIENT_SECRET}"
+
+    def test_without_a_valid_proxy_address_nothing_is_dialled(self):
+        onion = bridge.parse_nwc_uri(self._uri("ws://testwallet.onion:8080/ws"))
+        clearnet = bridge.parse_nwc_uri(self._uri("wss://relay.example.com/v1"))
+        for host, port in (
+            ("", ""),
+            ("", "9050"),
+            ("10.0.3.1", ""),
+            ("tor.embassy", "9050"),
+            ("10.0.3.1:9050", "9050"),
+            ("10.0.3.1", "0"),
+            ("10.0.3.1", "65536"),
+            ("10.0.3.1", "9o50"),
+        ):
+            # A clearnet relay with Tor routing must not fall back to a
+            # direct connection either.
+            for parsed in (onion, clearnet):
+                with self.subTest(host=host, port=port, relay=parsed["relays"][0]), \
+                        patch.object(bridge, "TOR_SOCKS_HOST", host), \
+                        patch.object(bridge, "TOR_SOCKS_PORT", port), \
+                        patch("socket.getaddrinfo") as lookup, \
+                        patch("socket.create_connection") as connect, \
+                        patch("socket.socket") as new_socket:
+                    with self.assertRaisesRegex(bridge.NwcError, "Tor SOCKS5 proxy address is not set"):
+                        bridge.nwc_execute_command(parsed, "get_budget", {}, route_via_tor=True, timeout=1)
+                    lookup.assert_not_called()
+                    connect.assert_not_called()
+                    new_socket.assert_not_called()
+
+    def test_a_malformed_port_disables_only_the_tor_path(self):
+        # TOR_SOCKS_PORT used to be parsed on import, so a bad value stopped
+        # all of bridge.py (dashboard, sync, settlement), not just Tor.
+        result = subprocess.run(
+            [sys.executable, "-c", "import bridge; bridge._tor_socks_address()"],
+            cwd=REPO_ROOT,
+            env={**os.environ, "TOR_SOCKS_HOST": "10.0.3.1", "TOR_SOCKS_PORT": "nope"},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Tor SOCKS5 proxy address is not set", result.stderr)
+
+    def test_the_configured_proxy_carries_the_relay_connection(self):
+        # A separate interpreter with the env main passes, so the variables
+        # bridgeEnv.ts sets are the ones bridge.py dials.
+        server = _LoopbackNip47Server(
+            self.WALLET_SECRET,
+            lambda method, params: {"result_type": method, "result": {"remaining_budget": 21_000}},
+        )
+        self.addCleanup(server.close)
+        code = (
+            "import bridge, json, sys; "
+            "parsed = bridge.parse_nwc_uri(sys.argv[1]); "
+            "print(json.dumps(bridge.nwc_execute_command("
+            "parsed, 'get_budget', {}, route_via_tor=True, timeout=5)))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code, self._uri("ws://testwallet.onion:8080/ws")],
+            cwd=REPO_ROOT,
+            env={**os.environ, "TOR_SOCKS_HOST": "127.0.0.1", "TOR_SOCKS_PORT": str(server.port)},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"remaining_budget": 21_000})
+        # SOCKS5h: the proxy, not this host, resolves the relay name.
+        self.assertEqual(server.socks_requests, [(3, "testwallet.onion", 8080)])
 
 
 def _iso_in(now: datetime, days: int) -> str:

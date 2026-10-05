@@ -1,8 +1,10 @@
 name: Build StartOS Package
 
-# PR checks, as in the Start9-Community template. A merge to main is built
-# and published by tagAndRelease.yml, so a push trigger here would build the
-# same commit twice.
+# PR checks, as in the Start9-Community template. tagAndRelease.yml builds and
+# publishes a merge to main while its version is not on REFERENCE_REGISTRY, so
+# a push trigger here would build the same commit twice. Once that version is
+# promoted, merges without a version bump are not built, and main gets no
+# post-merge test run: the PR run on the merge ref is the only gate.
 on:
   workflow_dispatch:
   pull_request:

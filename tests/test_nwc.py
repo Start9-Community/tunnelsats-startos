@@ -42,6 +42,7 @@ class _LoopbackNip47Server:
         self.wallet_pubkey_hex = bridge._nostr_pubkey_from_secret(wallet_secret_hex)
         self.handler = handler
         self.socks_requests = []
+        self.user_agents = []
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind(("127.0.0.1", 0))
@@ -101,6 +102,7 @@ class _LoopbackNip47Server:
                     k, _, v = line.partition(":")
                     headers[k.strip().lower()] = v.strip()
             ws_key = headers.get("sec-websocket-key", "")
+            self.user_agents.append(headers.get("user-agent"))
             accept = base64.b64encode(
                 hashlib.sha1((ws_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
             ).decode("ascii")

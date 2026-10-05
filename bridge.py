@@ -570,7 +570,7 @@ def lazy_sync(wg_pubkey, require_usage=False):
         data=data,
         headers={
             "Content-Type": "application/json",
-            "User-Agent": f"TunnelSats-StartOS/{get_package_version()}"
+            "User-Agent": user_agent()
         },
         method="POST"
     )
@@ -946,7 +946,7 @@ def _api_call(method, path, body=None):
         data=json.dumps(body).encode("utf-8") if body is not None else None,
         headers={
             "Content-Type": "application/json",
-            "User-Agent": f"TunnelSats-StartOS/{get_package_version()}",
+            "User-Agent": user_agent(),
         },
         method=method,
     )
@@ -1680,31 +1680,47 @@ def ack_pay_tasks(replay_ids):
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _package_version_cache = None
+VERSION_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "version.json")
+# What may follow "TunnelSats-StartOS/" in a request header.
+_PACKAGE_VERSION_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+~-]{0,63}")
+
+
+def _package_semver(value):
+    """`value` without its ExVer revision ("1.0.0:0" -> "1.0.0"), or None
+    unless that is a plain version string."""
+    if not isinstance(value, str):
+        return None
+    semver = value.strip().partition(":")[0]
+    return semver if _PACKAGE_VERSION_RE.fullmatch(semver) else None
+
 
 def get_package_version():
+    """The package version without its ExVer revision: PACKAGE_VERSION, which
+    main passes from startos/versions/current.ts (startos/bridgeEnv.ts), else
+    version.json, which scripts/sync-version.js writes from the same file.
+    None if neither has one: never a guessed version."""
     global _package_version_cache
     if _package_version_cache is not None:
         return _package_version_cache
 
-    env_ver = os.environ.get("PACKAGE_VERSION")
-    if env_ver:
-        _package_version_cache = env_ver.partition(':')[0]
-        return _package_version_cache
-
-    vpath = os.path.join(os.path.dirname(__file__), "version.json")
-    if os.path.exists(vpath):
+    version = _package_semver(os.environ.get("PACKAGE_VERSION"))
+    if version is None:
         try:
-            with open(vpath, "r") as f:
+            with open(VERSION_JSON_PATH, "r") as f:
                 data = json.load(f)
-                ver = data.get("semver") or data.get("version")
-                if ver:
-                    _package_version_cache = ver.partition(':')[0]
-                    return _package_version_cache
-        except Exception:
+            if isinstance(data, dict):
+                version = _package_semver(data.get("semver") or data.get("version"))
+        except (OSError, ValueError):
             pass
 
-    _package_version_cache = "0.4.0"
-    return _package_version_cache
+    _package_version_cache = version
+    return version
+
+
+def user_agent():
+    """The User-Agent of every request bridge.py makes (TunnelSats API, NWC
+    relays). apiClient.ts sends the same value (startos/userAgent.ts)."""
+    return f"TunnelSats-StartOS/{get_package_version() or 'unknown'}"
 
 DASHBOARD_CSP = (
     "default-src 'self'; "
@@ -2869,7 +2885,7 @@ def _server_entry(entry):
 def _fetch_servers():
     req = urllib.request.Request(
         f"{TUNNELSATS_API_URL}/servers",
-        headers={"Accept": "application/json", "User-Agent": f"TunnelSats-StartOS/{get_package_version()}"},
+        headers={"Accept": "application/json", "User-Agent": user_agent()},
         method="GET",
     )
     with urllib.request.urlopen(req, timeout=10) as response:
@@ -2993,7 +3009,7 @@ def check_reachability(payload):
     req = urllib.request.Request(
         f"{TUNNELSATS_API_URL}/ping/test",
         data=json.dumps({"socket": f"{node_pubkey}@{host}:{port}"}).encode("utf-8"),
-        headers={"Content-Type": "application/json", "User-Agent": f"TunnelSats-StartOS/{get_package_version()}"},
+        headers={"Content-Type": "application/json", "User-Agent": user_agent()},
         method="POST",
     )
     try:
@@ -3851,7 +3867,7 @@ def _ws_open(relay_url, route_via_tor=False, timeout=15):
             "Connection: Upgrade\r\n"
             f"Sec-WebSocket-Key: {ws_key}\r\n"
             "Sec-WebSocket-Version: 13\r\n"
-            f"User-Agent: TunnelSats-StartOS/{get_package_version()}\r\n\r\n"
+            f"User-Agent: {user_agent()}\r\n\r\n"
         )
         sock.sendall(handshake.encode("ascii"))
 

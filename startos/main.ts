@@ -18,17 +18,8 @@ export const main = sdk.setupMain(async ({ effects }) => {
 
   // 1. Read configuration reactively
   const config = await configJson.read().const(effects)
-  const targetNode = config?.['target-node'] ?? 'lnd'
 
-  // 2. Resolve target Lightning node internal DNS address
-  const targetAddr =
-    targetNode === 'cln'
-      ? 'c-lightning.embassy:9735'
-      : targetNode === 'eclair'
-        ? 'eclair.embassy:9735'
-        : 'lnd.embassy:9735'
-
-  // 3. Environment of every bridge.py process started here (bridgeEnv.ts),
+  // 2. Environment of every bridge.py process started here (bridgeEnv.ts),
   // including the Tor SOCKS proxy that Tor-routed NWC relay connections dial
   const torSocks = await torSocksAddress(effects).const()
   const env: Record<string, string> = bridgeEnv(torSocks)
@@ -37,11 +28,8 @@ export const main = sdk.setupMain(async ({ effects }) => {
       `TunnelSats: unexpected Tor SOCKS address ${JSON.stringify(torSocks)}; Tor-routed NWC connections are refused`,
     )
   }
-  if (config?.enabled && targetAddr) {
-    env.TARGET_NODE_ADDR = targetAddr
-  }
 
-  // 4. Create subcontainer reference
+  // 3. Create subcontainer reference
   const subcontainer = sdk.SubContainer.of(
     effects,
     { imageId: 'main' },
@@ -54,7 +42,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
     'main',
   )
 
-  // 5. Subscription notices (7 and 3 days before expiry, lapse, unknown
+  // 4. Subscription notices (7 and 3 days before expiry, lapse, unknown
   // key, and NWC auto-renewal events), driven by the Subscription and
   // Settlement health checks. See notifications.ts.
   const runNotices = createNoticeRunner({
@@ -143,7 +131,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
     }
   }
 
-  // 6. Watch dashboard-intents.json (written by bridge.py POST /api/intents)
+  // 5. Watch dashboard-intents.json (written by bridge.py POST /api/intents)
   // so Buy/Renew/Reset requests from the dashboard run immediately through
   // the shared action core, with a fallback poll in the settlement health check.
   let intentsWatcherActive = true
@@ -160,7 +148,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
     return { cancel: !intentsWatcherActive }
   })
 
-  // 7. Define daemons and health checks
+  // 6. Define daemons and health checks
   return sdk.Daemons.of(effects)
     .addDaemon('main', {
       subcontainer,

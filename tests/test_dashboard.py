@@ -449,12 +449,6 @@ class TestDashboardReadModel(DashboardStateTestBase):
                 # Never a guessed version: the dashboard footer stays empty.
                 self.assertIsNone(bridge.get_dashboard()["version"])
 
-    def test_status_target_host_maps_eclair(self):
-        self.configure("eclair")
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("TARGET_NODE_ADDR", None)
-            self.assertEqual(bridge.get_target_details(), ("eclair.embassy", 9735))
-
 
 class LoopbackServerTestBase(DashboardStateTestBase):
     """The real handler behind a real HTTP server on loopback."""

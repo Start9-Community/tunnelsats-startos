@@ -2078,37 +2078,6 @@ def extract_vpn_port(config_content):
         pass
     return DEFAULT_VPN_PORT
 
-def get_target_details():
-    """
-    Returns (target_host, target_port) based on the target node config.
-    """
-    env_addr = os.environ.get("TARGET_NODE_ADDR")
-    if env_addr:
-        try:
-            host, port = env_addr.split(":")
-            return host, int(port)
-        except Exception as e:
-            print(f"Error parsing TARGET_NODE_ADDR '{env_addr}': {e}", file=sys.stderr)
-
-    target = "lnd"
-    try:
-        if os.path.exists(APP_CONFIG_PATH):
-            with open(APP_CONFIG_PATH, 'r') as f:
-                config_data = json.load(f)
-                target = config_data.get("target-node", "lnd")
-    except Exception as e:
-        print(f"Error reading target node from config: {e}", file=sys.stderr)
-
-    # Map to StartOS service ID and default port
-    if target in ("cln", "c-lightning"):
-        hostname = "c-lightning.embassy"
-    elif target == "eclair":
-        hostname = "eclair.embassy"
-    else:
-        hostname = "lnd.embassy"
-    return hostname, 9735
-
-
 
 def get_wg_ip():
     try:

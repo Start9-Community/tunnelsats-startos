@@ -447,8 +447,6 @@ class LoopbackServerTestBase(DashboardStateTestBase):
 
     def setUp(self):
         super().setUp()
-        self._dns = patch("socket.gethostbyname", side_effect=OSError("no embassy host"))
-        self._dns.start()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), bridge.DashboardHTTPRequestHandler)
         self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self._thread.start()
@@ -456,7 +454,6 @@ class LoopbackServerTestBase(DashboardStateTestBase):
     def tearDown(self):
         self.server.shutdown()
         self.server.server_close()
-        self._dns.stop()
         super().tearDown()
 
     def get(self, path, headers=None):

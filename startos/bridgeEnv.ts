@@ -31,6 +31,21 @@ export function torSocksAddress(effects: Effects) {
 }
 
 /**
+ * torSocksAddress as main reads it: `.const()`, so main re-runs if the
+ * address changes. If the first read fails, null (bridgeEnv then leaves the
+ * proxy out and Tor-routed NWC connections are refused) instead of failing
+ * all of main; main is not re-run when the address becomes readable later.
+ */
+export function readTorSocksAddress(effects: Effects): Promise<string | null> {
+  return torSocksAddress(effects)
+    .const()
+    .catch((e: unknown) => {
+      console.warn(`TunnelSats: Tor SOCKS address unavailable: ${String(e)}`)
+      return null
+    })
+}
+
+/**
  * The environment of every bridge.py process main starts: the daemon and the
  * health and settlement commands. The daemon's sync loop and the health
  * command run NWC auto-renewal.
@@ -56,4 +71,46 @@ export function bridgeEnv(
     env.TOR_SOCKS_PORT = String(port)
   }
   return env
+}
+
+/**
+ * How long main lets `bridge.py health subscription` run before SIGKILL
+ * (SubContainer.exec's default is 30 s). The command runs NWC auto-renewal,
+ * and a renewal killed midway records nothing: no retry is scheduled, the Pay
+ * Invoice fallback is never raised, and Renew is refused while the unpaid
+ * invoice is valid. A wallet that never answers costs about 50 s per relay
+ * (get_budget, get_balance and lookup_invoice 10 s each, pay_invoice 20 s), up
+ * to twice that while a relay or the Tor circuit is slow to open, plus the
+ * TunnelSats API calls around it.
+ */
+export const HEALTH_SUBSCRIPTION_TIMEOUT_MS = 300_000
+
+/** SubContainer.exec, as far as bridgeCommands uses it. */
+type Exec<R> = (
+  command: string[],
+  options: { env: Record<string, string> },
+  timeoutMs?: number,
+) => Promise<R>
+
+/**
+ * The bridge.py commands main runs, each with `env` from bridgeEnv. Without a
+ * timeout, SubContainer.exec's default applies.
+ */
+export function bridgeCommands<R>(exec: Exec<R>, env: Record<string, string>) {
+  const run = (args: string[], timeoutMs?: number) =>
+    exec(['python3', '/app/bridge.py', ...args], { env }, timeoutMs)
+  return {
+    healthSubscription: () =>
+      run(['health', 'subscription'], HEALTH_SUBSCRIPTION_TIMEOUT_MS),
+    settle: () => run(['settle']),
+    settleAck: (replayIds: string[]) => run(['settle-ack', ...replayIds]),
+  }
+}
+
+/** The daemon's exec: docker_entrypoint.sh runs `bridge.py start` with `env`. */
+export function bridgeDaemonExec(env: Record<string, string>): {
+  command: [string, ...string[]]
+  env: Record<string, string>
+} {
+  return { command: ['/app/docker_entrypoint.sh'], env }
 }

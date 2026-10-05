@@ -11,7 +11,12 @@ import { dashboardIntents } from './fileModels/dashboardIntents'
 import { processDashboardIntents } from './intentRunner'
 import { createNoticeRunner, noticeStateRecord } from './notifications'
 import { noticeInputsFor } from './dependencies'
-import { bridgeEnv, torSocksAddress } from './bridgeEnv'
+import {
+  bridgeCommands,
+  bridgeDaemonExec,
+  bridgeEnv,
+  readTorSocksAddress,
+} from './bridgeEnv'
 
 export const main = sdk.setupMain(async ({ effects }) => {
   console.info(i18n('Starting TunnelSats!'))
@@ -21,7 +26,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
 
   // 2. Environment of every bridge.py process started here (bridgeEnv.ts),
   // including the Tor SOCKS proxy that Tor-routed NWC relay connections dial
-  const torSocks = await torSocksAddress(effects).const()
+  const torSocks = await readTorSocksAddress(effects)
   const env: Record<string, string> = bridgeEnv(torSocks)
   if (!env.TOR_SOCKS_HOST) {
     console.warn(
@@ -29,7 +34,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
     )
   }
 
-  // 3. Create subcontainer reference
+  // 3. Create subcontainer reference, and the bridge.py commands run in it
   const subcontainer = sdk.SubContainer.of(
     effects,
     { imageId: 'main' },
@@ -40,6 +45,11 @@ export const main = sdk.setupMain(async ({ effects }) => {
       readonly: false,
     }),
     'main',
+  )
+  const bridge = bridgeCommands(
+    (command, options, timeoutMs) =>
+      subcontainer.exec(command, options, timeoutMs),
+    env,
   )
 
   // 4. Subscription notices (7 and 3 days before expiry, lapse, unknown
@@ -89,10 +99,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
         message: i18n('TunnelSats is disabled.'),
       }
     }
-    const res = await subcontainer.exec(
-      ['python3', '/app/bridge.py', 'health', 'subscription'],
-      { env },
-    )
+    const res = await bridge.healthSubscription()
     if (res.exitCode !== 0) {
       try {
         const errData = JSON.parse(
@@ -152,10 +159,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
   return sdk.Daemons.of(effects)
     .addDaemon('main', {
       subcontainer,
-      exec: {
-        command: ['/app/docker_entrypoint.sh'],
-        env,
-      },
+      exec: bridgeDaemonExec(env),
       ready: {
         display: i18n('Web Dashboard'),
         fn: async () => {
@@ -257,15 +261,8 @@ export const main = sdk.setupMain(async ({ effects }) => {
             console.warn(`TunnelSats dashboard intent check failed: ${e}`),
           )
           const status = await runSettlementTick({
-            settle: () =>
-              subcontainer.exec(['python3', '/app/bridge.py', 'settle'], {
-                env,
-              }),
-            ack: (ids) =>
-              subcontainer.exec(
-                ['python3', '/app/bridge.py', 'settle-ack', ...ids],
-                { env },
-              ),
+            settle: bridge.settle,
+            ack: bridge.settleAck,
             clearTask: (id) => sdk.action.clearTask(effects, id),
           })
           switch (status.state) {

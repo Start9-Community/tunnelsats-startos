@@ -1,13 +1,12 @@
 name: Build StartOS Package
 
+# PR checks, as in the Start9-Community template. tagAndRelease.yml builds and
+# publishes a merge to main while its version is not on REFERENCE_REGISTRY, so
+# a push trigger here would build the same commit twice. Once that version is
+# promoted, merges without a version bump are not built, and main gets no
+# post-merge test run: the PR run on the merge ref is the only gate.
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
-      - '.gitignore'
+  workflow_dispatch:
   pull_request:
     branches:
       - main
@@ -20,6 +19,10 @@ on:
       - '**.md'
       - 'LICENSE'
       - '.gitignore'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -61,4 +64,5 @@ jobs:
   build:
     name: Build StartOS Package
     needs: test
-    uses: Start9Labs/start-technologies/.github/workflows/build.yml@ead412242eec62379eb68cc84db1155fcade10a8 # master
+    uses: Start9Labs/start-technologies/.github/workflows/build.yml@master
+    # No DEV_KEY: a PR build doesn't publish, so it doesn't need the signing key.

@@ -136,7 +136,7 @@ test('main runs every bridge.py command with the env, and health subscription fo
     return { exitCode: 0 }
   }
   const env = bridgeEnv('10.0.3.1:9050')
-  const bridge = bridgeCommands(exec, env)
+  const bridge = bridgeCommands(exec, env, { onLeaveContext: () => {} })
   await bridge.healthSubscription()
   await bridge.settle()
   await bridge.settleAck(['renewal:lnd:ab', 'order:lnd:cd'])
@@ -167,6 +167,48 @@ test('main runs every bridge.py command with the env, and health subscription fo
     command: ['/app/docker_entrypoint.sh'],
     env,
   })
+})
+
+test('leaving main aborts the in-flight health subscription exec (SIGKILL) only', async () => {
+  const aborts: (AbortController | undefined)[] = []
+  let finishSecondRun = () => {}
+  const exec = async (
+    _command: string[],
+    _options: { env: Record<string, string> },
+    _timeoutMs?: number,
+    abort?: AbortController,
+  ) => {
+    aborts.push(abort)
+    if (aborts.length === 2) {
+      await new Promise<void>((resolve) => (finishSecondRun = resolve))
+    }
+    return { exitCode: 0 }
+  }
+  let leave: (() => void) | undefined
+  const bridge = bridgeCommands(exec, bridgeEnv(null), {
+    onLeaveContext: (fn) => {
+      leave = () => void fn()
+    },
+  })
+  await bridge.healthSubscription() // finished before main leaves
+  const inFlight = bridge.healthSubscription() // still running when it leaves
+  await bridge.settle()
+  await bridge.settleAck(['renewal:lnd:ab'])
+  const [finished, running, settle, settleAck] = aborts
+  assert.ok(finished instanceof AbortController)
+  assert.ok(running instanceof AbortController)
+  assert.notEqual(finished, running)
+  assert.equal(settle, undefined)
+  assert.equal(settleAck, undefined)
+  // Stop, restart or a .const() re-run: SubContainer.exec SIGKILLs the
+  // command when its AbortController aborts.
+  assert.ok(leave)
+  leave()
+  assert.equal(running.signal.aborted, true)
+  // A finished run's controller is dropped, not kept until main leaves.
+  assert.equal(finished.signal.aborted, false)
+  finishSecondRun()
+  await inFlight
 })
 
 test('bridge.py processes get the Tor proxy bridge address', () => {

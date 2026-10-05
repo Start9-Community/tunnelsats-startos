@@ -81,7 +81,10 @@ export function bridgeEnv(
  * invoice is valid. A wallet that never answers costs about 50 s per relay
  * (get_budget, get_balance and lookup_invoice 10 s each, pay_invoice 20 s), up
  * to twice that while a relay or the Tor circuit is slow to open, plus the
- * TunnelSats API calls around it.
+ * TunnelSats API calls around it. That covers about six relays, or three slow
+ * ones: bridge.py tries the relays of the URI one after another and does not
+ * cap them, so a silent wallet behind more relays is still killed midway on
+ * every run.
  */
 export const HEALTH_SUBSCRIPTION_TIMEOUT_MS = 300_000
 
@@ -90,18 +93,47 @@ type Exec<R> = (
   command: string[],
   options: { env: Record<string, string> },
   timeoutMs?: number,
+  abort?: AbortController,
 ) => Promise<R>
 
 /**
  * The bridge.py commands main runs, each with `env` from bridgeEnv. Without a
- * timeout, SubContainer.exec's default applies.
+ * timeout, SubContainer.exec's default (30 s) applies.
+ *
+ * Stopping main (stop, restart, a `.const()` re-run, the stop before a backup
+ * or update) waits for in-flight health checks, and `health subscription` may
+ * run a renewal for up to HEALTH_SUBSCRIPTION_TIMEOUT_MS. So leaving main's
+ * context SIGKILLs that command, as a crash would: bridge.py resumes the
+ * renewal on its next run (nwcAttempted, the reused invoice, lookup_invoice
+ * before paying again). settle and settle-ack are left to finish.
+ *
+ * Each run gets its own AbortController, kept only while it runs:
+ * SubContainer.exec never removes the abort listener it adds, so a controller
+ * shared by every run would hold one listener and child process per run.
  */
-export function bridgeCommands<R>(exec: Exec<R>, env: Record<string, string>) {
-  const run = (args: string[], timeoutMs?: number) =>
-    exec(['python3', '/app/bridge.py', ...args], { env }, timeoutMs)
+export function bridgeCommands<R>(
+  exec: Exec<R>,
+  env: Record<string, string>,
+  effects: Pick<Effects, 'onLeaveContext'>,
+) {
+  const running = new Set<AbortController>()
+  effects.onLeaveContext(() => running.forEach((kill) => kill.abort()))
+  const run = (args: string[], timeoutMs?: number, abort?: AbortController) =>
+    exec(['python3', '/app/bridge.py', ...args], { env }, timeoutMs, abort)
   return {
-    healthSubscription: () =>
-      run(['health', 'subscription'], HEALTH_SUBSCRIPTION_TIMEOUT_MS),
+    healthSubscription: async () => {
+      const kill = new AbortController()
+      running.add(kill)
+      try {
+        return await run(
+          ['health', 'subscription'],
+          HEALTH_SUBSCRIPTION_TIMEOUT_MS,
+          kill,
+        )
+      } finally {
+        running.delete(kill)
+      }
+    },
     settle: () => run(['settle']),
     settleAck: (replayIds: string[]) => run(['settle-ack', ...replayIds]),
   }

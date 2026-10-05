@@ -47,9 +47,10 @@ export const main = sdk.setupMain(async ({ effects }) => {
     'main',
   )
   const bridge = bridgeCommands(
-    (command, options, timeoutMs) =>
-      subcontainer.exec(command, options, timeoutMs),
+    (command, options, timeoutMs, abort) =>
+      subcontainer.exec(command, options, timeoutMs, abort),
     env,
+    effects,
   )
 
   // 4. Subscription notices (7 and 3 days before expiry, lapse, unknown

@@ -1756,17 +1756,7 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         is_local = client_ip in ("127.0.0.1", "::1", "localhost")
 
         gateway_ip = get_default_gateway()
-        embassy_ip = None
-        try:
-            import socket
-            embassy_ip = socket.gethostbyname("embassy")
-        except Exception:
-            pass
-
-        is_trusted_proxy = (
-            (gateway_ip and client_ip == gateway_ip) or
-            (embassy_ip and client_ip == embassy_ip)
-        )
+        is_trusted_proxy = bool(gateway_ip) and client_ip == gateway_ip
 
         if not is_local and not is_trusted_proxy:
             self.send_error(403, "Access denied")

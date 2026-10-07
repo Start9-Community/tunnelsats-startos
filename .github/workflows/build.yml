@@ -3,7 +3,7 @@ name: Build
 on:
   workflow_dispatch:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
     # Integration branches (e.g. feat/storefront-clearnet-vpn) collect
     # stacked PRs before they reach main; each PR must pass CI first.
     branches: ['main', 'feat/**']
@@ -12,13 +12,16 @@ on:
 permissions: {}
 
 concurrency:
-  group: package-build-${{ github.event.pull_request.number || github.ref }}
+  group: package-build-${{ github.event.action == 'edited' && !github.event.changes.base && format('metadata-{0}', github.event.pull_request.number) || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
     name: Run Unit & Integration Tests
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.draft == false &&
+      (github.event.action != 'edited' || github.event.changes.base))
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -171,7 +171,7 @@ export const inputSpec = InputSpec.of({
   mode: Value.select({
     name: i18n('Wallet Action'),
     description: i18n(
-      'Connect or update an NWC wallet for automatic renewals, or disconnect the currently stored wallet.',
+      '- Connect / Update NWC Wallet: stores the URI below for automatic renewals, replacing any wallet stored before\n- Disconnect NWC Wallet: removes the stored wallet; future renewals raise a payment task on your Lightning node',
     ),
     default: 'connect',
     values: {
@@ -193,7 +193,7 @@ export const inputSpec = InputSpec.of({
   autoRenewDuration: Value.select({
     name: i18n('Auto-Renew Duration'),
     description: i18n(
-      'Select the subscription extension period to request when auto-renewing. Because BTC/fiat rates cannot be foreseen over 12 months, set your NWC wallet budget to at least 1.2x the current satoshi estimate for your chosen interval.',
+      'The time each automatic renewal adds. Because BTC/fiat rates cannot be foreseen over 12 months, set your NWC wallet budget to at least 1.2x the current satoshi estimate for your chosen interval.\n- Match Last Purchase: the duration of your last paid Buy or Renew, or 1 month if none is recorded\n- 1 Month: adds 1 month per renewal\n- 3 Months: adds 3 months per renewal\n- 6 Months: adds 6 months per renewal\n- 12 Months: adds 12 months per renewal',
     ),
     default: 'match',
     values: {

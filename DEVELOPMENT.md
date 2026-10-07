@@ -34,10 +34,10 @@ TunnelSats is built using the StartOS TypeScript SDK (`@start9labs/start-sdk`).
 npm run test:all
 
 # 2. TypeScript Typecheck
-npm run check
+npx tsc --noEmit
 
-# 3. TypeScript Build
-npm run build
+# 3. Package build gate (typecheck, SDK lint, format check, bundle)
+rm -rf javascript && make javascript/index.js
 
 # 4. Python Unit Tests (unittest)
 python3 -m unittest discover -s tests -p "test_*.py"

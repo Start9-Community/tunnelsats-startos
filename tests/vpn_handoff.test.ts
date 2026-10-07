@@ -583,7 +583,7 @@ test('runHandoffRecheck requests a dependency re-run only when a pending node re
   }
 
   // An off-task accepted on a stopped node: no status change, but the
-  // recheck notices the node is off and re-runs setupDependencies.
+  // recheck notices the node is off and re-runs handoffInit.
   const accepted = await run(
     { activeTarget: null, pendingOff: ['lnd'] },
     { lnd: 'off' },

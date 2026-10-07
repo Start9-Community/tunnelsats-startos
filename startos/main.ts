@@ -47,8 +47,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
     'main',
   )
   const bridge = bridgeCommands(
-    (command, options, timeoutMs, abort) =>
-      subcontainer.exec(command, options, timeoutMs, abort),
+    (command, options) => subcontainer.exec(command, options),
     env,
     effects,
   )
@@ -197,7 +196,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
         display: i18n('VPN Handoff'),
         // Shows a pending node switch and, when the previous node turned its
         // tunnel off without a status change (off-task accepted while it was
-        // stopped), makes setupDependencies release the new node's task.
+        // stopped), makes handoffInit release the new node's task.
         fn: async () => {
           try {
             const progress = await checkHandoffProgress(effects)

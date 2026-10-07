@@ -56,19 +56,25 @@ export const exportConfig = sdk.Action.withoutInput(
           type: 'group' as const,
           value: [
             ...(conf?.trim()
-              ? [{ name: i18n('Active WireGuard Configuration'), value: conf }]
+              ? [
+                  {
+                    name: i18n('Active WireGuard Configuration'),
+                    value: conf,
+                    filename: 'tunnelsatsv3.conf',
+                  },
+                ]
               : []),
             ...recoveredEntries.map(([hash, value]) => ({
               name: i18n('Recovered Order') + ' ' + hash,
               value,
+              filename: `tunnelsatsv3-${hash.slice(0, 8)}.conf`,
             })),
           ].map((entry) => ({
             ...entry,
             description: null,
-            type: 'single' as const,
+            type: 'multiline' as const,
             copyable: true,
             masked: true,
-            qr: false,
           })),
         },
       }
@@ -92,11 +98,11 @@ export const exportConfig = sdk.Action.withoutInput(
         'Below is your active TunnelSats WireGuard configuration (.conf). Keep your private key confidential.',
       ),
       result: {
-        type: 'single' as const,
+        type: 'multiline' as const,
         value: conf,
         copyable: true,
         masked: true,
-        qr: false,
+        filename: 'tunnelsatsv3.conf',
       },
     }
   },

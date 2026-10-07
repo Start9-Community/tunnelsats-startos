@@ -7,7 +7,7 @@ import { sdk } from '../sdk'
  */
 export const subscriptionNotices = FileHelper.json(
   { base: sdk.volumes.main, subpath: './subscription-notices.json' },
-  z.object({
+  z.looseObject({
     publicKey: z.string().optional().catch(undefined),
     expiresAt: z.string().optional().catch(undefined),
     /** Unknown entries are ignored by the planner, never read as sent. */

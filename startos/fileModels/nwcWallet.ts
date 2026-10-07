@@ -1,7 +1,7 @@
 import { FileHelper, z } from '@start9labs/start-sdk'
 import { sdk } from '../sdk'
 
-export const nwcWalletShape = z.object({
+export const nwcWalletShape = z.looseObject({
   uri: z.string(),
   relayHost: z.string(),
   routeViaTor: z.boolean(),

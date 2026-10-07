@@ -7,9 +7,9 @@ const packageId = z.enum(['lnd', 'c-lightning', 'eclair'])
  * Which node we last handed the tunnel to, which nodes still owe us a
  * confirmed "off", the public keys of the tunnels we handed out, and the
  * nodes whose task could not be raised (retried by the health check).
- * Written only by setDependencies (see startos/vpnHandoff.ts).
+ * Written only by handoffInit (see startos/vpnHandoff.ts).
  */
-export const vpnHandoffShape = z.object({
+export const vpnHandoffShape = z.looseObject({
   activeTarget: packageId.nullable().catch(null),
   pendingOff: z.array(packageId).catch([]),
   handedOutKeys: z.array(z.string()).catch([]),

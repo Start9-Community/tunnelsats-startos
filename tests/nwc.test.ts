@@ -200,8 +200,8 @@ test('dependencies: Tor is declared when nwcConnected && nwcRouteViaTor, and 7d/
   )
   assert.deepEqual(depsWithTor.tor, {
     kind: 'running',
-    versionRange: '>=0.4.0:0',
-    healthChecks: [],
+    versionRange: '>=0.4.9.11:2',
+    healthChecks: ['tor'],
   })
 
   const depsWithoutTor = getDependenciesForConfig(

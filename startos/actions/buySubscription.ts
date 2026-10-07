@@ -379,7 +379,7 @@ export const inputSpec = InputSpec.of({
   'target-node': Value.select({
     name: i18n('Target Lightning Node'),
     description: i18n(
-      'Select which Lightning node will pay the invoice and receive inbound connections.',
+      'The Lightning node on this server that pays the invoice, through a payment task raised on it, and then runs the tunnel.\n- LND: Lightning Network Daemon from Lightning Labs\n- Core Lightning: Core Lightning from Blockstream\n- Eclair: Eclair from ACINQ',
     ),
     default: 'lnd',
     values: {
@@ -395,7 +395,7 @@ export const inputSpec = InputSpec.of({
     return {
       name: i18n('Server Region'),
       description: i18n(
-        'Select the geographic region for your VPN tunnel endpoint.',
+        "Where the TunnelSats server your tunnel connects to is located. Your node announces that server's address to its peers.",
       ),
       default: defaultServerRegion(values),
       values,
@@ -403,7 +403,9 @@ export const inputSpec = InputSpec.of({
   }),
   duration: Value.select({
     name: i18n('Subscription Duration'),
-    description: i18n('Choose how long the subscription should last.'),
+    description: i18n(
+      'How long the new subscription lasts. The invoice shows the price.\n- 1 Month: 1 month of service\n- 3 Months: 3 months of service\n- 6 Months: 6 months of service\n- 12 Months: 12 months of service',
+    ),
     default: '1',
     values: {
       '1': '1 Month',

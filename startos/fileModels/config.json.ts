@@ -1,7 +1,7 @@
 import { FileHelper, z } from '@start9labs/start-sdk'
 import { sdk } from '../sdk'
 
-export const shape = z.object({
+export const shape = z.looseObject({
   enabled: z.boolean().catch(false),
   'target-node': z.enum(['lnd', 'cln', 'eclair']).catch('lnd'),
   'tunnelsats-conf': z.string().optional().catch(undefined),

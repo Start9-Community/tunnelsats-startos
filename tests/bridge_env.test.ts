@@ -54,6 +54,7 @@ const torHost = (port: number) => {
           enabled: [],
           disabled: [],
           guaWan: [],
+          lanEnabled: [],
           available: [
             address('127.0.0.1', 'lo'),
             address('10.0.3.1', 'lxcbr0'),
@@ -126,13 +127,17 @@ test('a failed first read of the Tor proxy address leaves Tor connections refuse
 })
 
 test('main runs every bridge.py command with the env, and health subscription for up to 300 s', async () => {
-  const calls: [string[], { env: Record<string, string> }, number?][] = []
+  const calls: [string[], Record<string, unknown>][] = []
   const exec = async (
     command: string[],
-    options: { env: Record<string, string> },
-    timeoutMs?: number,
+    options: {
+      env: Record<string, string>
+      timeout?: number
+      abort?: AbortController
+    },
   ) => {
-    calls.push([command, options, timeoutMs])
+    const { abort: _abort, ...rest } = options
+    calls.push([command, rest])
     return { exitCode: 0 }
   }
   const env = bridgeEnv('10.0.3.1:9050')
@@ -146,10 +151,9 @@ test('main runs every bridge.py command with the env, and health subscription fo
   assert.deepEqual(calls, [
     [
       ['python3', '/app/bridge.py', 'health', 'subscription'],
-      { env },
-      HEALTH_SUBSCRIPTION_TIMEOUT_MS,
+      { env, timeout: HEALTH_SUBSCRIPTION_TIMEOUT_MS },
     ],
-    [['python3', '/app/bridge.py', 'settle'], { env }, undefined],
+    [['python3', '/app/bridge.py', 'settle'], { env, timeout: undefined }],
     [
       [
         'python3',
@@ -158,8 +162,7 @@ test('main runs every bridge.py command with the env, and health subscription fo
         'renewal:lnd:ab',
         'order:lnd:cd',
       ],
-      { env },
-      undefined,
+      { env, timeout: undefined },
     ],
   ])
   // The daemon: docker_entrypoint.sh execs `bridge.py start` with this env.
@@ -174,11 +177,13 @@ test('leaving main aborts the in-flight health subscription exec (SIGKILL) only'
   let finishSecondRun = () => {}
   const exec = async (
     _command: string[],
-    _options: { env: Record<string, string> },
-    _timeoutMs?: number,
-    abort?: AbortController,
+    options: {
+      env: Record<string, string>
+      timeout?: number
+      abort?: AbortController
+    },
   ) => {
-    aborts.push(abort)
+    aborts.push(options.abort)
     if (aborts.length === 2) {
       await new Promise<void>((resolve) => (finishSecondRun = resolve))
     }

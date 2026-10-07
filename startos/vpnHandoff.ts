@@ -27,8 +27,8 @@
  *
  * StartOS does not reap tasks that are not re-raised, and it hides tasks on
  * packages that are not current dependencies, so every node that still owes
- * an off stays in `pendingOff` (declared as an `exists` dependency by the
- * caller) until it is off or uninstalled.
+ * an off stays in `pendingOff` (declared as an `exists` dependency in
+ * dependencies.ts) until it is off or uninstalled.
  *
  * StartOS cannot order tasks across packages either, so the new node's
  * on-task is withheld until every previous node is off or uninstalled. The
@@ -495,13 +495,13 @@ export interface HandoffRecheckOps {
     nodes: readonly PackageId[],
     state: VpnHandoffState,
   ) => Promise<Partial<Record<PackageId, NodeVpnState>>>
-  /** Makes setupDependencies re-run (it watches the recheck file). */
+  /** Makes handoffInit re-run (it watches the recheck file). */
   requestRecheck: () => Promise<unknown>
 }
 
 /**
  * Polled by a health check. Reports handoff progress and requests a
- * setupDependencies re-run when a pending node turned off without a status
+ * handoffInit re-run when a pending node turned off without a status
  * change (off-task accepted on a stopped node), so the held on-task is
  * released, or when a task (a node's or our own) could not be updated last
  * run, so it is retried (the poll interval is the backoff).
@@ -539,7 +539,7 @@ export async function runHandoffRecheck(
 }
 
 /**
- * setupDependencies re-runs whenever a watched file changes, and runs can
+ * handoffInit re-runs whenever a watched file changes, and runs can
  * overlap. The handoff reads its previous state and writes the next one, so
  * runs are serialized; otherwise a quick lnd->cln->eclair switch could lose
  * the off-task for lnd. The configuration is read only once a run holds the

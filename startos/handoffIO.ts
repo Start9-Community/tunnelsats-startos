@@ -1,4 +1,4 @@
-import { sdk } from './sdk'
+import { T } from '@start9labs/start-sdk'
 import { configJson } from './fileModels/config.json'
 import { vpnHandoff } from './fileModels/vpnHandoff'
 import { handoffRecheck } from './fileModels/handoffRecheck'
@@ -12,7 +12,7 @@ import {
   runHandoffRecheck,
 } from './vpnHandoff'
 
-type Effects = Parameters<typeof sdk.checkDependencies>[0]
+type Effects = T.Effects
 
 /**
  * Reads each node's current clearnet-vpn input, the same value StartOS checks

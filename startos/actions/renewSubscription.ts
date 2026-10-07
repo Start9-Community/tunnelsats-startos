@@ -378,7 +378,9 @@ const { InputSpec, Value } = sdk
 const inputSpec = InputSpec.of({
   duration: Value.select({
     name: i18n('Renewal Duration'),
-    description: i18n('Choose how long to extend the subscription.'),
+    description: i18n(
+      'How much time to add to your subscription. The invoice shows the price, and the result shows the new expiry.\n- 1 Month: adds 1 month\n- 3 Months: adds 3 months\n- 6 Months: adds 6 months\n- 12 Months: adds 12 months',
+    ),
     default: '1',
     values: {
       '1': '1 Month',

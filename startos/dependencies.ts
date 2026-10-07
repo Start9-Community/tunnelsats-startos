@@ -1,3 +1,4 @@
+import { T } from '@start9labs/start-sdk'
 import { sdk } from './sdk'
 import { configJson } from './fileModels/config.json'
 import { tunnelsatsMeta } from './fileModels/tunnelsatsMeta'
@@ -507,7 +508,7 @@ const NODE_HEALTH_CHECKS = {
   eclair: 'eclair',
 } as const
 
-const TOR_VERSION_RANGE = '>=0.4.0:0' as const
+const TOR_VERSION_RANGE = '>=0.4.9.11:2' as const
 
 /**
  * The target node is a running dependency. Nodes that still owe us a
@@ -560,7 +561,7 @@ export function getDependenciesForConfig(
     deps.tor = {
       kind: 'running',
       versionRange: TOR_VERSION_RANGE,
-      healthChecks: [],
+      healthChecks: ['tor'],
     }
   }
 
@@ -572,12 +573,12 @@ const enqueueHandoff = createHandoffQueue()
 
 /**
  * Registers a status watch on nodes that may still run the tunnel, so a
- * status change re-runs setupDependencies: accepting the off-task on a
- * running node rewrites its store.json, which restarts its main. Starting a
- * stopped node re-runs it as well.
+ * status change re-runs the handoff: accepting the off-task on a running
+ * node rewrites its store.json, which restarts its main. Starting a stopped
+ * node re-runs it as well.
  */
 async function watchPreviousNodes(
-  effects: Parameters<typeof sdk.checkDependencies>[0],
+  effects: T.Effects,
   nodes: readonly PackageId[],
 ): Promise<void> {
   for (const p of nodes) {
@@ -697,10 +698,10 @@ export async function raiseFallbackRenewalPayTask(params: {
 }
 
 async function handOffClearnetVpn(
-  effects: Parameters<typeof sdk.checkDependencies>[0],
+  effects: T.Effects,
   config: Parameters<typeof getTargetVpnConfig>[0],
   retryOwnTasks: boolean,
-): Promise<PackageId[]> {
+): Promise<void> {
   const state = await vpnHandoff
     .read()
     .once()
@@ -774,13 +775,13 @@ async function handOffClearnetVpn(
   if (!sameHandoffState(state, next)) {
     await vpnHandoff.write(effects, next)
   }
-
-  // Only installed nodes can be declared: a queued clear for an uninstalled
-  // node must not surface as a missing dependency.
-  return next.pendingOff.filter((p) => installed.includes(p))
 }
 
-export const setDependencies = sdk.setupDependencies(async ({ effects }) => {
+/**
+ * Own tasks, the fallback Pay Invoice task and the clearnet-vpn handoff. Its
+ * vpn-handoff.json write re-runs the dependency declarations below.
+ */
+export const handoffInit = sdk.setupOnInit(async (effects) => {
   // These reads only register the watches that re-run this hook. The run
   // itself acts on what is read inside the queue (see createHandoffQueue):
   // a run that waited behind a newer change must not act on older state.
@@ -796,7 +797,7 @@ export const setDependencies = sdk.setupDependencies(async ({ effects }) => {
     .const(effects)
     .catch(() => null)
 
-  const { config, result: pendingOff } = await enqueueHandoff(
+  await enqueueHandoff(
     async () => ({
       config: await configJson.read().once(),
       meta: await tunnelsatsMeta
@@ -900,13 +901,101 @@ export const setDependencies = sdk.setupDependencies(async ({ effects }) => {
       }
 
       // 3. Clearnet-VPN handoff: on-task for the target, off-task for the rest.
-      return handOffClearnetVpn(
+      await handOffClearnetVpn(
         effects,
         config,
         ownTaskFailures.length > 0 || fallbackFailed,
       )
     },
   )
-
-  return getDependenciesForConfig(config.config, pendingOff, config.meta)
 })
+
+/**
+ * getDependenciesForConfig for the stored config, NWC routing and pending
+ * nodes. Only installed nodes can be declared: a queued clear for an
+ * uninstalled node must not surface as a missing dependency.
+ */
+async function declaredDependencies(effects: T.Effects) {
+  const config = await configJson
+    .read((c) => ({ enabled: c.enabled, 'target-node': c['target-node'] }))
+    .const(effects)
+  const meta = await tunnelsatsMeta
+    .read((m) => ({
+      nwcConnected: m.nwcConnected,
+      nwcRouteViaTor: m.nwcRouteViaTor,
+    }))
+    .const(effects)
+    .catch(() => null)
+  const pendingOff =
+    (await vpnHandoff
+      .read((h) => h.pendingOff)
+      .const(effects)
+      .catch(() => null)) ?? []
+  const installed =
+    pendingOff.length > 0 ? await effects.getInstalledPackages() : []
+  return getDependenciesForConfig(
+    config,
+    pendingOff.filter((p) => installed.includes(p)),
+    meta,
+  )
+}
+
+const node = (
+  id: PackageId,
+  description: string,
+  title: string,
+  icon: string,
+) =>
+  sdk.Dependency.optional(id, {
+    description,
+    metadata: { title, icon },
+    versionRange: NODE_VERSION_RANGES[id],
+    kind: 'exists',
+    enabled: async ({ effects }) =>
+      (await declaredDependencies(effects))[id] !== undefined,
+  }).withDynamicNarrowing(async ({ effects }) =>
+    (await declaredDependencies(effects))[id]?.kind === 'running'
+      ? { kind: 'running', healthChecks: [NODE_HEALTH_CHECKS[id]] }
+      : null,
+  )
+
+export const dependencies = sdk.Dependencies.of()
+  .addDependency(
+    node(
+      'lnd',
+      'Lightning Network Daemon. Required if you choose LND as your Target Lightning Node for inbound connections.',
+      'LND',
+      'https://raw.githubusercontent.com/Start9Labs/lnd-startos/refs/heads/master/icon.svg',
+    ),
+  )
+  .addDependency(
+    node(
+      'c-lightning',
+      'Core Lightning. Required if you choose Core Lightning as your Target Lightning Node for inbound connections.',
+      'Core Lightning',
+      'https://raw.githubusercontent.com/Start9Labs/cln-startos/refs/heads/master/icon.svg',
+    ),
+  )
+  .addDependency(
+    node(
+      'eclair',
+      'Eclair. Required if you choose Eclair as your Target Lightning Node for inbound connections.',
+      'Eclair',
+      'https://raw.githubusercontent.com/Start9Labs/eclair-startos/refs/heads/master/icon.png',
+    ),
+  )
+  .addDependency(
+    sdk.Dependency.optional('tor', {
+      description:
+        'Tor SOCKS5 Proxy. Required when routing NWC wallet connections through Tor or connecting to a .onion NWC relay.',
+      metadata: {
+        title: 'Tor',
+        icon: 'https://raw.githubusercontent.com/Start9Labs/tor-startos/refs/heads/master/icon.svg',
+      },
+      versionRange: TOR_VERSION_RANGE,
+      kind: 'running',
+      healthChecks: ['tor'],
+      enabled: async ({ effects }) =>
+        (await declaredDependencies(effects)).tor !== undefined,
+    }),
+  )

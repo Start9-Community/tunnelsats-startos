@@ -65,7 +65,7 @@ export const MAX_PREVIOUS_PENDING_ORDERS = 5
 export const PAID_ERROR_RE =
   /payment was received|already been paid|renewal is paid|bandwidth reset was applied|bandwidth reset failed|claim|provisioning failed|stored private key/i
 
-export interface PendingOrderRecord {
+export type PendingOrderRecord = {
   paymentHash: string
   orderId: string
   privateKey: string

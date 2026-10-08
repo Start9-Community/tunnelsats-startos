@@ -50,6 +50,13 @@ export interface PendingRenewalRecord {
   paidViaNwc?: boolean
   nwcAttempted?: boolean
   nwcPayInFlightUntil?: string
+  /**
+   * Set by bridge.py's NWC auto-renewal. false: NWC pays this renewal, so no
+   * Pay Invoice task exists (payTaskNodes does not declare its node). true:
+   * NWC fell back, and setDependencies raises the task and then clears the
+   * flag. Absent: a task may exist (a manual renewal, or one whose task was
+   * raised after all).
+   */
   raisePayTask?: boolean
 }
 
@@ -92,6 +99,11 @@ export interface RenewalOps {
     entry: PendingRenewalRecord,
     patch: { payTasksToClear?: string[] },
   ): Promise<unknown>
+  /**
+   * Clears `raisePayTask: false` on the pending renewal, if it still has
+   * this payment hash and that flag. Called under lockMeta.
+   */
+  markPayTaskRaised(paymentHash: string): Promise<unknown>
   raiseTask(task: {
     invoice: string
     paymentHash: string
@@ -208,6 +220,14 @@ export async function runRenewal(
     )
     if (reusable) {
       const node = reusable.targetNode ?? targetNode
+      // An NWC renewal that NWC never paid (bridge.py stopped before its
+      // pay_invoice attempt) still says no task exists. Clear that first,
+      // so the node holding the task stays declared once it is no longer
+      // the running target. If the raise then fails, the node is declared
+      // without a task, which is harmless; the task is never hidden.
+      if (reusable.raisePayTask === false) {
+        await ops.lockMeta(() => ops.markPayTaskRaised(reusable.paymentHash))
+      }
       await ops.raiseTask({
         invoice: reusable.invoice,
         paymentHash: reusable.paymentHash,
@@ -346,6 +366,17 @@ export function startRenewal(
         },
         ...patch,
       }),
+    markPayTaskRaised: async (paymentHash) => {
+      const pending = (await tunnelsatsMeta.read().once())?.pendingRenewal
+      if (
+        pending?.paymentHash === paymentHash &&
+        pending.raisePayTask === false
+      ) {
+        await tunnelsatsMeta.merge(effects, {
+          pendingRenewal: { ...pending, raisePayTask: undefined },
+        })
+      }
+    },
     raiseTask: ({ invoice, paymentHash, targetNode }) => {
       const { packageId, payInvoiceAction } = resolvePayInvoice(targetNode)
       return sdk.action.createTask(

@@ -311,6 +311,7 @@ test('runRenewal creates, records, and reuses a payable renewal invoice', async 
         payTasksToClear: patch.payTasksToClear ?? state.payTasksToClear,
       }
     },
+    markPayTaskRaised: async () => undefined,
     raiseTask: async (task) => {
       raised.push(task)
     },
@@ -405,6 +406,7 @@ test('a dashboard renewal never replaces the previous key renewal while payable 
     record: async (entry) => {
       state = { pending: entry }
     },
+    markPayTaskRaised: async () => undefined,
     raiseTask: async () => undefined,
   }
 
@@ -1017,6 +1019,7 @@ test('dashboard Buy and Renew never replace a legacy pending record without a st
         throw new Error('must not request')
       },
       record: async () => undefined,
+      markPayTaskRaised: async () => undefined,
       raiseTask: async () => undefined,
     }
     await assert.rejects(
@@ -1098,6 +1101,7 @@ test('reuseOnly Buy and Renew return the recorded invoice but never create a new
       throw new Error('must not request')
     },
     record: async () => undefined,
+    markPayTaskRaised: async () => undefined,
     raiseTask: async () => undefined,
   }
   const renew = { duration: 1, keepPayable: true, reuseOnly: true }
@@ -1143,6 +1147,7 @@ test('a paid, settling renewal answers only a dashboard request for the same pla
       throw new Error('must not request')
     },
     record: async () => undefined,
+    markPayTaskRaised: async () => undefined,
     raiseTask: async () => undefined,
   }
   assert.deepEqual(await runRenewal({ duration: 3, keepPayable: true }, ops), {

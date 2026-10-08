@@ -1,62 +1,40 @@
-# Agent & Developer Guidelines for TunnelSats StartOS
+# AGENTS.md
 
-This document defines architecture, conventions, testing, and contribution standards for developers and AI agents working on the TunnelSats StartOS package.
+This is a StartOS service-package repository — it builds a `.s9pk` for StartOS.
 
-## Architecture Overview
+Develop it inside a StartOS packaging workspace created by `start-cli s9pk init-workspace`,
+which provides the packaging guide and agent context one level up. If you're reading this in a
+bare clone with no workspace, the full guide is at <https://docs.start9.com/packaging>.
 
-- **Node-Owned Clearnet VPN Model**: The WireGuard tunnel runs inside the target Lightning node's own container (LND, Core Lightning or Eclair), brought up by the node's `clearnet-vpn` action as `wg0` with policy routing table 51820 (clearnet peer traffic stops if the tunnel drops because table 51820 keeps a blackhole fallback; Tor keeps working. This holds only for the node versions pinned in `NODE_VERSION_RANGES` (LND 0.21.3-beta:10, Core Lightning 26.6.8:3, Eclair 0.14.3:3 or later; verified on a StartOS box in #116). Keep user-facing claims scoped to those versions and never write "can never leak" or "100% private"). Nothing is configured box-wide in StartOS; the retired host gateway model (config markers, system gateways, routing node egress through a host gateway) must not be reintroduced.
-- **Companion Package**: The `tunnelsats` container never carries tunnel traffic. It provides:
-  - Storefront actions (Buy, Renew, Import, Reset Bandwidth, Export, Configure) with on-device keygen; invoices are paid through Pay Invoice tasks on the node.
-  - The clearnet-vpn handoff (`startos/dependencies.ts`, `startos/vpnHandoff.ts`): an on-task (`accept: [{ config, announce }]`, matched exactly against the stored config) for the target node, an off-task for any node that used the tunnel before.
-  - Web UI Dashboard on port 80 (monitoring subscription status and connection properties).
-  - Background daemon (`subscription_sync_loop`) synchronizing metadata from `https://tunnelsats.com/api/public/v1/subscription/status`, and the settlement watcher for Buy/Renew/Reset payments.
-  - StartOS 0.4.0 Actions & Tasks (`sdk.action.createTask`, `sdk.action.createOwnTask`, `sdk.action.clearTask`) for the node handoff and renewal reminders.
-  - Fail-closed health checks monitoring subscription validity, the VPN handoff and payment settlement.
-- **Stored config is passed through verbatim**: never rewrite a stored WireGuard config (e.g. to strip markers written by earlier versions). The node task accepts the exact string, so any rewrite re-raises it on every upgraded box.
-- **One lock for shared files**: `tunnelsats-meta.json`, `config.json` and the conf file are rewritten by both runtimes. Every read-modify-write holds bridge.py's `meta_lock` (TypeScript: `metaLockFor(effects)` in `startos/metaLock.ts`, which holds it through `bridge.py meta-lock`). Hold it for the file read and write only: never await an exec of bridge.py, an API request or a task call under it.
+**Start every task at the recipe index** — `../start-technologies/projects/start-sdk/docs/src/recipes.md`
+(or <https://docs.start9.com/packaging/recipes.html>). It maps an intent ("prompt the user to create
+admin credentials", "expose a web UI") to the constructs, the reference pages, and a named production
+package to copy. Find the recipe before you read this package's neighbours: a package you reach by
+grepping may be non-conformant, and the recipe outranks it.
 
-## Project Structure
+Freshly scaffolded? Work the
+[New Package Checklist](../start-technologies/projects/start-sdk/docs/src/new-package-checklist.md)
+(or <https://docs.start9.com/packaging/new-package-checklist.html>) from top to bottom. It is a
+guide page, not a file in this repo — read it, don't copy it in.
 
-```
-├── startos/                # StartOS TypeScript SDK package definition
-│   ├── actions/            # User-facing StartOS actions (buy, renew, import, reset, export, configure)
-│   ├── fileModels/         # Typed filesystem bindings (config.json, tunnelsatsConf, tunnelsatsMeta)
-│   ├── i18n/               # Multi-language dictionaries (en_US, es_ES, de_DE, pl_PL, fr_FR)
-│   ├── manifest/           # Package metadata, icons, and descriptions
-│   ├── versions/           # Version graph and migration history
-│   ├── dependencies.ts     # Dynamic dependencies, renewal reminder and clearnet-vpn handoff tasks
-│   ├── vpnHandoff.ts       # Handoff planning between target nodes
-│   ├── interfaces.ts       # Service interface bindings
-│   ├── main.ts             # Service process and health check definitions
-│   └── utils.ts            # WireGuard parsing and validation utilities
-├── web/                    # Dashboard UI (HTML, CSS, Vanilla JS)
-├── tests/                  # Unit and integration test suites
-├── bridge.py               # Python service bridge, telemetry sync daemon, settlement and HTTP server
-├── verify.sh               # In-container diagnostics; node-side tunnel checks are printed as manual steps
-└── docker_entrypoint.sh    # Container entrypoint
-```
+Keep `README.md` (technical reference for an AI support or administering agent) and
+`instructions.md` (end-user docs) in sync with your changes. This file restates neither:
+whoever changes the package has both, so it carries only what they don't — repo mechanics,
+a change that looks right and is not, where the next thing gets added, a naming trap, a
+build or test invocation particular to this repo.
 
-## Development & Test Commands
+**Fix a defect you spot rather than reporting it** — you have the package open and the
+context to be sure. File **a GitHub issue on this repo** only when the call isn't yours to
+make: you can't pin the cause down, two defensible fixes exist, or it's too large to ride on
+the work in hand. An open issue is a report, not a queue — implement one when you're asked
+to or when it's labelled `Approved`, then close it with `Closes #<n>`.
 
-```bash
-# Run complete test suite (TypeScript, Python, BATS)
-npm run test:all
+Don't record work in the repo instead: no `TODO.md`, no `NOTES.md`, no `PLAN.md`. What you
+verified, tried, and decided belongs in the commit message and the PR body.
 
-# TypeScript typecheck
-npm run check
+## This repo
 
-# Bundle JavaScript package
-npm run build
-
-# Python unit tests
-python3 -m unittest discover -s tests -p 'test_*.py'
-
-# BATS integration tests
-npm run test:bats
-```
-
-## Coding & Security Standards
-
-- **Zero Mocked Dataplanes**: Never mock or stub network dataplanes. Health checks and telemetry must be honest and fail-closed.
-- **Outbound Disclosure**: Explicitly document outbound network calls to `https://tunnelsats.com/api/public/v1/subscription/status` for subscription telemetry.
-- **Commit Conventions**: Use Conventional Commits (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`).
+- **Never rewrite a stored WireGuard config**, not even to strip markers an earlier version wrote. The node's clearnet-vpn task accepts the exact string, so any rewrite re-raises it on every upgraded box.
+- **Hold bridge.py's `meta_lock` (`metaLockFor(effects)` in `startos/metaLock.ts`) for every read-modify-write of `tunnelsats-meta.json`, `config.json` or the conf file**, because both runtimes rewrite them. Hold it around the file read and write only; never await a bridge.py exec, an API request or a task call under it.
+- **Don't reintroduce the retired host-gateway model** (config markers, system gateways, routing node egress through a host gateway), and keep kill-switch claims scoped to the node versions in `NODE_VERSION_RANGES` — never "can never leak" or "100% private".
+- **The package build runs none of the tests.** `npm run test:all` (TypeScript, Python, BATS) needs `python3` and wireguard-tools' `wg`; CI's test job in `build.yml` is what gates them.

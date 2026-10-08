@@ -13,7 +13,7 @@ export function intentDurationMonths(duration: IntentDuration): number {
   return Number.parseInt(duration, 10)
 }
 
-export const dashboardBuyIntentShape = z.object({
+export const dashboardBuyIntentShape = z.looseObject({
   id: z.string(),
   kind: z.literal('buy'),
   createdAt: z.string(),
@@ -23,7 +23,7 @@ export const dashboardBuyIntentShape = z.object({
   duration: durationShape,
 })
 
-export const dashboardRenewIntentShape = z.object({
+export const dashboardRenewIntentShape = z.looseObject({
   id: z.string(),
   kind: z.literal('renew'),
   createdAt: z.string(),
@@ -31,7 +31,7 @@ export const dashboardRenewIntentShape = z.object({
   duration: durationShape,
 })
 
-export const dashboardResetIntentShape = z.object({
+export const dashboardResetIntentShape = z.looseObject({
   id: z.string(),
   kind: z.literal('reset'),
   createdAt: z.string(),
@@ -42,14 +42,14 @@ export const dashboardResetIntentShape = z.object({
  * Single-slot per intent kind. Written only by bridge.py (POST /api/intents);
  * read and watched only by the TypeScript intent runner.
  */
-export const dashboardIntentsShape = z.object({
+export const dashboardIntentsShape = z.looseObject({
   buy: dashboardBuyIntentShape.optional().nullable().catch(null),
   renew: dashboardRenewIntentShape.optional().nullable().catch(null),
   reset: dashboardResetIntentShape.optional().nullable().catch(null),
   /** Recent submissions maintained by bridge.py for its rate limits. */
   history: z
     .array(
-      z.object({
+      z.looseObject({
         id: z.string(),
         kind: z.enum(['buy', 'renew', 'reset']),
         createdAt: z.string(),
@@ -59,7 +59,7 @@ export const dashboardIntentsShape = z.object({
     .catch(undefined),
 })
 
-export const dashboardIntentResultShape = z.object({
+export const dashboardIntentResultShape = z.looseObject({
   id: z.string(),
   kind: z.enum(['buy', 'renew', 'reset']),
   status: z.enum(['processing', 'succeeded', 'failed']),
@@ -75,7 +75,7 @@ export const dashboardIntentResultShape = z.object({
  * Written only by the TypeScript intent runner (startos/intentRunner.ts);
  * read only by bridge.py (get_dashboard and POST /api/intents).
  */
-export const dashboardIntentResultsShape = z.object({
+export const dashboardIntentResultsShape = z.looseObject({
   buy: dashboardIntentResultShape.optional().nullable().catch(null),
   renew: dashboardIntentResultShape.optional().nullable().catch(null),
   reset: dashboardIntentResultShape.optional().nullable().catch(null),

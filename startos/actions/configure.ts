@@ -19,7 +19,7 @@ export const inputSpec = InputSpec.of({
   'target-node': Value.select({
     name: i18n('Target Lightning Node'),
     description: i18n(
-      'Select which Lightning service on your StartOS server will receive inbound connections.',
+      'The Lightning node on this server that runs the tunnel and announces its address to the network. When you save, that node asks you to activate the tunnel.\n- LND: Lightning Network Daemon from Lightning Labs\n- Core Lightning: Core Lightning from Blockstream\n- Eclair: Eclair from ACINQ',
     ),
     default: 'lnd',
     values: {
@@ -117,7 +117,7 @@ export const configure = sdk.Action.withInput(
       return {
         version: '1' as const,
         title: i18n('Configuration Saved'),
-        // The clearnet-vpn on/off tasks are raised by setDependencies,
+        // The clearnet-vpn on/off tasks are raised by handoffInit,
         // which reacts to this config write.
         message: input.enabled
           ? i18n(
@@ -127,11 +127,11 @@ export const configure = sdk.Action.withInput(
               'TunnelSats is switched off and your WireGuard configuration is kept. If a Lightning node used the tunnel, it will ask you to turn it off.',
             ),
         result: {
-          type: 'single' as const,
+          type: 'multiline' as const,
           value: processedConf,
           copyable: true,
           masked: true,
-          qr: false,
+          filename: 'tunnelsatsv3.conf',
         },
       }
     }

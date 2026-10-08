@@ -208,7 +208,9 @@ export const resetBandwidth = sdk.Action.withoutInput(
       description: i18n(
         "Reset this month's bandwidth usage once it reaches 70% of the monthly limit. Resets per month are limited; the invoice is paid from your Lightning node.",
       ),
-      warning: null,
+      warning: i18n(
+        "Requests a paid bandwidth reset from TunnelSats and raises a payment task on your Lightning node. A new request reserves one of this month's resets until its invoice expires, even if you never pay it.",
+      ),
       allowedStatuses: 'only-running' as const,
       group: i18n('Subscription'),
       visibility: availability.available

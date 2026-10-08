@@ -42,7 +42,8 @@ export function reusablePendingReset(
 }
 
 export type ResetAvailability =
-  { available: true } | { available: false; reason: 'no-config' }
+  | { available: true }
+  | { available: false; reason: 'no-config' }
 
 /**
  * Whether to offer the action. It is only withheld when no subscription key

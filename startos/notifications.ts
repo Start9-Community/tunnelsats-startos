@@ -27,7 +27,7 @@
  *
  * Limitation: the notices are driven by the Subscription health check, so
  * nothing is sent while TunnelSats is stopped or switched off (main.ts runs
- * them only while it is enabled); a due notice goes out once it runs again. The Renew task raised by setDependencies stays the persistent
+ * them only while it is enabled); a due notice goes out once it runs again. The Renew task raised by handoffInit stays the persistent
  * reminder.
  *
  * SDK-free on purpose (the caller passes the effects-bound operations), so

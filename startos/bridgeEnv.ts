@@ -91,9 +91,11 @@ export const HEALTH_SUBSCRIPTION_TIMEOUT_MS = 300_000
 /** SubContainer.exec, as far as bridgeCommands uses it. */
 type Exec<R> = (
   command: string[],
-  options: { env: Record<string, string> },
-  timeoutMs?: number,
-  abort?: AbortController,
+  options: {
+    env: Record<string, string>
+    timeout?: number
+    abort?: AbortController
+  },
 ) => Promise<R>
 
 /**
@@ -118,8 +120,8 @@ export function bridgeCommands<R>(
 ) {
   const running = new Set<AbortController>()
   effects.onLeaveContext(() => running.forEach((kill) => kill.abort()))
-  const run = (args: string[], timeoutMs?: number, abort?: AbortController) =>
-    exec(['python3', '/app/bridge.py', ...args], { env }, timeoutMs, abort)
+  const run = (args: string[], timeout?: number, abort?: AbortController) =>
+    exec(['python3', '/app/bridge.py', ...args], { env, timeout, abort })
   return {
     healthSubscription: async () => {
       const kill = new AbortController()

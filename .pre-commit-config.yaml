@@ -8,7 +8,7 @@ repos:
         pass_filenames: false
       - id: tsc-check
         name: TypeScript Check
-        entry: npm run check
+        entry: npx tsc --noEmit
         language: system
         pass_filenames: false
       - id: python-tests

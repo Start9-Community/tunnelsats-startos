@@ -16,7 +16,7 @@ const inputSpec = InputSpec.of({
   'target-node': Value.select({
     name: i18n('Target Lightning Node'),
     description: i18n(
-      'Select which Lightning node will receive inbound connections through the VPN tunnel.',
+      'The Lightning node on this server that runs the imported tunnel and announces its address to the network. That node asks you to activate the tunnel.\n- LND: Lightning Network Daemon from Lightning Labs\n- Core Lightning: Core Lightning from Blockstream\n- Eclair: Eclair from ACINQ',
     ),
     default: 'lnd',
     values: {
@@ -110,7 +110,7 @@ export const importSubscription = sdk.Action.withInput(
     })
 
     // The clearnet-vpn task (and the off-task for a previously targeted
-    // node) is raised by setDependencies, which reacts to this config write.
+    // node) is raised by handoffInit, which reacts to this config write.
 
     return {
       version: '1' as const,

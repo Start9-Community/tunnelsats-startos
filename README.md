@@ -89,7 +89,7 @@ tasks:
 
 | Subcontainer | Base Image             | Entrypoint             | Purpose                                                                    |
 | ------------ | ---------------------- | ---------------------- | -------------------------------------------------------------------------- |
-| `main`       | Debian Slim (Python 3) | `docker_entrypoint.sh` | Serves web UI on port 80 and runs the subscription synchronization daemon. |
+| `main`       | Alpine 3.19 (Python 3) | `docker_entrypoint.sh` | Serves web UI on port 80 and runs the subscription synchronization daemon. |
 
 ## File Models
 
@@ -99,11 +99,11 @@ tasks:
 
 ## Actions & Tasks
 
-- **Import / Buy / Renew Subscription**, **Reset Bandwidth**: Storefront actions. Keys are generated on the device; invoices are paid through Pay Invoice tasks on the node.
+- **Import / Buy / Renew Subscription**, **Reset Bandwidth**: Storefront actions. Keys are generated on the device; invoices are paid through Pay Invoice tasks on the node. Reset Bandwidth asks for confirmation first, because each new request reserves one of the month's resets until its invoice expires.
 - **Configure (`configure`)**: Enable/disable TunnelSats, pick the target Lightning node (`lnd`, `cln` or `eclair`), replace the WireGuard configuration, and allow an IPv6 server endpoint to be announced.
-- **Export Configuration (`export-config`)**: Displays the stored WireGuard configuration and configurations recovered from paid replaced orders in a masked, copyable modal. Recovered configurations are retained in `tunnelsats-meta.json` under `recoveredOrderConfigs`, keyed by payment hash, and included in backups. They never reach the dashboard. A recovered order becomes the active tunnel only on a box with no tunnel to replace (none provisioned before and none stored, including imported ones and one switched off in Configure); otherwise the active tunnel stays, a one-time StartOS notification announces the recovery (if TunnelSats is switched off, once it is switched on again), and Import Subscription activates a recovered configuration.
+- **Export Configuration (`export-config`)**: Displays the stored WireGuard configuration and configurations recovered from paid replaced orders in a masked, copyable modal, each one also downloadable as a `.conf` file. Configure shows a saved configuration the same way. Recovered configurations are retained in `tunnelsats-meta.json` under `recoveredOrderConfigs`, keyed by payment hash, and included in backups. They never reach the dashboard. A recovered order becomes the active tunnel only on a box with no tunnel to replace (none provisioned before and none stored, including imported ones and one switched off in Configure); otherwise the active tunnel stays, a one-time StartOS notification announces the recovery (if TunnelSats is switched off, once it is switched on again), and Import Subscription activates a recovered configuration.
 - **Invoice Replacement**: Up to five unresolved replaced orders retain their private keys in `previousPendingOrders`. Buy refuses another replacement when this queue is full. Only the settlement watcher retires entries after querying payment status; invoice expiry alone does not discard a key.
-- **Connect Wallet (`connect-wallet`)**: Optional, off by default. Connects or disconnects a Nostr Wallet Connect (NIP-47) wallet for automatic renewal before expiry, with an auto-renew duration and an optional setting to route wallet traffic through Tor. If a payment can't be made, renewal falls back to a Pay Invoice task on the node. Match Last Purchase and its price history change only after payment is received, not when an unpaid invoice is created. The NWC secret is excluded from backups.
+- **Connect Wallet (`connect-wallet`)**: Optional, off by default. Connects or disconnects a Nostr Wallet Connect (NIP-47) wallet for automatic renewal before expiry, with an auto-renew duration and an optional setting to route wallet traffic through Tor (which then makes Tor 0.4.9.11:2 or later a running dependency). If a payment can't be made, renewal falls back to a Pay Invoice task on the node. Match Last Purchase and its price history change only after payment is received, not when an unpaid invoice is created. The NWC secret is excluded from backups.
 - **Automated Tasks**:
   - `tunnelsats:renew-subscription`: Raised (Important) when the confirmed expiry is `<= 7 days` away, updated at `<= 3 days` and on expiry. Cleared once a renewal is confirmed.
   - `<node>:clearnet-vpn` (on `lnd`, `c-lightning` or `eclair`): the on-task asks the target node, with 1 click, to run the tunnel and announce its public endpoint (`<VPN_IP>:<VPN_PORT>`); the off-task asks a node that used the tunnel before to turn it off.
@@ -124,11 +124,11 @@ tasks:
 ## Development & Testing
 
 ```bash
-# Run all tests (TypeScript, Python, BATS)
+# Run all tests (TypeScript, Python, BATS); needs python3 and wireguard-tools' `wg`
 npm run test:all
 
-# Typecheck and build bundle
-npm run check && npm run build
+# Typecheck, SDK lint, format check and bundle
+rm -rf javascript && make javascript/index.js
 ```
 
 ## License

@@ -1,7 +1,7 @@
 import { FileHelper, z } from '@start9labs/start-sdk'
 import { sdk } from '../sdk'
 
-export const pendingOrderShape = z.object({
+export const pendingOrderShape = z.looseObject({
   paymentHash: z.string(),
   orderId: z.string(),
   privateKey: z.string(),
@@ -19,7 +19,7 @@ export const pendingOrderShape = z.object({
   nextAttemptAt: z.string().optional().catch(undefined),
 })
 
-export const metaShape = z.object({
+export const metaShape = z.looseObject({
   expiresAt: z.string().optional(),
   /**
    * 'api' only when `expiresAt` came from `subscription/status` for
@@ -72,14 +72,14 @@ export const metaShape = z.object({
    * the active tunnel; drives the one-time recovered-order notice.
    */
   lastRecoveredOrder: z
-    .object({
+    .looseObject({
       paymentHash: z.string(),
       recoveredAt: z.string().optional().catch(undefined),
     })
     .optional()
     .catch(undefined),
   pendingRenewal: z
-    .object({
+    .looseObject({
       paymentHash: z.string(),
       renewalId: z.string(),
       oldExpiry: z.string(),
@@ -114,7 +114,7 @@ export const metaShape = z.object({
    * monthly resets until its invoice expires.
    */
   pendingReset: z
-    .object({
+    .looseObject({
       paymentHash: z.string(),
       resetId: z.string(),
       invoice: z.string(),
@@ -159,7 +159,7 @@ export const metaShape = z.object({
     .catch(undefined),
   /** NWC auto-renewal state machine persisted by bridge.py under meta_lock. */
   nwcAutoRenewState: z
-    .object({
+    .looseObject({
       periodExpiry: z.string().optional().catch(undefined),
       attempts: z.number().optional().catch(undefined),
       lastAttemptAt: z.string().optional().catch(undefined),

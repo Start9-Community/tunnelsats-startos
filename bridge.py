@@ -2531,7 +2531,7 @@ def _package_ids(value):
 
 def _handoff_summary():
     """Which node holds the tunnel and which still owe an off, from
-    vpn-handoff.json (written by setDependencies); None without a record."""
+    vpn-handoff.json (written by handoffInit); None without a record."""
     data = _read_json_object(HANDOFF_FILE_PATH)
     if data is None:
         return None

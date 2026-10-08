@@ -24,5 +24,5 @@ This document provides instructions for updating the TunnelSats package for Star
      ```
    - Build package:
      ```bash
-     npm run check && npm run build
+     rm -rf javascript && make javascript/index.js
      ```

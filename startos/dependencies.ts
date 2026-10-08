@@ -571,7 +571,7 @@ function payTaskNodes(
  * confirmed "off" stay declared (as `exists`), because StartOS hides tasks on
  * packages that are not current dependencies. For the same reason a node
  * that holds a TunnelSats Pay Invoice task is declared (as `exists`) while
- * the payment is pending, if it is installed. When NWC is connected with Tor
+ * the payment is pending. When NWC is connected with Tor
  * routing enabled, `tor` is also declared as a running dependency.
  */
 export function getDependenciesForConfig(
@@ -580,7 +580,6 @@ export function getDependenciesForConfig(
   meta?:
     | (PayTaskMeta & { nwcConnected?: boolean; nwcRouteViaTor?: boolean })
     | null,
-  installed: readonly string[] = [],
 ) {
   const deps: Partial<
     Record<
@@ -618,10 +617,8 @@ export function getDependenciesForConfig(
     }
   }
 
-  // Only installed nodes can be declared: a task raised on a node that is
-  // not installed must not surface as a missing dependency.
   for (const p of payTaskNodes(config, meta)) {
-    if (!deps[p] && installed.includes(p)) {
+    if (!deps[p]) {
       deps[p] = { kind: 'exists', versionRange: NODE_VERSION_RANGES[p] }
     }
   }
@@ -637,78 +634,29 @@ export function getDependenciesForConfig(
   return deps
 }
 
-/**
- * What declaredDependencies returns, and the paying nodes it watches. The
- * handoff watches only nodes that may still run the tunnel, so a node
- * declared only for a Pay Invoice task would keep its `exists` entry after it
- * is uninstalled (and a paying node installed later would not be declared)
- * until something else re-runs the dependency check. Its status watch re-runs
- * it on an install or uninstall. Watching a package that is not installed is
- * harmless. Not watched here: the running target (declared from the
- * configuration) and the nodes still owed an off (watched by the handoff).
- */
-export function planDependencies(
-  read: {
-    config: Parameters<typeof getDependenciesForConfig>[0]
-    meta: Parameters<typeof getDependenciesForConfig>[2]
-  },
-  handoff: { pendingOff: readonly PackageId[]; installed: readonly string[] },
-) {
-  const deps = getDependenciesForConfig(
-    read.config,
-    handoff.pendingOff,
-    read.meta,
-    handoff.installed,
-  )
-  const watch = [...new Set(payTaskNodes(read.config, read.meta))].filter(
-    (p) => deps[p]?.kind !== 'running' && !handoff.pendingOff.includes(p),
-  )
-  return { deps, watch }
-}
-
 /** Serializes handoff runs; see createHandoffQueue. */
 const enqueueHandoff = createHandoffQueue()
 
 /**
- * Registers a status watch on each node, so a change of its status re-runs
- * the caller's reactive hook. That includes an install or uninstall: StartOS
- * watches `/public/packageData/<id>/statusInfo`, which appears and disappears
- * with the package. Never throws; `onFailure` says what the next re-run
- * catches up on.
+ * Registers a status watch on nodes that may still run the tunnel, so a
+ * status change re-runs the handoff: accepting the off-task on a running
+ * node rewrites its store.json, which restarts its main. Starting a stopped
+ * node re-runs it as well.
  */
-async function watchNodeStatus(
+async function watchPreviousNodes(
   effects: T.Effects,
   nodes: readonly PackageId[],
-  onFailure: string,
 ): Promise<void> {
   for (const p of nodes) {
     try {
       await sdk.getStatus(effects, { packageId: p }).const()
     } catch (e) {
-      console.warn(`TunnelSats: could not watch ${p} status; ${onFailure}:`, e)
+      console.warn(
+        `TunnelSats: could not watch ${p} status; the held on-task is released on the next re-run:`,
+        e,
+      )
     }
   }
-}
-
-/**
- * What declaredDependencies returns, once the status watch on each paying node
- * of the plan is registered. The hook passes watchNodeStatus bound to its
- * effects; tests pass a recording stub.
- */
-export async function declareDependencies(
-  read: Parameters<typeof planDependencies>[0],
-  handoff: Parameters<typeof planDependencies>[1],
-  watchStatus: (
-    nodes: readonly PackageId[],
-    onFailure: string,
-  ) => Promise<void>,
-) {
-  const plan = planDependencies(read, handoff)
-  await watchStatus(
-    plan.watch,
-    'its dependency entry is updated on the next re-run',
-  )
-  return plan.deps
 }
 
 export interface OwnTaskOps {
@@ -832,13 +780,7 @@ async function handOffClearnetVpn(
   const installed = await effects.getInstalledPackages()
   const desired = getTargetVpnConfig(config)
   const nodes = previousNodes(state, installed, handedOverTarget(desired))
-  // Accepting the off-task on a running node rewrites its store.json, which
-  // restarts its main; starting a stopped node changes its status as well.
-  await watchNodeStatus(
-    effects,
-    nodes,
-    'the held on-task is released on the next re-run',
-  )
+  await watchPreviousNodes(effects, nodes)
   const nodeVpn = await readNodeVpnStates(effects, nodes, {
     ownConf: config?.['tunnelsats-conf'],
     handedOutKeys: state?.handedOutKeys ?? [],
@@ -1033,11 +975,6 @@ export const handoffInit = sdk.setupOnInit(async (effects) => {
   )
 })
 
-/**
- * declareDependencies for the stored config, NWC routing and pending
- * nodes. Only installed nodes can be declared: a queued clear or Pay Invoice
- * task for an uninstalled node must not surface as a missing dependency.
- */
 async function declaredDependencies(effects: T.Effects) {
   const config = await configJson
     .read((c) => ({ enabled: c.enabled, 'target-node': c['target-node'] }))
@@ -1057,18 +994,7 @@ async function declaredDependencies(effects: T.Effects) {
       .read((h) => h.pendingOff)
       .const(effects)
       .catch(() => null)) ?? []
-  const installed =
-    pendingOff.length > 0 || payTaskNodes(config, meta).length > 0
-      ? await effects.getInstalledPackages()
-      : []
-  return declareDependencies(
-    { config, meta },
-    {
-      pendingOff: pendingOff.filter((p) => installed.includes(p)),
-      installed,
-    },
-    (nodes, onFailure) => watchNodeStatus(effects, nodes, onFailure),
-  )
+  return getDependenciesForConfig(config, pendingOff, meta)
 }
 
 const node = (

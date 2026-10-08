@@ -11,8 +11,6 @@ import {
   UNKNOWN_KEY_TASK_KEY,
   isKeyUnknown,
   getUnknownKeyTask,
-  planDependencies,
-  declareDependencies,
 } from '../startos/dependencies'
 import { clearnetVpnReplayId } from '../startos/vpnHandoff'
 import { generateWireguardKeypair } from '../startos/keygen'
@@ -503,7 +501,6 @@ const TOR_RUNNING = {
   versionRange: '>=0.4.9.11:2',
   healthChecks: ['tor'],
 }
-const ALL_NODES = ['lnd', 'c-lightning', 'eclair']
 
 function pendingOrderFor(targetNode: 'lnd' | 'cln' | 'eclair') {
   return {
@@ -555,7 +552,7 @@ test('a first purchase on a fresh install declares the paying node, so its Pay I
   // No config.json yet and no node owes an off-task: without payTaskNodes
   // nothing would be declared, and StartOS would hide the task Buy raised.
   const meta = metaShape.parse({ pendingOrder: pendingOrderFor('lnd') })
-  assert.deepEqual(getDependenciesForConfig(null, [], meta, ['lnd']), {
+  assert.deepEqual(getDependenciesForConfig(null, [], meta), {
     lnd: LND_EXISTS,
   })
 })
@@ -565,12 +562,7 @@ test('a renewal raised on the previous node keeps that node declared after a tar
   // LND confirmed its off-task: the renewal's Pay Invoice task stays on LND.
   const meta = metaShape.parse({ pendingRenewal: pendingRenewalFor('lnd') })
   assert.deepEqual(
-    getDependenciesForConfig(
-      { enabled: true, 'target-node': 'cln' },
-      [],
-      meta,
-      ALL_NODES,
-    ),
+    getDependenciesForConfig({ enabled: true, 'target-node': 'cln' }, [], meta),
     { 'c-lightning': CLN_RUNNING, lnd: LND_EXISTS },
   )
 })
@@ -584,11 +576,10 @@ test('a renewal without a recorded node is declared on the configured target, th
       { enabled: false, 'target-node': 'eclair' },
       [],
       meta,
-      ALL_NODES,
     ),
     { eclair: ECLAIR_EXISTS },
   )
-  assert.deepEqual(getDependenciesForConfig(null, [], meta, ALL_NODES), {
+  assert.deepEqual(getDependenciesForConfig(null, [], meta), {
     lnd: LND_EXISTS,
   })
 })
@@ -608,18 +599,17 @@ test('an NWC renewal declares its node only once NWC falls back to the Pay Invoi
         ...(raisePayTask === undefined ? {} : { raisePayTask }),
       },
     })
-  assert.deepEqual(
-    getDependenciesForConfig(config, [], nwcRenewal(false), ALL_NODES),
-    { 'c-lightning': CLN_RUNNING },
-  )
-  assert.deepEqual(
-    getDependenciesForConfig(config, [], nwcRenewal(true), ALL_NODES),
-    { 'c-lightning': CLN_RUNNING, lnd: LND_EXISTS },
-  )
-  assert.deepEqual(
-    getDependenciesForConfig(config, [], nwcRenewal(), ALL_NODES),
-    { 'c-lightning': CLN_RUNNING, lnd: LND_EXISTS },
-  )
+  assert.deepEqual(getDependenciesForConfig(config, [], nwcRenewal(false)), {
+    'c-lightning': CLN_RUNNING,
+  })
+  assert.deepEqual(getDependenciesForConfig(config, [], nwcRenewal(true)), {
+    'c-lightning': CLN_RUNNING,
+    lnd: LND_EXISTS,
+  })
+  assert.deepEqual(getDependenciesForConfig(config, [], nwcRenewal()), {
+    'c-lightning': CLN_RUNNING,
+    lnd: LND_EXISTS,
+  })
 })
 
 test('a pending bandwidth reset declares the node its Pay Invoice task is on', () => {
@@ -627,12 +617,7 @@ test('a pending bandwidth reset declares the node its Pay Invoice task is on', (
   // Core Lightning.
   const meta = metaShape.parse({ pendingReset: pendingResetFor('eclair') })
   assert.deepEqual(
-    getDependenciesForConfig(
-      { enabled: true, 'target-node': 'cln' },
-      [],
-      meta,
-      ALL_NODES,
-    ),
+    getDependenciesForConfig({ enabled: true, 'target-node': 'cln' }, [], meta),
     { 'c-lightning': CLN_RUNNING, eclair: ECLAIR_EXISTS },
   )
 })
@@ -640,12 +625,7 @@ test('a pending bandwidth reset declares the node its Pay Invoice task is on', (
 test('a pending renewal on the enabled target keeps it a running dependency, declared once', () => {
   const meta = metaShape.parse({ pendingRenewal: pendingRenewalFor('lnd') })
   assert.deepEqual(
-    getDependenciesForConfig(
-      { enabled: true, 'target-node': 'lnd' },
-      [],
-      meta,
-      ALL_NODES,
-    ),
+    getDependenciesForConfig({ enabled: true, 'target-node': 'lnd' }, [], meta),
     { lnd: LND_RUNNING },
   )
 })
@@ -654,29 +634,25 @@ test('an order paid from a node other than the target declares the paying node t
   // TunnelSats routes LND; Buy Subscription was run for Core Lightning.
   const meta = metaShape.parse({ pendingOrder: pendingOrderFor('cln') })
   assert.deepEqual(
-    getDependenciesForConfig(
-      { enabled: true, 'target-node': 'lnd' },
-      [],
-      meta,
-      ALL_NODES,
-    ),
+    getDependenciesForConfig({ enabled: true, 'target-node': 'lnd' }, [], meta),
     { lnd: LND_RUNNING, 'c-lightning': CLN_EXISTS },
   )
 })
 
-test('a paying node that is not installed is not declared', () => {
-  // Eclair was uninstalled while its order was pending: declaring it would
-  // surface as a missing dependency, and there is no task left to show.
-  const meta = metaShape.parse({ pendingOrder: pendingOrderFor('eclair') })
-  assert.deepEqual(getDependenciesForConfig(null, [], meta, ['lnd']), {})
+test('pending payment nodes stay declared when absent or uninstalled', () => {
+  const meta = metaShape.parse({
+    pendingOrder: pendingOrderFor('eclair'),
+    pendingRenewal: pendingRenewalFor('cln'),
+    pendingReset: pendingResetFor('lnd'),
+  })
+  assert.deepEqual(getDependenciesForConfig(null, [], meta), {
+    eclair: ECLAIR_EXISTS,
+    'c-lightning': CLN_EXISTS,
+    lnd: LND_EXISTS,
+  })
   assert.deepEqual(
-    getDependenciesForConfig(
-      { enabled: true, 'target-node': 'lnd' },
-      [],
-      meta,
-      ['lnd'],
-    ),
-    { lnd: LND_RUNNING },
+    getDependenciesForConfig({ enabled: true, 'target-node': 'lnd' }, [], meta),
+    { lnd: LND_RUNNING, eclair: ECLAIR_EXISTS, 'c-lightning': CLN_EXISTS },
   )
 })
 
@@ -686,7 +662,7 @@ test('the declaration drops once the pending entry is cleared', () => {
     pendingRenewal: pendingRenewalFor('cln'),
     pendingReset: pendingResetFor('eclair'),
   })
-  assert.deepEqual(getDependenciesForConfig(null, [], pending, ALL_NODES), {
+  assert.deepEqual(getDependenciesForConfig(null, [], pending), {
     lnd: LND_EXISTS,
     'c-lightning': CLN_EXISTS,
     eclair: ECLAIR_EXISTS,
@@ -700,13 +676,13 @@ test('the declaration drops once the pending entry is cleared', () => {
       `tunnelsats-reset:eclair:${'3'.repeat(16)}`,
     ],
   })
-  assert.deepEqual(getDependenciesForConfig(null, [], cleared, ALL_NODES), {})
+  assert.deepEqual(getDependenciesForConfig(null, [], cleared), {})
   const nulled = metaShape.parse({
     pendingOrder: null,
     pendingRenewal: null,
     pendingReset: null,
   })
-  assert.deepEqual(getDependenciesForConfig(null, [], nulled, ALL_NODES), {})
+  assert.deepEqual(getDependenciesForConfig(null, [], nulled), {})
 })
 
 test('replaced orders are not declared: their tasks were queued for clearing when they were replaced', () => {
@@ -717,14 +693,14 @@ test('replaced orders are not declared: their tasks were queued for clearing whe
     previousPendingOrders: [pendingOrderFor('eclair')],
     payTasksToClear: [`tunnelsats-order:eclair:${'1'.repeat(16)}`],
   })
-  assert.deepEqual(getDependenciesForConfig(null, [], meta, ALL_NODES), {})
+  assert.deepEqual(getDependenciesForConfig(null, [], meta), {})
 })
 
 test('pay-task nodes leave the pending-off nodes and Tor as they were', () => {
   const config = { enabled: true, 'target-node': 'cln' } as const
   const tor = metaShape.parse({ nwcConnected: true, nwcRouteViaTor: true })
   // Without a pending payment the result is what 1.0.0 declared.
-  assert.deepEqual(getDependenciesForConfig(config, ['lnd'], tor, ALL_NODES), {
+  assert.deepEqual(getDependenciesForConfig(config, ['lnd'], tor), {
     'c-lightning': CLN_RUNNING,
     lnd: LND_EXISTS,
     tor: TOR_RUNNING,
@@ -735,142 +711,36 @@ test('pay-task nodes leave the pending-off nodes and Tor as they were', () => {
     nwcRouteViaTor: true,
     pendingOrder: pendingOrderFor('eclair'),
   })
-  assert.deepEqual(
-    getDependenciesForConfig(config, ['lnd'], withOrder, ALL_NODES),
-    {
-      'c-lightning': CLN_RUNNING,
-      lnd: LND_EXISTS,
-      eclair: ECLAIR_EXISTS,
-      tor: TOR_RUNNING,
-    },
-  )
+  assert.deepEqual(getDependenciesForConfig(config, ['lnd'], withOrder), {
+    'c-lightning': CLN_RUNNING,
+    lnd: LND_EXISTS,
+    eclair: ECLAIR_EXISTS,
+    tor: TOR_RUNNING,
+  })
   // A payment pending on a node that owes an off-task keeps one entry.
   const onOffNode = metaShape.parse({
     pendingRenewal: pendingRenewalFor('lnd'),
   })
-  assert.deepEqual(
-    getDependenciesForConfig(config, ['lnd'], onOffNode, ALL_NODES),
-    { 'c-lightning': CLN_RUNNING, lnd: LND_EXISTS },
-  )
+  assert.deepEqual(getDependenciesForConfig(config, ['lnd'], onOffNode), {
+    'c-lightning': CLN_RUNNING,
+    lnd: LND_EXISTS,
+  })
 })
 
 test('the declared package is the one the Pay Invoice task is raised on', () => {
   for (const node of ['lnd', 'cln', 'eclair'] as const) {
     const meta = metaShape.parse({ pendingOrder: pendingOrderFor(node) })
-    assert.deepEqual(
-      Object.keys(getDependenciesForConfig(null, [], meta, ALL_NODES)),
-      [resolvePayInvoice(node).packageId],
-    )
+    assert.deepEqual(Object.keys(getDependenciesForConfig(null, [], meta)), [
+      resolvePayInvoice(node).packageId,
+    ])
   }
 })
 
-// ---------------------------------------------------------------------------
-// planDependencies: what setDependencies declares from the configuration,
-// the metadata and the handoff result, and which paying nodes it watches.
-// ---------------------------------------------------------------------------
-
-test('planDependencies declares the paying node and watches it, installed or not', () => {
-  // The handoff watches only nodes that may still run the tunnel. A node
-  // declared only for a Pay Invoice task gets its own status watch, so
-  // installing or uninstalling it re-runs setDependencies and its entry
-  // follows.
-  const read = {
-    config: null,
-    meta: metaShape.parse({ pendingOrder: pendingOrderFor('lnd') }),
-  }
+test('pending-off nodes stay declared when absent or uninstalled until handoff clears them', () => {
+  const config = { enabled: false } as const
   assert.deepEqual(
-    planDependencies(read, { pendingOff: [], installed: ['lnd'] }),
-    { deps: { lnd: LND_EXISTS }, watch: ['lnd'] },
+    getDependenciesForConfig(config, ['lnd', 'c-lightning', 'eclair']),
+    { lnd: LND_EXISTS, 'c-lightning': CLN_EXISTS, eclair: ECLAIR_EXISTS },
   )
-  // Not installed (yet): not declared, but watched, so installing it
-  // declares it.
-  assert.deepEqual(planDependencies(read, { pendingOff: [], installed: [] }), {
-    deps: {},
-    watch: ['lnd'],
-  })
-})
-
-test('planDependencies watches neither the running target nor a node owed an off', () => {
-  // The renewal is on the running target, which is declared from the
-  // configuration, and the reset on a node that still owes an off-task,
-  // which the handoff already watches.
-  const read = {
-    config: { enabled: true, 'target-node': 'lnd' } as const,
-    meta: metaShape.parse({
-      pendingRenewal: pendingRenewalFor('lnd'),
-      pendingReset: pendingResetFor('cln'),
-    }),
-  }
-  assert.deepEqual(
-    planDependencies(read, {
-      pendingOff: ['c-lightning'],
-      installed: ALL_NODES,
-    }),
-    { deps: { lnd: LND_RUNNING, 'c-lightning': CLN_EXISTS }, watch: [] },
-  )
-})
-
-test('planDependencies watches each paying node once, and none without a pending payment', () => {
-  const config = { enabled: true, 'target-node': 'cln' } as const
-  const meta = metaShape.parse({
-    pendingOrder: pendingOrderFor('lnd'),
-    pendingRenewal: pendingRenewalFor('eclair'),
-    pendingReset: pendingResetFor('lnd'),
-  })
-  assert.deepEqual(
-    planDependencies(
-      { config, meta },
-      { pendingOff: [], installed: ALL_NODES },
-    ),
-    {
-      deps: {
-        'c-lightning': CLN_RUNNING,
-        lnd: LND_EXISTS,
-        eclair: ECLAIR_EXISTS,
-      },
-      watch: ['lnd', 'eclair'],
-    },
-  )
-  assert.deepEqual(
-    planDependencies(
-      { config, meta: null },
-      { pendingOff: [], installed: ALL_NODES },
-    ),
-    { deps: { 'c-lightning': CLN_RUNNING }, watch: [] },
-  )
-})
-
-test('declareDependencies watches the planned paying nodes before it returns the declaration', async () => {
-  // setDependencies passes watchNodeStatus bound to its effects; the stub
-  // records the call instead. LND is installed, so it is declared and
-  // watched (uninstalling it drops its entry). Eclair is not installed, so it
-  // is only watched (installing it declares it). Core Lightning, the running
-  // target, holds the renewal's task but is not watched: it is declared from
-  // the configuration, installed or not.
-  const calls: { nodes: readonly string[]; onFailure: string }[] = []
-  let settled = false
-  const deps = await declareDependencies(
-    {
-      config: { enabled: true, 'target-node': 'cln' },
-      meta: metaShape.parse({
-        pendingOrder: pendingOrderFor('lnd'),
-        pendingRenewal: pendingRenewalFor('cln'),
-        pendingReset: pendingResetFor('eclair'),
-      }),
-    },
-    { pendingOff: [], installed: ['c-lightning', 'lnd'] },
-    async (nodes, onFailure) => {
-      calls.push({ nodes, onFailure })
-      await new Promise((resolve) => setImmediate(resolve))
-      settled = true
-    },
-  )
-  assert.deepEqual(calls, [
-    {
-      nodes: ['lnd', 'eclair'],
-      onFailure: 'its dependency entry is updated on the next re-run',
-    },
-  ])
-  assert.ok(settled, 'the watches are registered before the hook returns')
-  assert.deepEqual(deps, { 'c-lightning': CLN_RUNNING, lnd: LND_EXISTS })
+  assert.deepEqual(getDependenciesForConfig(config, []), {})
 })

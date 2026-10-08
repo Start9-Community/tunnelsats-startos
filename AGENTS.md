@@ -34,7 +34,7 @@ verified, tried, and decided belongs in the commit message and the PR body.
 
 ## This repo
 
-- **Never rewrite a stored WireGuard config**, not even to strip markers an earlier version wrote. The node's clearnet-vpn task accepts the exact string, so any rewrite re-raises it on every upgraded box.
+- **Never rewrite a stored WireGuard config**, not even to strip markers an earlier version wrote. The node's clearnet-vpn task accepts the stored string trimmed, as the StartOS form submits it, and verbatim only as a fallback, so any change inside the config changes both entries and re-raises it on every upgraded box.
 - **Hold bridge.py's `meta_lock` (`metaLockFor(effects)` in `startos/metaLock.ts`) for every read-modify-write of `tunnelsats-meta.json`, `config.json` or the conf file**, because both runtimes rewrite them. Hold it around the file read and write only; never await a bridge.py exec, an API request or a task call under it.
 - **Don't reintroduce the retired host-gateway model** (config markers, system gateways, routing node egress through a host gateway), and keep kill-switch claims scoped to the node versions in `NODE_VERSION_RANGES` — never "can never leak" or "100% private".
 - **The package build runs none of the tests.** `npm run test:all` (TypeScript, Python, BATS) needs `python3` and wireguard-tools' `wg`; CI's test job in `build.yml` is what gates them.

@@ -230,11 +230,27 @@ function recordHandedOut(
   return out
 }
 
+/**
+ * The on-task input for the target node. The StartOS UI trims every string
+ * field before it submits an action form (FormComponent.onClick calls
+ * trim() in form.service.ts, start-os v0.4.0.2), and the node stores the
+ * submitted config verbatim. StartOS compares strings exactly, both when the
+ * task is run (submitted input against `accept`) and when it is raised again
+ * (`accept` against the node's current input). So `set` and the first
+ * `accept` entry are trimmed the same way (String.prototype.trim): a config
+ * ending in a newline, as every Buy provisions, would otherwise never match
+ * and the task would stay active after the operator accepted it. The
+ * verbatim pair, added only when it differs, matches a node set without the
+ * UI (e.g. start-cli).
+ */
 export function buildOnTaskInput(config: string, announce: string) {
+  const trimmed = { config: config.trim(), announce: announce.trim() }
+  const verbatimDiffers =
+    trimmed.config !== config || trimmed.announce !== announce
   return {
     kind: 'partial' as const,
-    accept: [{ config, announce }],
-    set: { config, announce },
+    accept: verbatimDiffers ? [trimmed, { config, announce }] : [trimmed],
+    set: { ...trimmed },
   }
 }
 

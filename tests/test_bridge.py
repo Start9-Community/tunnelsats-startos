@@ -255,7 +255,9 @@ class TestBridgeKeygenAndConfig(unittest.TestCase):
     def test_save_configuration_keeps_legacy_markers_byte_identical(self):
         # Configs written by earlier versions carry the markers of the retired
         # StartOS gateway model. The node task accepts the stored string
-        # exactly, so it must be neither stripped nor "completed".
+        # (trimmed, as the StartOS form submits it, or verbatim), so any
+        # change inside it re-raises the task: it must be neither stripped
+        # nor "completed".
         import json
         import tempfile
         body = (

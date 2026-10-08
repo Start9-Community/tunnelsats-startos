@@ -95,7 +95,7 @@ test('Configure passes an already-marked stored config through byte-identical', 
   assert.equal(written, LEGACY_MARKED_CONF)
 })
 
-test('the node task accepts an already-marked stored config byte-identical', () => {
+test('the node task accepts an already-marked stored config with its markers intact', () => {
   const vpn = getTargetVpnConfig({
     enabled: true,
     'target-node': 'lnd',
@@ -104,9 +104,16 @@ test('the node task accepts an already-marked stored config byte-identical', () 
   assert.ok(vpn)
   assert.equal(vpn.wgConf, LEGACY_MARKED_CONF)
   const input = buildOnTaskInput(vpn.wgConf, vpn.announceEndpoint!)
+  // Trimmed, as the StartOS form submits it, and byte-identical: trimming
+  // only drops the trailing newline, never a marker.
   assert.deepEqual(input.accept, [
+    {
+      config: LEGACY_MARKED_CONF.trim(),
+      announce: 'ch1.tunnelsats.com:24556',
+    },
     { config: LEGACY_MARKED_CONF, announce: 'ch1.tunnelsats.com:24556' },
   ])
+  assert.equal(`${input.accept[0].config}\n`, LEGACY_MARKED_CONF)
 })
 
 // ---------------------------------------------------------------------------

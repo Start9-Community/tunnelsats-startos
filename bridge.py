@@ -268,10 +268,11 @@ def save_configuration(conf_content, target_node="lnd", clear_pending_order=None
     (_record_paid_plan) in the same write. Returns whether it saved.
 
     The configuration is stored exactly as given: the node's clearnet-vpn
-    task accepts this string verbatim, so rewriting it (e.g. stripping the
-    markers earlier versions added) would re-raise that task. The one
-    exception is the port marker, which apply_vpn_port keeps in line with
-    the port TunnelSats reports.
+    task accepts this string trimmed, as the StartOS form submits it, and
+    verbatim only as a fallback, so rewriting anything inside it (e.g.
+    stripping the markers earlier versions added) would re-raise that task.
+    The one exception is the port marker, which apply_vpn_port keeps in
+    line with the port TunnelSats reports.
 
     Every write happens under meta_lock, so a port rewrite never interleaves
     with a save. No caller holds meta_lock (flock is not reentrant)."""

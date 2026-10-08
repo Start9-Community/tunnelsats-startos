@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { isDeepStrictEqual } from 'node:util'
 import {
   planClearnetVpnTasks,
   readNodeVpnState,
@@ -331,10 +332,14 @@ test('duplicate and malformed state entries are normalised', () => {
 // --- contract helpers
 
 test('task inputs follow the node clearnet-vpn contract', () => {
+  // CONF ends with a newline, like every configuration Buy provisions.
   assert.deepEqual(buildOnTaskInput(CONF, 'h:1'), {
     kind: 'partial',
-    accept: [{ config: CONF, announce: 'h:1' }],
-    set: { config: CONF, announce: 'h:1' },
+    accept: [
+      { config: CONF.trim(), announce: 'h:1' },
+      { config: CONF, announce: 'h:1' },
+    ],
+    set: { config: CONF.trim(), announce: 'h:1' },
   })
   // An empty config turns the node's VPN off (lnd/cln/eclair clearnet-vpn).
   assert.deepEqual(buildOffTaskInput(), {
@@ -342,6 +347,56 @@ test('task inputs follow the node clearnet-vpn contract', () => {
     accept: [{ config: null }],
     set: { config: null, announce: null },
   })
+})
+
+test('buildOnTaskInput trims set and keeps the verbatim accept entry only when it differs', () => {
+  const padded = buildOnTaskInput(`\n${CONF}\r\n`, ' h:1\n')
+  assert.deepEqual(padded.set, { config: CONF.trim(), announce: 'h:1' })
+  assert.deepEqual(padded.accept, [
+    { config: CONF.trim(), announce: 'h:1' },
+    { config: `\n${CONF}\r\n`, announce: ' h:1\n' },
+  ])
+  // A configuration stored through the StartOS form (Import, Configure) is
+  // already trimmed: one entry, no duplicate.
+  const trimmed = buildOnTaskInput(CONF.trim(), 'h:1')
+  assert.deepEqual(trimmed.set, { config: CONF.trim(), announce: 'h:1' })
+  assert.deepEqual(trimmed.accept, [{ config: CONF.trim(), announce: 'h:1' }])
+  // Trimming only touches the ends: the configuration lines stay intact.
+  assert.match(padded.set.config, /PrivateKey = x\n\[Peer\]\nEndpoint = /)
+})
+
+/**
+ * What the StartOS UI submits when the operator runs a task: the form is
+ * prefilled with the task's `set`, and FormComponent.onClick trims it first
+ * (form.service.ts trim(): every string control becomes `value.trim() ||
+ * null`; start-os v0.4.0.2). This models that external behaviour; it is not
+ * TunnelSats code.
+ */
+function startosFormSubmission(
+  set: Record<string, string | null>,
+): Record<string, string | null> {
+  return Object.fromEntries(
+    Object.entries(set).map(([k, v]) => [
+      k,
+      typeof v === 'string' ? v.trim() || null : v,
+    ]),
+  )
+}
+
+test('accepting the on-task through the StartOS form matches an accept entry', () => {
+  // StartOS deactivates the task only if the submitted input equals an
+  // accept entry (string equality). The node stores the submitted config
+  // verbatim, so the next raise of the task matches the same entry and the
+  // task stays cleared. Without trimming, a configuration with a trailing
+  // newline never matched and the activation task stayed active.
+  for (const conf of [CONF, CONF.trim(), `\n${CONF}\r\n`]) {
+    const input = buildOnTaskInput(conf, 'de2.tunnelsats.com:24556')
+    const submitted = startosFormSubmission(input.set)
+    assert.ok(
+      input.accept.some((entry) => isDeepStrictEqual(entry, submitted)),
+      `submitted ${JSON.stringify(submitted)} matches no accept entry`,
+    )
+  }
 })
 
 test('readNodeVpnState only claims TunnelSats-owned tunnels, unknown when unreadable', () => {

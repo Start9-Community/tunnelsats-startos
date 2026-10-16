@@ -194,6 +194,11 @@ export const main = sdk.setupMain(async ({ effects }) => {
     .addHealthCheck('vpn-handoff', {
       ready: {
         display: i18n('VPN Handoff'),
+        trigger: sdk.trigger.statusTrigger(30_000, {
+          starting: 1_000,
+          failure: 1_000,
+          loading: 5_000,
+        }),
         // Shows a pending node switch and, when the previous node turned its
         // tunnel off without a status change (off-task accepted while it was
         // stopped), makes handoffInit release the new node's task.
@@ -202,7 +207,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
             const progress = await checkHandoffProgress(effects)
             if (progress.waitingFor.length > 0) {
               return {
-                result: 'waiting',
+                result: 'loading',
                 message: i18n(
                   'Waiting for ${nodes} to turn off the TunnelSats tunnel. Accept the task on that node to finish the handoff.',
                   {
@@ -215,7 +220,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
             }
             if (progress.retrying.length > 0) {
               return {
-                result: 'waiting',
+                result: 'loading',
                 message: i18n(
                   'Offering the TunnelSats task to ${nodes} failed; retrying automatically.',
                   {
@@ -228,7 +233,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
             }
             if (progress.retryingOwnTasks) {
               return {
-                result: 'waiting',
+                result: 'loading',
                 message: i18n(
                   'Updating the TunnelSats reminder tasks failed; retrying automatically.',
                 ),
@@ -273,11 +278,11 @@ export const main = sdk.setupMain(async ({ effects }) => {
               }
             case 'busy':
               return {
-                result: 'waiting',
+                result: 'loading',
                 message: i18n('Checking pending payments'),
               }
             case 'waiting':
-              return { result: 'waiting', message: status.message }
+              return { result: 'loading', message: status.message }
             case 'settled':
               if (config?.enabled) {
                 await runNotices().catch((e) =>

@@ -249,6 +249,7 @@ export const resetBandwidth = sdk.Action.withoutInput(
       copyable: true,
       masked: false,
       qr,
+      launchable: false,
     })
 
     if (outcome.kind === 'already-paid') {

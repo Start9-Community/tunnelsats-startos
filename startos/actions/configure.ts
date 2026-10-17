@@ -131,6 +131,7 @@ export const configure = sdk.Action.withInput(
           value: processedConf,
           copyable: true,
           masked: true,
+          qr: false,
           filename: 'tunnelsatsv3.conf',
         },
       }

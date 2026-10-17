@@ -358,8 +358,7 @@ def get_wg_pubkey():
             config_content = f.read()
         private_key_match = re.search(r'^\s*(?!#|;)\s*PrivateKey\s*=\s*(.+)', config_content, re.IGNORECASE | re.MULTILINE)
         if private_key_match:
-            proc = subprocess.run(["wg", "pubkey"], input=private_key_match.group(1).strip().encode(), capture_output=True)
-            pubkey = proc.stdout.decode().strip() if proc.returncode == 0 else ""
+            pubkey = derive_wg_pubkey(private_key_match.group(1).strip())
             if pubkey:
                 # Read after the stat: a save in between only makes the next
                 # call re-derive, never caches an old key under a new stamp.
@@ -988,23 +987,70 @@ def _payment_state(payment_hash):
     raise SettlementError(f"TunnelSats API returned an unknown payment status: {str(state)[:40]!r}")
 
 
+def _x25519_base_point(scalar_bytes):
+    """RFC 7748 Section 5 X25519(k, 9) in pure Python (32-byte little-endian)."""
+    p = (1 << 255) - 19
+    k_list = bytearray(scalar_bytes)
+    k_list[0] &= 248
+    k_list[31] &= 127
+    k_list[31] |= 64
+    k = int.from_bytes(k_list, "little")
+    x_1 = 9
+    x_2, z_2 = 1, 0
+    x_3, z_3 = x_1, 1
+    swap = 0
+    for t in range(254, -1, -1):
+        k_t = (k >> t) & 1
+        swap ^= k_t
+        if swap:
+            x_2, x_3 = x_3, x_2
+            z_2, z_3 = z_3, z_2
+        swap = k_t
+        a = (x_2 + z_2) % p
+        aa = (a * a) % p
+        b = (x_2 - z_2) % p
+        bb = (b * b) % p
+        e = (aa - bb) % p
+        c = (x_3 + z_3) % p
+        d = (x_3 - z_3) % p
+        da = (d * a) % p
+        cb = (c * b) % p
+        x_3 = pow(da + cb, 2, p)
+        z_3 = (x_1 * pow(da - cb, 2, p)) % p
+        x_2 = (aa * bb) % p
+        z_2 = (e * (aa + 121665 * e)) % p
+    if swap:
+        x_2, x_3 = x_3, x_2
+        z_2, z_3 = z_3, z_2
+    res = (x_2 * pow(z_2, p - 2, p)) % p
+    return res.to_bytes(32, "little")
+
+
 def derive_wg_pubkey(private_key):
     """Public key for a WireGuard private key, or None."""
+    if not isinstance(private_key, str):
+        return None
     try:
         proc = subprocess.run(["wg", "pubkey"], input=private_key.encode(), capture_output=True)
         pub = proc.stdout.decode().strip() if proc.returncode == 0 else ""
-        if pub:
-            return pub
+        return pub or None
     except Exception:
         pass
     try:
         import base64
-        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-        from cryptography.hazmat.primitives import serialization
-        key = X25519PrivateKey.from_private_bytes(base64.b64decode(private_key, validate=True))
-        raw = key.public_key().public_bytes(encoding=serialization.Encoding.Raw,
-                                            format=serialization.PublicFormat.Raw)
-        return base64.b64encode(raw).decode()
+        stripped = private_key.strip()
+        raw_priv = base64.b64decode(stripped, validate=True)
+        if len(raw_priv) != 32 or base64.b64encode(raw_priv).decode() != stripped:
+            return None
+        try:
+            from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+            from cryptography.hazmat.primitives import serialization
+            key = X25519PrivateKey.from_private_bytes(raw_priv)
+            raw_pub = key.public_key().public_bytes(encoding=serialization.Encoding.Raw,
+                                                    format=serialization.PublicFormat.Raw)
+        except Exception:
+            raw_pub = _x25519_base_point(raw_priv)
+        return base64.b64encode(raw_pub).decode()
     except Exception:
         return None
 

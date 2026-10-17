@@ -121,6 +121,43 @@ class TestBridgeKeygenAndConfig(unittest.TestCase):
         self.assertTrue(pub.endswith("="))
         self.assertIsNone(bridge.derive_wg_pubkey("not-a-valid-key"))
 
+    def test_derive_and_get_wg_pubkey_without_wg_binary_or_cryptography(self):
+        import base64
+        # RFC 7748 Section 6.1 test vector
+        rfc_priv_bytes = bytes.fromhex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+        rfc_pub_bytes = bytes.fromhex("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+        self.assertEqual(bridge._x25519_base_point(rfc_priv_bytes), rfc_pub_bytes)
+
+        rfc_priv_b64 = base64.b64encode(rfc_priv_bytes).decode()
+        rfc_pub_b64 = base64.b64encode(rfc_pub_bytes).decode()
+        no_crypto = {
+            "cryptography": None,
+            "cryptography.hazmat": None,
+            "cryptography.hazmat.primitives": None,
+            "cryptography.hazmat.primitives.asymmetric": None,
+            "cryptography.hazmat.primitives.asymmetric.x25519": None,
+        }
+        with patch("bridge.subprocess.run", side_effect=FileNotFoundError("wg not found")), \
+             patch.dict(sys.modules, no_crypto):
+            self.assertEqual(bridge.derive_wg_pubkey(rfc_priv_b64), rfc_pub_b64)
+            self.assertIsNone(bridge.derive_wg_pubkey("not-a-valid-key"))
+            self.assertIsNone(bridge.derive_wg_pubkey(base64.b64encode(b"short").decode()))
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                conf_path = os.path.join(tmpdir, "tunnelsatsv3.conf")
+                with open(conf_path, "w") as f:
+                    f.write(f"[Interface]\nPrivateKey = {rfc_priv_b64}\nAddress = 10.9.0.7/32\n")
+                bridge._pubkey_cache = None
+                with patch.object(bridge, "CONFIG_PATH", conf_path), \
+                     patch.object(bridge, "INTENTS_FILE_PATH", os.path.join(tmpdir, "dashboard-intents.json")), \
+                     patch.object(bridge, "INTENT_RESULTS_FILE_PATH", os.path.join(tmpdir, "dashboard-intent-results.json")):
+                    self.assertEqual(bridge.get_wg_pubkey(), rfc_pub_b64)
+                    code_renew, _ = bridge.submit_dashboard_intent({"kind": "renew", "duration": "3m"})
+                    code_reset, _ = bridge.submit_dashboard_intent({"kind": "reset"})
+                    self.assertEqual(code_renew, 202)
+                    self.assertEqual(code_reset, 202)
+                bridge._pubkey_cache = None
+
     def test_save_configuration_valid(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:

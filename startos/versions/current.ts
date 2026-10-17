@@ -1,18 +1,18 @@
 import { IMPOSSIBLE, VersionInfo } from '@start9labs/start-sdk'
 
 export const current = VersionInfo.of({
-  version: '1.0.0:0',
+  version: '1.0.0:1',
   releaseNotes: {
     en_US:
-      'Native storefront (Buy, Renew and Reset Bandwidth actions with on-device Curve25519 key generation and Lightning node Pay Invoice settlement), in-container clearnet-vpn routing handoff for LND, Core Lightning and Eclair, optional NIP-47 NWC automatic renewal with Tor SOCKS5 support and backup secret exclusion, and a subscription and bandwidth status dashboard.',
+      'TunnelSats shows as running while a node handoff or a payment is pending. Restarting TunnelSats while it starts up leaves exactly one copy of it running.',
     es_ES:
-      'Tienda integrada (acciones Comprar, Renovar y Restablecer ancho de banda con generación local de claves Curve25519 y pago mediante la tarea Pay Invoice del nodo), traspaso de enrutamiento clearnet-vpn en contenedor para LND, Core Lightning y Eclair, renovación automática opcional NWC (NIP-47) con soporte Tor SOCKS5 y exclusión de secretos en copias de seguridad, y un panel de estado de suscripción y ancho de banda.',
+      'TunnelSats aparece en ejecución mientras hay pendiente un traspaso de nodo o un pago. Reiniciar TunnelSats mientras arranca deja exactamente una copia en ejecución.',
     de_DE:
-      'Integrierter Storefront (Aktionen für Kauf, Verlängerung und Bandbreiten-Reset mit lokaler Curve25519-Schlüsselerzeugung und Bezahlung über die Pay-Invoice-Aufgabe der Node), In-Container-clearnet-vpn-Routing-Übergabe für LND, Core Lightning und Eclair, optionale automatische NIP-47-NWC-Verlängerung mit Tor-SOCKS5-Unterstützung und Backup-Ausschluss des Geheimnisses sowie ein Dashboard für Abonnement- und Bandbreitenstatus.',
+      'TunnelSats wird als laufend angezeigt, solange eine Knotenübergabe oder eine Zahlung aussteht. Ein Neustart von TunnelSats während des Startvorgangs lässt genau eine Instanz laufen.',
     pl_PL:
-      'Wbudowany sklep (akcje zakupu, odnowienia i resetu transferu z lokalnym generowaniem kluczy Curve25519 oraz rozliczeniem przez zadanie Pay Invoice węzła), przekazywanie routingu clearnet-vpn w kontenerze dla LND, Core Lightning i Eclair, opcjonalne automatyczne odnawianie NIP-47 NWC z obsługą Tor SOCKS5 i wykluczeniem sekretu z kopii zapasowych oraz panel stanu subskrypcji i transferu.',
+      'TunnelSats jest pokazywany jako uruchomiony, gdy oczekuje przekazanie węzła lub płatność. Ponowne uruchomienie TunnelSats podczas startu pozostawia dokładnie jedną działającą kopię.',
     fr_FR:
-      'Boutique intégrée (actions Acheter, Renouveler et Réinitialiser la bande passante avec génération locale de clés Curve25519 et règlement via la tâche Pay Invoice du nœud), transfert de routage clearnet-vpn en conteneur pour LND, Core Lightning et Eclair, renouvellement automatique optionnel NIP-47 NWC avec prise en charge Tor SOCKS5 et exclusion du secret des sauvegardes, et un tableau de bord d’état de l’abonnement et de la bande passante.',
+      'TunnelSats apparaît comme en cours d’exécution tant qu’un transfert de nœud ou un paiement est en attente. Redémarrer TunnelSats pendant son démarrage laisse exactement une seule copie en cours d’exécution.',
   },
   migrations: {
     up: async ({ effects }) => {},

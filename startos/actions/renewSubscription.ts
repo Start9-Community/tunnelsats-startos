@@ -454,6 +454,7 @@ export const renewSubscription = sdk.Action.withInput(
           copyable: true,
           masked: false,
           qr: false,
+          launchable: false,
         },
       }
     }
@@ -480,6 +481,7 @@ export const renewSubscription = sdk.Action.withInput(
             copyable: true,
             masked: false,
             qr: true,
+            launchable: false,
           },
           {
             name: i18n('Payment Hash'),
@@ -489,6 +491,7 @@ export const renewSubscription = sdk.Action.withInput(
             copyable: true,
             masked: false,
             qr: false,
+            launchable: false,
           },
         ],
       },

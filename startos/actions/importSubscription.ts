@@ -129,6 +129,7 @@ export const importSubscription = sdk.Action.withInput(
             copyable: true,
             masked: false,
             qr: false,
+            launchable: false,
           },
           {
             name: i18n('Announce Endpoint'),
@@ -138,6 +139,7 @@ export const importSubscription = sdk.Action.withInput(
             copyable: true,
             masked: false,
             qr: false,
+            launchable: false,
           },
         ],
       },

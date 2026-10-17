@@ -12,15 +12,23 @@ updates:
     groups:
       startos-packages:
         patterns:
-          - "@start9labs/*"
-          - "*-startos"
+          - "@start9labs/start-sdk"
+          - "bitcoin-core-startos"
+          - "cln-startos"
+          - "eclair-startos"
+          - "lnd-startos"
+          - "tor-startos"
 
       minor-and-patch:
         patterns:
           - "*"
         exclude-patterns:
-          - "@start9labs/*"
-          - "*-startos"
+          - "@start9labs/start-sdk"
+          - "bitcoin-core-startos"
+          - "cln-startos"
+          - "eclair-startos"
+          - "lnd-startos"
+          - "tor-startos"
         update-types:
           - "minor"
           - "patch"

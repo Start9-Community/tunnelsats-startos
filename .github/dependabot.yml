@@ -12,12 +12,15 @@ updates:
     groups:
       startos-packages:
         patterns:
-          - "cln-startos"
-          - "lnd-startos"
+          - "@start9labs/*"
+          - "*-startos"
 
       minor-and-patch:
         patterns:
           - "*"
+        exclude-patterns:
+          - "@start9labs/*"
+          - "*-startos"
         update-types:
           - "minor"
           - "patch"

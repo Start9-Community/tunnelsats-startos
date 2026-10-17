@@ -39,7 +39,8 @@ AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 `
 
-test('SDK 3 dependency contract: node packages and TunnelSats declare @start9labs/start-sdk 3.0.6', () => {
+test('SDK 3 dependency contract: node packages and TunnelSats declare @start9labs/start-sdk >= 3.0.6 (< 4.0.0)', () => {
+  const sdkRange = VersionRange.parse('>=3.0.6:0 <4.0.0:0')
   const packages = [
     join(REPO_ROOT, 'package.json'),
     join(REPO_ROOT, 'node_modules/lnd-startos/package.json'),
@@ -53,10 +54,12 @@ test('SDK 3 dependency contract: node packages and TunnelSats declare @start9lab
       name?: string
       dependencies?: Record<string, string>
     }
-    assert.equal(
-      pkg.dependencies?.['@start9labs/start-sdk'],
-      '3.0.6',
-      `${pkg.name ?? pkgPath} must depend on @start9labs/start-sdk 3.0.6`,
+    const rawSdkVer = pkg.dependencies?.['@start9labs/start-sdk'] ?? ''
+    const normalizedVer = rawSdkVer.replace(/^[~^]/, '')
+    assert.ok(
+      normalizedVer.length > 0 &&
+        ExtendedVersion.parse(`${normalizedVer}:0`).satisfies(sdkRange),
+      `${pkg.name ?? pkgPath} must depend on @start9labs/start-sdk >= 3.0.6 (< 4.0.0), got "${rawSdkVer}"`,
     )
   }
 })
@@ -115,6 +118,7 @@ test('SDK 3 version range contract: QA baseline and start-sdk 3.0.6 node release
         '26.6.9:0',
         '26.6.9:1',
         '26.6.9:2',
+        '26.6.9:3',
       ],
       rejected: ['26.6.8:2', '26.6.2:0'],
     },

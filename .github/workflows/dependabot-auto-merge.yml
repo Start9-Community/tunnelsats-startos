@@ -1,37 +1,63 @@
 # Auto-approve and enable native auto-merge for Dependabot eligible updates:
 # - Minor and patch npm dependency updates
-# - StartOS companion packages (cln-startos, lnd-startos) git commit updates
+# - StartOS companion packages (bitcoin-core-startos, cln-startos, eclair-startos, lnd-startos, tor-startos) git commit updates
 # - GitHub Actions updates (minor/patch/SHA bumps)
 #
 # Note: In tunnelsats-startos, merging to main does NOT publish a release to the StartOS store.
 # Release publishing strictly requires a signed tag (v*), preserving production air-gap safety.
 #
 # How it works:
-# 1. Triggers on pull_request_target for Dependabot PRs
+# 1. Triggers on pull_request for Dependabot PRs (both actor and PR author must be dependabot[bot])
 # 2. Uses dependabot/fetch-metadata to inspect dependency names, update types, and ecosystem
-# 3. Auto-approves the PR and enables native GitHub auto-merge (--auto --squash)
-# 4. GitHub automatically executes the merge ONLY AFTER 'Build StartOS Package' passes 100%
+# 3. Verifies that only dependency/workflow files changed in the PR
+# 4. Auto-approves the PR, posts the 'TunnelSentinel / Code Review' exemption status, and enables native GitHub auto-merge (--auto --squash)
+# 5. GitHub automatically executes the merge ONLY AFTER all required CI build and test checks pass 100%
 
 name: Dependabot Auto-Merge
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
   pull-requests: write
+  statuses: write
 
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'
     steps:
       - name: Fetch Dependabot metadata
         id: metadata
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.0.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check that only dependency files changed
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
+          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          contains(steps.metadata.outputs.dependency-names, 'bitcoin-core-startos') ||
+          contains(steps.metadata.outputs.dependency-names, 'cln-startos') ||
+          contains(steps.metadata.outputs.dependency-names, 'eclair-startos') ||
+          contains(steps.metadata.outputs.dependency-names, 'lnd-startos') ||
+          contains(steps.metadata.outputs.dependency-names, 'tor-startos') ||
+          (steps.metadata.outputs.package-ecosystem == 'github_actions' && steps.metadata.outputs.update-type != 'version-update:semver-major')
+        run: |
+          set -euo pipefail
+          files=$(gh api --paginate "repos/${{ github.repository }}/pulls/$PR_NUMBER/files" --jq '.[].filename')
+          printf 'Changed files:\n%s\n' "$files"
+          other=$(printf '%s\n' "$files" | grep -Ev '^(package\.json|package-lock\.json|\.github/workflows/[^/]+\.ya?ml)$' || true)
+          if [ -n "$other" ]; then
+            echo "::error::Not auto-merging: this PR changes files outside the dependency allow-list."
+            printf '%s\n' "$other"
+            exit 1
+          fi
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Auto-approve eligible Dependabot updates
         if: |
@@ -54,6 +80,26 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Mark the TunnelSentinel review as not required
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
+          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          contains(steps.metadata.outputs.dependency-names, 'bitcoin-core-startos') ||
+          contains(steps.metadata.outputs.dependency-names, 'cln-startos') ||
+          contains(steps.metadata.outputs.dependency-names, 'eclair-startos') ||
+          contains(steps.metadata.outputs.dependency-names, 'lnd-startos') ||
+          contains(steps.metadata.outputs.dependency-names, 'tor-startos') ||
+          (steps.metadata.outputs.package-ecosystem == 'github_actions' && steps.metadata.outputs.update-type != 'version-update:semver-major')
+        run: |
+          gh api --method POST "repos/${{ github.repository }}/statuses/$HEAD_SHA" \
+            -f state=success \
+            -f context='TunnelSentinel / Code Review' \
+            -f description='Not reviewed: Dependabot minor/patch/companion update, gated on CI' \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Enable native auto-merge for eligible Dependabot updates
         if: |
           steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
@@ -65,7 +111,7 @@ jobs:
           contains(steps.metadata.outputs.dependency-names, 'tor-startos') ||
           (steps.metadata.outputs.package-ecosystem == 'github_actions' && steps.metadata.outputs.update-type != 'version-update:semver-major')
         run: |
-          # Enable auto-merge (--auto): PR queues and merges ONLY after Build StartOS Package passes
+          # Enable auto-merge (--auto): PR queues and merges ONLY after Build passes
           gh pr merge "$PR_NUMBER" --auto --squash --repo "${{ github.repository }}"
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}

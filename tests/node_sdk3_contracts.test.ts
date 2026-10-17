@@ -39,7 +39,8 @@ AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 `
 
-test('SDK 3 dependency contract: node packages and TunnelSats declare @start9labs/start-sdk 3.0.3', () => {
+test('SDK 3 dependency contract: node packages and TunnelSats declare @start9labs/start-sdk >= 3.0.6 (< 4.0.0)', () => {
+  const sdkRange = VersionRange.parse('>=3.0.6:0 <4.0.0:0')
   const packages = [
     join(REPO_ROOT, 'package.json'),
     join(REPO_ROOT, 'node_modules/lnd-startos/package.json'),
@@ -53,15 +54,17 @@ test('SDK 3 dependency contract: node packages and TunnelSats declare @start9lab
       name?: string
       dependencies?: Record<string, string>
     }
-    assert.equal(
-      pkg.dependencies?.['@start9labs/start-sdk'],
-      '3.0.3',
-      `${pkg.name ?? pkgPath} must depend on @start9labs/start-sdk 3.0.3`,
+    const rawSdkVer = pkg.dependencies?.['@start9labs/start-sdk'] ?? ''
+    const normalizedVer = rawSdkVer.replace(/^[~^]/, '')
+    assert.ok(
+      normalizedVer.length > 0 &&
+        ExtendedVersion.parse(`${normalizedVer}:0`).satisfies(sdkRange),
+      `${pkg.name ?? pkgPath} must depend on @start9labs/start-sdk >= 3.0.6 (< 4.0.0), got "${rawSdkVer}"`,
     )
   }
 })
 
-test('SDK 3 version range contract: QA baseline and start-sdk 3.0.3 node releases satisfy declared dependency ranges', () => {
+test('SDK 3 version range contract: QA baseline and start-sdk 3.0.6 node releases satisfy declared dependency ranges', () => {
   const lndDeps = getDependenciesForConfig({
     enabled: true,
     'target-node': 'lnd',
@@ -96,28 +99,47 @@ test('SDK 3 version range contract: QA baseline and start-sdk 3.0.3 node release
       packageId: 'lnd',
       rangeStr: lndDeps.lnd.versionRange,
       installedCurrent: (lndVersionGraph as any).current.options.version,
-      versions: ['0.21.3-beta:10', '0.21.4-beta:0', '0.21.4-beta:1'],
+      versions: [
+        '0.21.3-beta:10',
+        '0.21.4-beta:0',
+        '0.21.4-beta:1',
+        '0.21.4-beta:2',
+        '0.21.4-beta:3',
+      ],
       rejected: ['0.21.3-beta:9', '0.21.2-beta:5'],
     },
     {
       packageId: 'c-lightning',
       rangeStr: clnDeps['c-lightning'].versionRange,
       installedCurrent: (clnVersionGraph as any).current.options.version,
-      versions: ['26.6.8:3', '26.6.8:7', '26.6.9:0', '26.6.9:1'],
+      versions: [
+        '26.6.8:3',
+        '26.6.8:7',
+        '26.6.9:0',
+        '26.6.9:1',
+        '26.6.9:2',
+        '26.6.9:3',
+      ],
       rejected: ['26.6.8:2', '26.6.2:0'],
     },
     {
       packageId: 'eclair',
       rangeStr: eclairDeps.eclair.versionRange,
       installedCurrent: (eclairVersionGraph as any).current.options.version,
-      versions: ['0.14.3:3', '0.14.3:4'],
+      versions: ['0.14.3:3', '0.14.3:4', '0.14.3:5'],
       rejected: ['0.14.3:2', '0.14.2:0'],
     },
     {
       packageId: 'tor',
       rangeStr: torDeps.tor.versionRange,
       installedCurrent: (torVersionGraph as any).current.options.version,
-      versions: ['0.4.9.11:2', '0.4.9.12:5', '0.4.9.13:1', '0.4.9.14:0'],
+      versions: [
+        '0.4.9.11:2',
+        '0.4.9.12:5',
+        '0.4.9.13:1',
+        '0.4.9.14:0',
+        '0.4.9.14:1',
+      ],
       rejected: ['0.4.9.11:1'],
     },
   ]

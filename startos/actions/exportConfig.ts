@@ -75,6 +75,7 @@ export const exportConfig = sdk.Action.withoutInput(
             type: 'multiline' as const,
             copyable: true,
             masked: true,
+            qr: false,
           })),
         },
       }
@@ -102,6 +103,7 @@ export const exportConfig = sdk.Action.withoutInput(
         value: conf,
         copyable: true,
         masked: true,
+        qr: false,
         filename: 'tunnelsatsv3.conf',
       },
     }

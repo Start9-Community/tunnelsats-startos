@@ -28,14 +28,19 @@ test('Dependabot Configuration - structured AST validation', () => {
     Array.isArray(startosPatterns),
     'startos-packages patterns must be an array',
   )
-  assert.ok(
-    startosPatterns.includes('cln-startos'),
-    'startos-packages must include cln-startos',
-  )
-  assert.ok(
-    startosPatterns.includes('lnd-startos'),
-    'startos-packages must include lnd-startos',
-  )
+  for (const pkg of [
+    '@start9labs/start-sdk',
+    'bitcoin-core-startos',
+    'cln-startos',
+    'eclair-startos',
+    'lnd-startos',
+    'tor-startos',
+  ]) {
+    assert.ok(
+      startosPatterns.includes(pkg),
+      `startos-packages must include ${pkg}`,
+    )
+  }
 
   const actionsUpdate = parsed.updates.find(
     (u: any) => u['package-ecosystem'] === 'github-actions',
@@ -140,24 +145,23 @@ test('Dependabot Auto-Merge Workflow - structured workflow validation & parsed c
     true,
     'SemVer patch must be eligible',
   )
-  assert.strictEqual(
-    evaluateParsedExpression(condition, {
-      updateType: null,
-      dependencyNames: 'cln-startos',
-      packageEcosystem: 'npm_and_yarn',
-    }),
-    true,
-    'cln-startos git SHA bump must be eligible',
-  )
-  assert.strictEqual(
-    evaluateParsedExpression(condition, {
-      updateType: null,
-      dependencyNames: 'lnd-startos',
-      packageEcosystem: 'npm_and_yarn',
-    }),
-    true,
-    'lnd-startos git SHA bump must be eligible',
-  )
+  for (const pkg of [
+    'bitcoin-core-startos',
+    'cln-startos',
+    'eclair-startos',
+    'lnd-startos',
+    'tor-startos',
+  ]) {
+    assert.strictEqual(
+      evaluateParsedExpression(condition, {
+        updateType: null,
+        dependencyNames: pkg,
+        packageEcosystem: 'npm_and_yarn',
+      }),
+      true,
+      `${pkg} git SHA bump must be eligible`,
+    )
+  }
   assert.strictEqual(
     evaluateParsedExpression(condition, {
       updateType: 'version-update:semver-major',

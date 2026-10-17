@@ -287,6 +287,7 @@ export const connectWallet = sdk.Action.withInput(
             copyable: true,
             masked: false,
             qr: false,
+            launchable: false,
           },
           {
             name: i18n('Transport'),
@@ -296,6 +297,7 @@ export const connectWallet = sdk.Action.withInput(
             copyable: false,
             masked: false,
             qr: false,
+            launchable: false,
           },
           {
             name: i18n('Auto-Renew Duration'),
@@ -305,6 +307,7 @@ export const connectWallet = sdk.Action.withInput(
             copyable: false,
             masked: false,
             qr: false,
+            launchable: false,
           },
           {
             name: i18n('Recommended Budget (1.2x Buffer)'),
@@ -314,6 +317,7 @@ export const connectWallet = sdk.Action.withInput(
             copyable: true,
             masked: false,
             qr: false,
+            launchable: false,
           },
         ],
       },

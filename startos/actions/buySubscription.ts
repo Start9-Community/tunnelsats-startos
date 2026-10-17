@@ -453,6 +453,7 @@ export const buySubscription = sdk.Action.withInput(
           copyable: true,
           masked: false,
           qr: false,
+          launchable: false,
         },
       }
     }
@@ -475,6 +476,7 @@ export const buySubscription = sdk.Action.withInput(
             copyable: true,
             masked: false,
             qr: true,
+            launchable: false,
           },
           {
             name: i18n('Amount'),
@@ -484,6 +486,7 @@ export const buySubscription = sdk.Action.withInput(
             copyable: false,
             masked: false,
             qr: false,
+            launchable: false,
           },
           {
             name: i18n('Payment Hash'),
@@ -493,6 +496,7 @@ export const buySubscription = sdk.Action.withInput(
             copyable: true,
             masked: false,
             qr: false,
+            launchable: false,
           },
         ],
       },

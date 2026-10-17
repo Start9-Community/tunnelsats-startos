@@ -37,8 +37,11 @@ jobs:
         if: |
           steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
           steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          contains(steps.metadata.outputs.dependency-names, 'bitcoin-core-startos') ||
           contains(steps.metadata.outputs.dependency-names, 'cln-startos') ||
+          contains(steps.metadata.outputs.dependency-names, 'eclair-startos') ||
           contains(steps.metadata.outputs.dependency-names, 'lnd-startos') ||
+          contains(steps.metadata.outputs.dependency-names, 'tor-startos') ||
           (steps.metadata.outputs.package-ecosystem == 'github_actions' && steps.metadata.outputs.update-type != 'version-update:semver-major')
         run: |
           # Only approve if not already approved to reduce noise
@@ -55,8 +58,11 @@ jobs:
         if: |
           steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
           steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          contains(steps.metadata.outputs.dependency-names, 'bitcoin-core-startos') ||
           contains(steps.metadata.outputs.dependency-names, 'cln-startos') ||
+          contains(steps.metadata.outputs.dependency-names, 'eclair-startos') ||
           contains(steps.metadata.outputs.dependency-names, 'lnd-startos') ||
+          contains(steps.metadata.outputs.dependency-names, 'tor-startos') ||
           (steps.metadata.outputs.package-ecosystem == 'github_actions' && steps.metadata.outputs.update-type != 'version-update:semver-major')
         run: |
           # Enable auto-merge (--auto): PR queues and merges ONLY after Build StartOS Package passes

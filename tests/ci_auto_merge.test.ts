@@ -28,13 +28,29 @@ test('Dependabot Configuration - structured AST validation', () => {
     Array.isArray(startosPatterns),
     'startos-packages patterns must be an array',
   )
+  for (const pkg of [
+    'bitcoin-core-startos',
+    'cln-startos',
+    'eclair-startos',
+    'lnd-startos',
+    'tor-startos',
+  ]) {
+    assert.ok(
+      startosPatterns.includes(pkg),
+      `startos-packages must include ${pkg}`,
+    )
+  }
+
   assert.ok(
-    startosPatterns.includes('cln-startos'),
-    'startos-packages must include cln-startos',
+    !startosPatterns.includes('@start9labs/start-sdk'),
+    'SDK majors must not join companion git updates that bypass semver gating',
   )
+  const semverGroup = npmUpdate.groups['minor-and-patch']
+  assert.deepStrictEqual(semverGroup['update-types'], ['minor', 'patch'])
+  assert.ok(semverGroup.patterns.includes('*'))
   assert.ok(
-    startosPatterns.includes('lnd-startos'),
-    'startos-packages must include lnd-startos',
+    !semverGroup['exclude-patterns'].includes('@start9labs/start-sdk'),
+    'SDK minor and patch updates belong in the semver-gated group',
   )
 
   const actionsUpdate = parsed.updates.find(
@@ -57,40 +73,67 @@ test('Dependabot Auto-Merge Workflow - structured workflow validation & parsed c
 
   const parsed = yaml.parse(fs.readFileSync(workflowPath, 'utf8'))
   assert.strictEqual(parsed.name, 'Dependabot Auto-Merge')
-  assert.ok(
+  assert.ok(parsed.on.pull_request, 'Must trigger on pull_request')
+  assert.strictEqual(
     parsed.on.pull_request_target,
-    'Must trigger on pull_request_target',
+    undefined,
+    'Must not use pull_request_target',
   )
+  assert.deepStrictEqual(parsed.on.pull_request.types, [
+    'opened',
+    'synchronize',
+    'reopened',
+  ])
   assert.strictEqual(parsed.permissions.contents, 'write')
   assert.strictEqual(parsed.permissions['pull-requests'], 'write')
+  assert.strictEqual(parsed.permissions.statuses, 'write')
 
   const autoMergeJob = parsed.jobs?.['auto-merge']
   assert.ok(autoMergeJob, 'auto-merge job must exist')
-  assert.strictEqual(autoMergeJob.if, "github.actor == 'dependabot[bot]'")
+  assert.strictEqual(
+    autoMergeJob.if,
+    "github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'",
+  )
 
   const steps = autoMergeJob.steps
   assert.ok(Array.isArray(steps), 'Job steps must be an array')
 
+  const checkFilesStep = steps.find(
+    (s: any) => s.name === 'Check that only dependency files changed',
+  )
   const approveStep = steps.find(
     (s: any) => s.name === 'Auto-approve eligible Dependabot updates',
+  )
+  const sentinelStatusStep = steps.find(
+    (s: any) => s.name === 'Mark the TunnelSentinel review as not required',
   )
   const mergeStep = steps.find(
     (s: any) =>
       s.name === 'Enable native auto-merge for eligible Dependabot updates',
   )
 
+  assert.ok(checkFilesStep, 'File allow-list check step must exist')
   assert.ok(approveStep, 'Auto-approve step must exist')
+  assert.ok(sentinelStatusStep, 'TunnelSentinel exemption step must exist')
   assert.ok(mergeStep, 'Enable native auto-merge step must exist')
 
   const condition = approveStep.if.trim()
+  const checkFilesCondition = checkFilesStep.if.trim()
+  const sentinelCondition = sentinelStatusStep.if.trim()
   const mergeCondition = mergeStep.if.trim()
 
-  // Verify that approval and merge predicates are strictly identical
-  assert.strictEqual(
-    condition.replace(/\s+/g, ' '),
-    mergeCondition.replace(/\s+/g, ' '),
-    'Approval and merge step conditions must be identical',
-  )
+  // Verify that all four gated steps share the exact same eligibility predicate
+  for (const [label, stepCond] of [
+    ['Check files', checkFilesCondition],
+    ['TunnelSentinel status', sentinelCondition],
+    ['Enable auto-merge', mergeCondition],
+  ] as const) {
+    assert.strictEqual(
+      condition.replace(/\s+/g, ' '),
+      stepCond.replace(/\s+/g, ' '),
+      `Approval and ${label} step conditions must be identical`,
+    )
+  }
 
   // Directly evaluate the actual parsed workflow condition expression against mock metadata
   const evaluateParsedExpression = (
@@ -140,24 +183,23 @@ test('Dependabot Auto-Merge Workflow - structured workflow validation & parsed c
     true,
     'SemVer patch must be eligible',
   )
-  assert.strictEqual(
-    evaluateParsedExpression(condition, {
-      updateType: null,
-      dependencyNames: 'cln-startos',
-      packageEcosystem: 'npm_and_yarn',
-    }),
-    true,
-    'cln-startos git SHA bump must be eligible',
-  )
-  assert.strictEqual(
-    evaluateParsedExpression(condition, {
-      updateType: null,
-      dependencyNames: 'lnd-startos',
-      packageEcosystem: 'npm_and_yarn',
-    }),
-    true,
-    'lnd-startos git SHA bump must be eligible',
-  )
+  for (const pkg of [
+    'bitcoin-core-startos',
+    'cln-startos',
+    'eclair-startos',
+    'lnd-startos',
+    'tor-startos',
+  ]) {
+    assert.strictEqual(
+      evaluateParsedExpression(condition, {
+        updateType: null,
+        dependencyNames: pkg,
+        packageEcosystem: 'npm_and_yarn',
+      }),
+      true,
+      `${pkg} git SHA bump must be eligible`,
+    )
+  }
   assert.strictEqual(
     evaluateParsedExpression(condition, {
       updateType: 'version-update:semver-major',

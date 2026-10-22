@@ -80,7 +80,7 @@ const dict = {
   'Payment settlement failed: ${error}': 77,
   'The payment was settled, but clearing its payment task on the Lightning node failed: ${error}. Retrying automatically.': 78,
   'Reset Bandwidth': 79,
-  "Reset this month's bandwidth usage once it reaches 70% of the monthly limit. Resets per month are limited; the invoice is paid from your Lightning node.": 80,
+  "Resets this month's bandwidth usage counter to 0 for a small fee (up to 2 resets per month). The invoice is paid from your Lightning node.": 80,
   'Bandwidth Reset Invoice Created': 81,
   "A payment task has been raised on your Lightning node. Once it is paid, this month's bandwidth usage is reset.": 82,
   'Pending Bandwidth Reset Invoice': 83,
@@ -132,6 +132,7 @@ const dict = {
   'TunnelSats recovered a paid order you had replaced': 129,
   'A TunnelSats order you replaced with a newer one was paid. TunnelSats claimed it and kept its WireGuard configuration; your active tunnel is unchanged. Run Export WireGuard Configuration to retrieve it, and Import Subscription to use it instead.': 130,
   "Requests a paid bandwidth reset from TunnelSats and raises a payment task on your Lightning node. A new request reserves one of this month's resets until its invoice expires, even if you never pay it.": 131,
+  'TunnelSats declined the bandwidth reset request for now: ${message}': 132,
 } as const
 
 /**

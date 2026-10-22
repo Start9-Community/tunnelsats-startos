@@ -744,3 +744,48 @@ test('pending-off nodes stay declared when absent or uninstalled until handoff c
   )
   assert.deepEqual(getDependenciesForConfig(config, []), {})
 })
+
+test('the declaration drops once an unpaid invoice expires and its pay task is cleared on expiry', async () => {
+  // bridge.py sets payTaskClearedOnExpiry: true and queues the task in
+  // payTasksToClear when the BOLT11 invoice expires (at 1h), while keeping
+  // the pending entry until 24h to catch any payment made before expiry.
+  const meta = metaShape.parse({
+    pendingOrder: {
+      ...pendingOrderFor('eclair'),
+      payTaskClearedOnExpiry: true,
+    },
+    pendingRenewal: {
+      ...pendingRenewalFor('cln'),
+      payTaskClearedOnExpiry: true,
+    },
+  })
+  assert.equal(meta.pendingOrder?.payTaskClearedOnExpiry, true)
+  assert.equal(meta.pendingRenewal?.payTaskClearedOnExpiry, true)
+  assert.deepEqual(getDependenciesForConfig(null, [], meta), {})
+  assert.deepEqual(
+    getDependenciesForConfig({ enabled: true, 'target-node': 'lnd' }, [], meta),
+    { lnd: LND_RUNNING },
+  )
+
+  const { raiseFallbackRenewalPayTask } =
+    await import('../startos/dependencies')
+  let created = 0
+  const raised = await raiseFallbackRenewalPayTask({
+    config: { enabled: true, 'target-node': 'cln' },
+    meta: {
+      pendingRenewal: {
+        ...pendingRenewalFor('cln'),
+        invoice: 'lnbc10u1pexample',
+        raisePayTask: true,
+        payTaskClearedOnExpiry: true,
+      },
+    },
+    lockMeta: async (fn) => fn(),
+    createTask: async () => {
+      created += 1
+    },
+    clearRaiseFlag: async () => {},
+  })
+  assert.equal(raised, false)
+  assert.equal(created, 0)
+})

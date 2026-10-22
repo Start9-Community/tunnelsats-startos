@@ -191,9 +191,6 @@ a {
 code {
   font-family: var(--font-mono);
   font-variant-ligatures: none;
-}
-
-code {
   font-size: 0.9em;
   padding: 0.0625rem 0.3125rem;
   border-radius: var(--radius-xs);
@@ -2258,11 +2255,6 @@ code {
   font-variant-numeric: tabular-nums;
 }
 
-#val-reset-eligibility[data-state='eligible'],
-#val-reset-eligibility[data-state='likely'] {
-  color: var(--ok);
-}
-
 #val-reset-eligibility[data-state='quota-used'] {
   color: var(--warn);
 }
@@ -2271,7 +2263,6 @@ code {
   color: var(--info);
 }
 
-#val-reset-eligibility[data-state='below-threshold'],
 #val-reset-eligibility[data-state='unknown'],
 #val-reset-eligibility[data-state='unavailable'] {
   color: var(--text-muted);
@@ -2617,6 +2608,17 @@ code {
 
 .faq-dialog-inner {
   width: min(46rem, 100%);
+}
+
+.confirm-dialog-inner {
+  width: min(30rem, 100%);
+}
+
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.75rem;
 }
 
 .modal-header {

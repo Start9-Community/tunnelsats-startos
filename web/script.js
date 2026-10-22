@@ -81,8 +81,17 @@ let model = null
 let loadFailed = false
 let countdownTimer = null
 let lastPollAt = 0
+// GET /api/dashboard requests started so far (see acceptedIntent).
+let dashboardReads = 0
+// The newest dashboard read whose answer was applied (see refresh).
+let appliedRead = 0
 let submittingIntent = false
 let localIntentFeedback = null
+// The request whose "Request accepted" note localIntentFeedback shows:
+// { kind, id, afterRead } from the 202 answer (id null if the answer carried
+// none). Only a dashboard read started after the answer (a number above
+// afterRead) shows the request, so only such a read can settle it.
+let acceptedIntent = null
 let lastRenderedInvoice = null
 let selectedInvoiceKind = null
 let activeTab = 'overview'
@@ -1061,32 +1070,51 @@ function paceText(pace) {
     timeZone: 'UTC',
   })
   if (pace.afterReset) {
-    return `${pace.usedGb.toFixed(2)} GB since this month's paid reset. No projection: the reset time is not known. The counter resets on ${resets} (UTC).`
+    return `${pace.usedGb.toFixed(2)} GB since this month's paid reset. No projection: the reset time is not known. The counter resets for free on ${resets}.`
   }
   if (pace.projectedGb === null) {
-    return `Too early in the month for a projection (${pace.usedGb.toFixed(2)} GB so far). The counter resets on ${resets} (UTC).`
+    return `Too early in the month for a projection (${pace.usedGb.toFixed(2)} GB so far). The counter resets for free on ${resets}.`
   }
   const projected = Math.round(pace.projectedGb)
   return pace.exceedsLimit
-    ? `At this pace: about ${projected} GB by the end of the month, above the ${pace.limitGb} GB allowance. The counter resets on ${resets} (UTC).`
-    : `At this pace: about ${projected} GB of ${pace.limitGb} GB by the end of the month. The counter resets on ${resets} (UTC).`
+    ? `At this pace: about ${projected} GB by the end of the month, above the ${pace.limitGb} GB allowance. The counter resets for free on ${resets}.`
+    : `At this pace: about ${projected} GB of ${pace.limitGb} GB by the end of the month. The counter resets for free on ${resets}.`
+}
+
+/**
+ * This month's paid resets from the confirmed quota: { used, max }, each
+ * null while it is not known.
+ */
+function resetQuota(m) {
+  const bw = (m && m.bandwidth) || {}
+  return {
+    used: Number.isInteger(bw.resetsThisMonth) ? bw.resetsThisMonth : null,
+    max: Number.isInteger(bw.maxResetsPerMonth) ? bw.maxResetsPerMonth : null,
+  }
 }
 
 /** Resets used this month as text, from the confirmed quota. */
 function resetsText(m) {
-  const bw = (m && m.bandwidth) || {}
-  const max = Number.isInteger(bw.maxResetsPerMonth)
-    ? bw.maxResetsPerMonth
-    : null
-  const used = Number.isInteger(bw.resetsThisMonth) ? bw.resetsThisMonth : null
+  const { used, max } = resetQuota(m)
   if (max === null) return 'Unknown'
   return `${used === null ? '?' : used} of ${max}`
 }
 
 /**
- * Whether a paid bandwidth reset looks possible from the confirmed numbers.
- * Only a hint: TunnelSats decides when the reset is requested (its usage
- * threshold is configurable; resetThresholdPct is its default).
+ * This month's confirmed usage in GB as the gauge shows it, or null while it
+ * is not known.
+ */
+function usedGbText(m) {
+  const used = m && m.bandwidth ? m.bandwidth.usedGb : null
+  return typeof used === 'number' && Number.isFinite(used) && used >= 0
+    ? used.toFixed(2)
+    : null
+}
+
+/**
+ * What a paid bandwidth reset does now, from the confirmed numbers. A reset
+ * sets this month's usage counter back to 0: it gives back what was used so
+ * far, not allowance on top. TunnelSats decides when the reset is requested.
  */
 function resetEligibility(m) {
   if (!m || !m.configured || (m.subscription && m.subscription.keyUnknown)) {
@@ -1098,44 +1126,63 @@ function resetEligibility(m) {
   if (m.pending && m.pending.reset) {
     return { state: 'pending', text: 'A bandwidth reset is in progress.' }
   }
-  const bw = m.bandwidth || {}
-  const max = Number.isInteger(bw.maxResetsPerMonth)
-    ? bw.maxResetsPerMonth
-    : null
-  const used = Number.isInteger(bw.resetsThisMonth) ? bw.resetsThisMonth : null
-  if (max !== null && used !== null && used >= max) {
+  const { used, max } = resetQuota(m)
+  if (max === 0 || (max !== null && used !== null && used >= max)) {
     return {
       state: 'quota-used',
       text:
         max === 0
           ? 'Paid resets are not offered for this subscription.'
-          : `All ${max} resets for this month are used; usage resets on the 1st (UTC).`,
+          : `All ${max} resets for this month are used. Usage resets for free on the 1st.`,
     }
   }
-  const pct = bandwidthPercent(m)
-  if (pct === null) {
-    return { state: 'unknown', text: 'Usage for this month is not known yet.' }
-  }
-  const threshold =
-    typeof bw.resetThresholdPct === 'number'
-      ? bw.resetThresholdPct
-      : BANDWIDTH_WARN_PCT
-  if (pct < threshold) {
+  const usedGb = usedGbText(m)
+  if (usedGb === null) {
     return {
-      state: 'below-threshold',
-      text: `Available from about ${threshold}% usage (${Math.floor(pct)}% used). TunnelSats decides when you request it.`,
+      state: 'unknown',
+      text: 'Usage for this month is not known yet, so a reset now may give back little.',
     }
   }
-  if (max !== null && used !== null) {
-    return {
-      state: 'eligible',
-      text: `Looks eligible: ${max - used} of ${max} resets left this month. TunnelSats confirms when you request it.`,
-    }
-  }
+  const counts =
+    max !== null ? ` and counts as 1 of ${max} resets this month` : ''
   return {
-    state: 'likely',
-    text: `Looks eligible (${Math.floor(pct)}% used). TunnelSats confirms when you request it.`,
+    state: 'available',
+    text: `${usedGb} GB used this month. A reset gives back ${usedGb} GB${counts}. Usage also resets for free on the 1st.`,
   }
+}
+
+/**
+ * What the reset confirmation states before a paid reset is requested: what
+ * it gives back, which of this month's resets it uses, and the free reset on
+ * the 1st. From the confirmed numbers, which can be up to a day old, so it
+ * never claims the reset will be accepted.
+ */
+function resetConfirmFacts(m) {
+  const usedGb = usedGbText(m)
+  const facts = [
+    usedGb === null
+      ? 'Usage for this month is not known yet, so a reset now may give back little.'
+      : `${usedGb} GB used this month. A reset sets the counter to 0 and gives back ${usedGb} GB.`,
+  ]
+  const { used, max } = resetQuota(m)
+  if (m && m.pending && m.pending.reset) {
+    // runBandwidthReset shows its invoice again or waits for its settlement.
+    facts.push(
+      'A bandwidth reset is already in progress, so this does not request another one.',
+    )
+  } else if (max === 0) {
+    facts.push('Paid resets are not offered for this subscription.')
+  } else if (max !== null && used !== null && used >= max) {
+    facts.push(
+      `All ${max} resets for this month are used, so TunnelSats may refuse this one.`,
+    )
+  } else if (max !== null && used !== null) {
+    facts.push(`This is reset ${used + 1} of ${max} this month.`)
+  } else if (max !== null) {
+    facts.push(`It counts as 1 of ${max} resets this month.`)
+  }
+  facts.push('Usage also resets for free on the 1st.')
+  return facts
 }
 
 /**
@@ -1676,6 +1723,21 @@ function activeIntentMessage(m) {
   return null
 }
 
+/**
+ * Whether the read model no longer shows the accepted request as pending or
+ * processing: the runner recorded its outcome, or the slot of its kind no
+ * longer holds it. Its "Request accepted" note then gives way to the outcome.
+ * `read` is the number of the dashboard read that produced `m`.
+ */
+function acceptedIntentSettled(m, read) {
+  if (!acceptedIntent || read <= acceptedIntent.afterRead) return false
+  const slot = ((m && m.intents) || {})[acceptedIntent.kind]
+  if (!slot || (acceptedIntent.id && slot.id !== acceptedIntent.id)) {
+    return true
+  }
+  return slot.status !== 'pending' && slot.status !== 'processing'
+}
+
 /** The m.pending invoice kind each dashboard request kind produces. */
 const INTENT_INVOICE_KIND = { buy: 'order', renew: 'renewal', reset: 'reset' }
 
@@ -1683,7 +1745,9 @@ const INTENT_INVOICE_KIND = { buy: 'order', renew: 'renewal', reset: 'reset' }
  * The most recent failed dashboard request. A failure is left out only when
  * a payable invoice of the same kind was created after it (a later request
  * of that kind produced it); an invoice of another kind never hides it, so
- * a refused or failed request stays explained next to any invoice.
+ * a refused or failed request stays explained next to any invoice. The read
+ * model drops a failure 15 minutes after its updatedAt
+ * (INTENT_FAILURE_SHOWN_FOR in bridge.py), so an old one does not stay.
  */
 function latestIntentFailure(m) {
   const intents = (m && m.intents) || {}
@@ -1748,6 +1812,10 @@ function renderIntentControls(m) {
   if (renewSelect) renewSelect.disabled = anyInFlight || !canRenewOrReset
   const resetBtn = byId('btn-intent-reset')
   if (resetBtn) resetBtn.disabled = anyInFlight || !canRenewOrReset
+  const confirmResetBtn = byId('btn-confirm-reset')
+  if (confirmResetBtn) {
+    confirmResetBtn.disabled = anyInFlight || !canRenewOrReset
+  }
 }
 
 function renderNotices(m) {
@@ -2113,6 +2181,20 @@ function renderQuota(m, nowMs = Date.now()) {
     el.textContent = eligibility.text
     el.setAttribute('data-state', eligibility.state)
   }
+  renderResetConfirm(m)
+}
+
+/** The reset confirmation's facts, kept current while it is open. */
+function renderResetConfirm(m) {
+  const list = byId('reset-confirm-facts')
+  if (!list) return
+  list.replaceChildren(
+    ...resetConfirmFacts(m).map((fact) => {
+      const item = document.createElement('li')
+      item.textContent = fact
+      return item
+    }),
+  )
 }
 
 function renderReachability(m) {
@@ -2156,7 +2238,7 @@ function renderFlows(m) {
       const wrap = document.createElement('div')
       wrap.className = 'flow'
       wrap.setAttribute('data-flow', flow.kind)
-      const title = document.createElement('h3')
+      const title = document.createElement('h2')
       title.className = 'flow-title'
       title.textContent = flow.title
       const steps = document.createElement('ol')
@@ -2311,9 +2393,34 @@ function selectServer(id) {
   }
 }
 
+function tabFromHash(hash) {
+  const raw = String(hash || '')
+    .replace(/^#/, '')
+    .trim()
+    .toLowerCase()
+  if (raw === 'manage') return 'actions'
+  return VALID_TABS.includes(raw) ? raw : null
+}
+
+function syncHashToTab(tab) {
+  if (typeof window === 'undefined' || !window.location) return
+  const nextHash = `#${tab}`
+  if (window.location.hash === nextHash) return
+  if (window.history && typeof window.history.replaceState === 'function') {
+    try {
+      window.history.replaceState(null, '', nextHash)
+      return
+    } catch {
+      // Fall back to location.hash assignment if replaceState is restricted.
+    }
+  }
+  window.location.hash = nextHash
+}
+
 function switchTab(tab) {
   if (!VALID_TABS.includes(tab)) return
   activeTab = tab
+  syncHashToTab(tab)
   renderTabs(model)
 }
 
@@ -2323,6 +2430,11 @@ function renderTabs(m) {
     if (btn) {
       const active = tab === activeTab
       btn.setAttribute('aria-pressed', active ? 'true' : 'false')
+      if (active) {
+        btn.setAttribute('aria-current', 'page')
+      } else if (typeof btn.removeAttribute === 'function') {
+        btn.removeAttribute('aria-current')
+      }
       btn.classList.toggle('is-active', active)
     }
   }
@@ -2407,18 +2519,27 @@ function hasActiveAsyncWork(m) {
 
 async function refresh() {
   lastPollAt = Date.now()
+  const read = ++dashboardReads
   try {
     const response = await fetch(DASHBOARD_URL, {
       cache: 'no-store',
       credentials: 'same-origin',
     })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    model = await response.json()
+    const next = await response.json()
+    // An answer that arrives after a newer one was applied must not put
+    // older state back (e.g. the poll in flight when a request was accepted).
+    if (read < appliedRead) return
+    appliedRead = read
+    model = next
     loadFailed = false
-    if (activePayableInvoice(model)) {
+    if (activePayableInvoice(model) || acceptedIntentSettled(model, read)) {
       localIntentFeedback = null
+      acceptedIntent = null
     }
   } catch (error) {
+    // Nor may a failed read that started before the newest applied one.
+    if (read < appliedRead) return
     console.error('Failed to load the dashboard state:', error)
     loadFailed = true
   }
@@ -2534,6 +2655,7 @@ async function submitIntent(actionKey) {
       ? (serverSelect && serverSelect.value) || selectedServerId
       : ''
     if (!serverId) {
+      acceptedIntent = null
       localIntentFeedback = {
         level: 'error',
         text: 'Choose a server region first.',
@@ -2563,6 +2685,7 @@ async function submitIntent(actionKey) {
   }
 
   submittingIntent = true
+  acceptedIntent = null
   localIntentFeedback = {
     level: 'info',
     text: 'Submitting request to TunnelSats…',
@@ -2589,6 +2712,12 @@ async function submitIntent(actionKey) {
       submittingIntent = false
       render()
       return
+    }
+    const intent = data && data.intent
+    acceptedIntent = {
+      kind: payload.kind,
+      id: intent && typeof intent.id === 'string' ? intent.id : null,
+      afterRead: dashboardReads,
     }
     localIntentFeedback = {
       level: 'info',
@@ -2658,7 +2787,7 @@ function bindEvents() {
     const opener = target.closest('[data-open-dialog]')
     if (opener) {
       const dialog = byId(opener.getAttribute('data-open-dialog'))
-      if (dialog && !dialog.open) dialog.showModal()
+      if (dialog && !dialog.open && !opener.disabled) dialog.showModal()
       return
     }
     const closer = target.closest('[data-close-dialog]')
@@ -2674,6 +2803,10 @@ function bindEvents() {
     }
     const intentBtn = target.closest('[data-submit-intent]')
     if (intentBtn && !intentBtn.disabled) {
+      // A confirmation (Reset Bandwidth) closes once its request is sent;
+      // the outcome then shows in the page.
+      const dialog = intentBtn.closest('dialog')
+      if (dialog) dialog.close()
       submitIntent(intentBtn.getAttribute('data-submit-intent'))
       return
     }
@@ -2734,6 +2867,19 @@ function bindEvents() {
     refresh()
     if (serversStale()) loadServers()
   })
+
+  if (
+    typeof window !== 'undefined' &&
+    typeof window.addEventListener === 'function'
+  ) {
+    window.addEventListener('hashchange', () => {
+      const tab = tabFromHash(window.location && window.location.hash)
+      if (tab && tab !== activeTab) {
+        activeTab = tab
+        renderTabs(model)
+      }
+    })
+  }
 }
 
 function serversStale(nowMs = Date.now()) {
@@ -2749,6 +2895,11 @@ function pollTick(nowMs = Date.now()) {
 }
 
 function init() {
+  const initialTab =
+    typeof window !== 'undefined' && window.location
+      ? tabFromHash(window.location.hash)
+      : null
+  if (initialTab) activeTab = initialTab
   renderPlans()
   bindEvents()
   const pubkeyInput = byId('reach-pubkey')

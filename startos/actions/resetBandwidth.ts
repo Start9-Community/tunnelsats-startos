@@ -21,6 +21,14 @@ import {
 import { payTaskReplayId, type TargetNode } from '../settlement'
 import { resolvePayInvoice } from './resolvePayInvoice'
 
+/**
+ * TunnelSats answers 429 with one error code (ERR_RATE_LIMIT_EXCEEDED) for
+ * its monthly reset limit ("Maximum 2 bandwidth resets per month reached"),
+ * its per-address request limit and the last minutes of a month, so only
+ * the message tells the monthly limit apart.
+ */
+const MONTHLY_RESET_LIMIT_RE = /\bresets per month reached\b/i
+
 /** The configured key, or null without an enabled config with a private key. */
 function configuredKey(
   config: { enabled?: boolean; 'tunnelsats-conf'?: string | null } | null,
@@ -177,9 +185,17 @@ export async function startBandwidthReset(
       throw new Error(e.apiMessage)
     }
     if (e instanceof ApiHttpError && e.status === 429) {
+      if (MONTHLY_RESET_LIMIT_RE.test(e.apiMessage)) {
+        throw new Error(
+          i18n(
+            'The monthly bandwidth reset limit is reached (${message}). An unpaid reset invoice keeps its reset reserved until it expires.',
+            { message: e.apiMessage },
+          ),
+        )
+      }
       throw new Error(
         i18n(
-          'The monthly bandwidth reset limit is reached (${message}). An unpaid reset invoice keeps its reset reserved until it expires.',
+          'TunnelSats declined the bandwidth reset request for now: ${message}',
           { message: e.apiMessage },
         ),
       )
@@ -206,7 +222,7 @@ export const resetBandwidth = sdk.Action.withoutInput(
     return {
       name: i18n('Reset Bandwidth'),
       description: i18n(
-        "Reset this month's bandwidth usage once it reaches 70% of the monthly limit. Resets per month are limited; the invoice is paid from your Lightning node.",
+        "Resets this month's bandwidth usage counter to 0 for a small fee (up to 2 resets per month). The invoice is paid from your Lightning node.",
       ),
       warning: i18n(
         "Requests a paid bandwidth reset from TunnelSats and raises a payment task on your Lightning node. A new request reserves one of this month's resets until its invoice expires, even if you never pay it.",

@@ -1,11 +1,17 @@
-FROM alpine:3.19
+FROM alpine:3.21
 
-# Install system dependencies
+# Install system dependencies and distrust compromised eMudhra (emSign) root CAs
 RUN apk add --no-cache \
     python3 \
     ca-certificates \
     bash \
-    wireguard-tools
+    wireguard-tools \
+    && sed -i 's|^mozilla/\(emSign_.*\.crt\)$|!mozilla/\1|' /etc/ca-certificates.conf \
+    && rm -f /usr/share/ca-certificates/mozilla/emSign_*.crt /etc/ssl/certs/*emSign* \
+    && update-ca-certificates --fresh
+
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 # Set working directory
 WORKDIR /app

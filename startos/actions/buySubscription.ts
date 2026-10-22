@@ -334,6 +334,7 @@ export function startPurchase(
           // merge() is a deep merge: without these, a backoff or received
           // marker left by an earlier order would carry over to this one.
           paymentReceivedFor: undefined,
+          payTaskClearedOnExpiry: undefined,
           lastError: undefined,
           nextAttemptAt: undefined,
         },

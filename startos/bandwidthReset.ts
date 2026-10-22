@@ -47,9 +47,9 @@ export type ResetAvailability =
 
 /**
  * Whether to offer the action. It is only withheld when no subscription key
- * is configured; live usage is checked by the TunnelSats API when the action
- * runs (cached usage in tunnelsats.meta.json can be up to 24h old between
- * background syncs).
+ * is configured: the TunnelSats API checks the request when the action runs
+ * (for example the monthly reset limit), and the quota cached in
+ * tunnelsats-meta.json can be up to 24h old between background syncs.
  */
 export function resetAvailability(publicKey: string | null): ResetAvailability {
   if (!publicKey) return { available: false, reason: 'no-config' }

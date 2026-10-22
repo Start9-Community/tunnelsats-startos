@@ -28,8 +28,8 @@ TunnelSats provides dedicated WireGuard VPN infrastructure specifically designed
 > - **Native Storefront**: Browse plans, generate BOLT11 invoices, and pay directly through StartOS Actions and a Pay Invoice task on your Lightning node (or with any external Lightning wallet).
 > - **In-Container Egress Privacy**: The Lightning node owns the WireGuard tunnel directly inside its own container (`wg0` with routing table 51820). Egress policy routing sends outgoing clearnet peer traffic (gossip, handshakes, ping/pong acks) through the tunnel, while hybrid Tor traffic continues across the bridge network. See the kill switch note under [Network & Privacy Disclosure](#network--privacy-disclosure).
 > - **No Box-Wide Changes**: Nothing is configured in the StartOS system settings, no config markers, no firewall toggles, and no multi-node port 9735 race. Only the target node's own traffic uses the tunnel.
-> - **Bandwidth Telemetry**: Monthly bandwidth allowance per calendar month (the limit TunnelSats reports for your key), synced by the background daemon. The Web Dashboard shows usage, the pace to the end of the month, paid resets and whether a reset looks available.
-> - **Web Dashboard**: Renewal timeline with the reminder dates and an estimated renewal preview, progress steps for pending payments and the node handoff, TunnelSats server regions, and an inbound reachability check. Buy, Renew and Reset Bandwidth can be started from the dashboard; every payment is still accepted on the node as a Pay Invoice task.
+> - **Bandwidth Telemetry**: Monthly bandwidth allowance per calendar month (the limit TunnelSats reports for your key), synced by the background daemon. The Web Dashboard shows usage, the pace to the end of the month, the paid resets used and what a paid reset gives back now (it sets this month's usage counter to 0; usage also resets for free on the 1st).
+> - **Web Dashboard**: Renewal timeline with the reminder dates and an estimated renewal preview, progress steps for pending payments and the node handoff, TunnelSats server regions, and an inbound reachability check. Buy, Renew and Reset Bandwidth can be started from the dashboard (a reset asks for confirmation first and shows what it gives back); every payment is still accepted on the node as a Pay Invoice task.
 > - **Sovereign Config Export**: Export your raw `.conf` anytime via the **Export WireGuard Configuration** action.
 > - **Renewal Reminders**: A Renew Subscription task is raised when the subscription expires in 7 days or less, updated at 3 days or less, and again once it has expired.
 
@@ -89,7 +89,7 @@ tasks:
 
 | Subcontainer | Base Image             | Entrypoint             | Purpose                                                                    |
 | ------------ | ---------------------- | ---------------------- | -------------------------------------------------------------------------- |
-| `main`       | Alpine 3.19 (Python 3) | `docker_entrypoint.sh` | Serves web UI on port 80 and runs the subscription synchronization daemon. |
+| `main`       | Alpine 3.21 (Python 3) | `docker_entrypoint.sh` | Serves web UI on port 80 and runs the subscription synchronization daemon. |
 
 ## File Models
 

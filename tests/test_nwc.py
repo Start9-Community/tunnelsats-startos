@@ -59,9 +59,11 @@ class _LoopbackNip47Server:
     def close(self):
         self._closed = True
         try:
-            self._sock.close()
-        except Exception:
+            self._sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
             pass
+        self._sock.close()
+        self._thread.join()
 
     def _AcceptLoop(self):
         while not self._closed:
@@ -135,9 +137,23 @@ class _LoopbackNip47Server:
             if not sub_id or not req_event:
                 return
 
-            shared_key = bridge._nip04_shared_secret(self.wallet_secret_hex, req_event["pubkey"])
+            shared_cache = getattr(self, "_shared_cache", None)
+            if shared_cache is None:
+                shared_cache = {}
+                self._shared_cache = shared_cache
+            shared_key = shared_cache.get(req_event["pubkey"])
+            if shared_key is None:
+                shared_key = bridge._nip04_shared_secret(self.wallet_secret_hex, req_event["pubkey"])
+                shared_cache[req_event["pubkey"]] = shared_key
             decrypted = json.loads(bridge._nip04_decrypt(shared_key, req_event["content"]))
             resp_body = self.handler(decrypted["method"], decrypted.get("params") or {})
+            if resp_body is None:
+                # Silent wallet: keep the WebSocket open until the client times out and closes it.
+                try:
+                    conn.recv(64)
+                except Exception:
+                    pass
+                return
 
             resp_content = bridge._nip04_encrypt(shared_key, json.dumps(resp_body, separators=(",", ":")))
             created_at = int(datetime.now(timezone.utc).timestamp())
@@ -374,7 +390,7 @@ class TestNwcAutoRenew(unittest.TestCase):
 
         nwc_calls = []
 
-        def fake_nwc_command(_parsed, method, params, route_via_tor=False, timeout=20):
+        def fake_nwc_command(_parsed, method, params, route_via_tor=False, timeout=20, deadline=None):
             nwc_calls.append((method, params))
             if method == "get_budget":
                 return {"remaining_budget": 50_000_000}
@@ -887,6 +903,208 @@ class TestNwcAutoRenew(unittest.TestCase):
         self.assertEqual(dash["nwc"]["relayHost"], "relay.getalby.com")
         self.assertEqual(dash["nwc"]["recommendedBudgetSats"], 12000)
         self.assertEqual(dash["nwc"]["recommendedAnnualSats"], 48000)
+
+    def test_nwc_execute_command_caps_relays_at_nwc_max_relays_and_honors_deadline(self):
+        import time
+
+        server = _LoopbackNip47Server(self.wallet_secret, lambda _method, _params: None)
+        self.addCleanup(server.close)
+
+        relays_query = "&".join(f"relay=ws://silent{i}.onion:8080/ws" for i in range(1, 8))
+        seven_relay_uri = (
+            f"nostr+walletconnect://{self.wallet_pubkey}?{relays_query}&secret={self.client_secret}"
+        )
+        parsed = bridge.parse_nwc_uri(seven_relay_uri)
+        self.assertEqual(len(parsed["relays"]), 7)
+
+        with patch.object(bridge, "TOR_SOCKS_HOST", "127.0.0.1"), patch.object(bridge, "TOR_SOCKS_PORT", server.port):
+            with self.assertRaises(bridge.NwcError):
+                bridge.nwc_execute_command(
+                    parsed,
+                    "pay_invoice",
+                    {"invoice": self.valid_invoice},
+                    route_via_tor=True,
+                    timeout=0.1,
+                )
+
+        # Even with 7 relays in the URI, at most NWC_MAX_RELAYS (3) are tried per command.
+        self.assertEqual(len(server.socks_requests), bridge.NWC_MAX_RELAYS)
+        self.assertEqual(
+            [host for _atyp, host, _port in server.socks_requests],
+            ["silent1.onion", "silent2.onion", "silent3.onion"],
+        )
+
+        # When an overall deadline expires during the first relay attempt, remaining relays are skipped.
+        server.socks_requests.clear()
+        with patch.object(bridge, "TOR_SOCKS_HOST", "127.0.0.1"), patch.object(bridge, "TOR_SOCKS_PORT", server.port):
+            with self.assertRaises(bridge.NwcError):
+                bridge.nwc_execute_command(
+                    parsed,
+                    "pay_invoice",
+                    {"invoice": self.valid_invoice},
+                    route_via_tor=True,
+                    timeout=0.35,
+                    deadline=time.monotonic() + 0.35,
+                )
+        self.assertEqual(len(server.socks_requests), 1)
+
+    def test_maybe_nwc_auto_renew_seven_silent_relays_finishes_within_deadline_and_raises_fallback(self):
+        import time
+
+        now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+        old_expiry = _iso_in(now, days=4)
+        methods_seen = []
+
+        def handler(method, _params):
+            methods_seen.append(method)
+            return None
+
+        server = _LoopbackNip47Server(self.wallet_secret, handler)
+        self.addCleanup(server.close)
+
+        relays_query = "&".join(f"relay=ws://silent{i}.onion:8080/ws" for i in range(1, 8))
+        seven_relay_uri = (
+            f"nostr+walletconnect://{self.wallet_pubkey}?{relays_query}&secret={self.client_secret}"
+        )
+        bridge.atomic_write_json(
+            self.meta_path,
+            {
+                "publicKey": self.wg_pubkey,
+                "expiresAt": old_expiry,
+                "expirySource": "api",
+                "lastDuration": 1,
+                "nwcConnected": True,
+                "nwcRelayHost": "silent1.onion",
+                "nwcRouteViaTor": True,
+                "nwcAutoRenewDuration": "1m",
+                "pendingRenewal": self._pending(
+                    now,
+                    self.payment_hash,
+                    self.valid_invoice,
+                    expires_in_minutes=180,
+                    nwcAttempted=True,
+                ),
+            },
+        )
+        bridge.atomic_write_json(
+            self.wallet_path,
+            {
+                "uri": seven_relay_uri,
+                "relayHost": "silent1.onion",
+                "routeViaTor": True,
+                "autoRenewDuration": "1m",
+            },
+        )
+
+        with (
+            patch.object(bridge, "TOR_SOCKS_HOST", "127.0.0.1"),
+            patch.object(bridge, "TOR_SOCKS_PORT", server.port),
+            patch.object(bridge, "_payment_state", return_value="unpaid"),
+        ):
+            t0 = time.monotonic()
+            r1 = bridge.maybe_nwc_auto_renew(self.wg_pubkey, now=now, deadline_seconds=0.45)
+            elapsed = time.monotonic() - t0
+            self.assertLess(elapsed, 1.0)
+            self.assertEqual(r1["result"], "retry-scheduled")
+            self.assertIn("lookup_invoice", methods_seen)
+            meta1 = bridge.read_meta()
+            self.assertEqual(meta1["nwcAutoRenewState"]["attempts"], 1)
+            self.assertIsNotNone(meta1["nwcAutoRenewState"]["nextAttemptAt"])
+            self.assertFalse(meta1["nwcAutoRenewState"]["fallbackTaskRaised"])
+            self.assertFalse(meta1["pendingRenewal"].get("raisePayTask"))
+
+            r2 = bridge.maybe_nwc_auto_renew(
+                self.wg_pubkey,
+                now=now + timedelta(hours=1, minutes=1),
+                deadline_seconds=0.45,
+            )
+            self.assertEqual(r2["result"], "retry-scheduled")
+            self.assertEqual(bridge.read_meta()["nwcAutoRenewState"]["attempts"], 2)
+
+            # Attempt 3: when preflight completes within budget, pay_invoice itself is bounded by renew_deadline.
+            with (
+                patch.object(bridge, "_nwc_lookup_already_paid", return_value=False),
+                patch.object(bridge, "_nwc_preflight_budget_check", return_value=(True, None, None)),
+            ):
+                r3 = bridge.maybe_nwc_auto_renew(
+                    self.wg_pubkey,
+                    now=now + timedelta(hours=2, minutes=2),
+                    deadline_seconds=0.45,
+                )
+            self.assertEqual(r3["result"], "fallback-raised")
+            self.assertIn("pay_invoice", methods_seen)
+            meta3 = bridge.read_meta()
+            self.assertEqual(meta3["nwcAutoRenewState"]["attempts"], 3)
+            self.assertTrue(meta3["nwcAutoRenewState"]["fallbackTaskRaised"])
+            self.assertTrue(meta3["pendingRenewal"]["raisePayTask"])
+
+    def test_maybe_nwc_auto_renew_preflight_deadline_exhaustion_skips_pay_invoice_without_marking_attempted(self):
+        now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+        self._seed_auto_renew_state(now)
+
+        methods_seen = []
+
+        def handler(method, _params):
+            methods_seen.append(method)
+            return None
+
+        server = _LoopbackNip47Server(self.wallet_secret, handler)
+        self.addCleanup(server.close)
+        relays_query = "&".join(f"relay=ws://silent{i}.onion:8080/ws" for i in range(1, 8))
+        bridge.atomic_write_json(
+            self.wallet_path,
+            {
+                "uri": f"nostr+walletconnect://{self.wallet_pubkey}?{relays_query}&secret={self.client_secret}",
+                "relayHost": "silent1.onion",
+                "routeViaTor": True,
+                "autoRenewDuration": "1m",
+            },
+        )
+        fake_renew = lambda *_a, **_kw: (
+            200,
+            {
+                "renewalId": "r1",
+                "paymentHash": self.payment_hash,
+                "invoice": self.valid_invoice,
+                "expiresAt": bridge._iso(now + timedelta(hours=3)),
+            },
+        )
+
+        with (
+            patch.object(bridge, "TOR_SOCKS_HOST", "127.0.0.1"),
+            patch.object(bridge, "TOR_SOCKS_PORT", server.port),
+            patch.object(bridge, "_api_call", side_effect=fake_renew),
+            patch.object(bridge, "_payment_state", return_value="unpaid"),
+        ):
+            r1 = bridge.maybe_nwc_auto_renew(self.wg_pubkey, now=now, deadline_seconds=0.04)
+            self.assertEqual(r1["result"], "retry-scheduled")
+            self.assertIn("preflight before payment could be sent", r1["message"])
+            self.assertNotIn("pay_invoice", methods_seen)
+            meta1 = bridge.read_meta()
+            self.assertFalse(meta1["pendingRenewal"]["nwcAttempted"])
+            self.assertIsNone(meta1["pendingRenewal"].get("nwcPayInFlightUntil"))
+            self.assertEqual(meta1["nwcAutoRenewState"]["attempts"], 1)
+            self.assertIsNotNone(meta1["nwcAutoRenewState"]["nextAttemptAt"])
+
+            r2 = bridge.maybe_nwc_auto_renew(
+                self.wg_pubkey,
+                now=now + timedelta(hours=1, minutes=1),
+                deadline_seconds=0.04,
+            )
+            self.assertEqual(r2["result"], "retry-scheduled")
+            self.assertFalse(bridge.read_meta()["pendingRenewal"]["nwcAttempted"])
+
+            r3 = bridge.maybe_nwc_auto_renew(
+                self.wg_pubkey,
+                now=now + timedelta(hours=2, minutes=2),
+                deadline_seconds=0.04,
+            )
+            self.assertEqual(r3["result"], "fallback-raised")
+            self.assertNotIn("pay_invoice", methods_seen)
+            meta3 = bridge.read_meta()
+            self.assertFalse(meta3["pendingRenewal"]["nwcAttempted"])
+            self.assertTrue(meta3["nwcAutoRenewState"]["fallbackTaskRaised"])
+            self.assertTrue(meta3["pendingRenewal"]["raisePayTask"])
 
 
 class TestTorSocksAddress(unittest.TestCase):

@@ -12,12 +12,21 @@ updates:
     groups:
       startos-packages:
         patterns:
+          - "bitcoin-core-startos"
           - "cln-startos"
+          - "eclair-startos"
           - "lnd-startos"
+          - "tor-startos"
 
       minor-and-patch:
         patterns:
           - "*"
+        exclude-patterns:
+          - "bitcoin-core-startos"
+          - "cln-startos"
+          - "eclair-startos"
+          - "lnd-startos"
+          - "tor-startos"
         update-types:
           - "minor"
           - "patch"

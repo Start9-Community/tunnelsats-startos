@@ -74,6 +74,9 @@ class FakeElement {
   getAttribute(name: string) {
     return this.attributes[name] ?? null
   }
+  removeAttribute(name: string) {
+    delete this.attributes[name]
+  }
   contains(node: FakeElement | null): boolean {
     for (let n = node; n; n = n.parent) if (n === this) return true
     return false
@@ -102,17 +105,28 @@ class FakeElement {
   addEventListener() {}
   remove() {}
   select() {}
+  /** HTMLDialogElement: only what the script uses. */
+  open = false
+  showModal() {
+    this.open = true
+  }
+  close() {
+    this.open = false
+  }
 }
 
 interface Harness {
   context: vm.Context
   doc: FakeDocument
+  location: { hash: string }
   storage: Map<string, string>
   requests: { url: string; init: Json | undefined }[]
   elements: Map<string, FakeElement>
   el: (id: string) => FakeElement
   /** Runs the script's own document listeners, as a browser event would. */
   dispatch: (type: string, target: FakeElement, init?: Json) => void
+  /** Runs the script's own window listeners (e.g. hashchange). */
+  dispatchWindow: (type: string, init?: Json) => void
   run: <T = any>(code: string) => T
   settle: () => Promise<void>
 }
@@ -126,11 +140,14 @@ function load(
   },
   routes: Record<string, { status: number; body: Json }> = {},
   stored: Record<string, string> = {},
+  initialHash = '',
 ): Harness {
   const requests: { url: string; init: Json | undefined }[] = []
   const storage = new Map<string, string>(Object.entries(stored))
   const elements = new Map<string, FakeElement>()
   const listeners = new Map<string, ((event: Json) => void)[]>()
+  const windowListeners = new Map<string, ((event: Json) => void)[]>()
+  const location = { hash: initialHash }
   const body = new FakeElement('BODY')
   const doc: FakeDocument = { activeElement: body, body }
   const own = (element: FakeElement) => {
@@ -163,7 +180,27 @@ function load(
         listeners.set(type, [...(listeners.get(type) ?? []), handler])
       },
     }),
-    window: { isSecureContext: false },
+    window: {
+      isSecureContext: false,
+      location,
+      history: {
+        replaceState: (
+          _data: unknown,
+          _unused: string,
+          url?: string | null,
+        ) => {
+          if (typeof url === 'string' && url.startsWith('#')) {
+            location.hash = url
+          }
+        },
+      },
+      addEventListener: (type: string, handler: (event: Json) => void) => {
+        windowListeners.set(type, [
+          ...(windowListeners.get(type) ?? []),
+          handler,
+        ])
+      },
+    },
     navigator: {},
     localStorage: {
       getItem: (key: string) => storage.get(key) ?? null,
@@ -207,6 +244,7 @@ function load(
   return {
     context,
     doc,
+    location,
     storage,
     requests,
     elements,
@@ -214,6 +252,11 @@ function load(
     dispatch: (type: string, target: FakeElement, init: Json = {}) => {
       for (const handler of listeners.get(type) ?? []) {
         handler({ type, target, preventDefault() {}, ...init })
+      }
+    },
+    dispatchWindow: (type: string, init: Json = {}) => {
+      for (const handler of windowListeners.get(type) ?? []) {
+        handler({ type, ...init })
       }
     },
     run: (code: string) => {
@@ -1113,6 +1156,202 @@ test('an invoice of another kind never hides a failed request', async () => {
   assert.equal(h.el('intent-feedback').textContent, resetError)
 })
 
+/** The 202 bridge.py answers POST /api/intents with: the slot it wrote. */
+const acceptedAnswer = (kind: string, id: string) => ({
+  status: 202,
+  body: { status: 'accepted', intent: intentSlot(kind, id, 'pending') },
+})
+
+/** A dashboard request as the read model reports it. */
+function intentSlot(
+  kind: string,
+  id: string,
+  status: string,
+  error: string | null = null,
+): Json {
+  const at = new Date().toISOString()
+  return { id, kind, status, createdAt: at, updatedAt: at, error }
+}
+
+const feedbackOf = (h: Harness) => ({
+  hidden: h.el('intent-feedback').hidden,
+  text: h.el('intent-feedback').textContent,
+  isError: h.el('intent-feedback').classList.contains('is-error'),
+})
+
+test('a request that fails after it was accepted shows its error right away', async () => {
+  for (const kind of ['buy', 'renew', 'reset'] as const) {
+    const id = `${kind}-1`
+    const error = `TunnelSats refused this ${kind} request.`
+    const m = model()
+    const h = load(m, 200, acceptedAnswer(kind, id))
+    await settleAll(h)
+    // bridge.py writes the slot before it answers, so the dashboard read
+    // that follows the 202 already shows the request pending.
+    m.intents[kind] = intentSlot(kind, id, 'pending')
+    await vm.runInContext(`submitIntent('${kind}')`, h.context)
+    await settleAll(h)
+    assert.match(feedbackOf(h).text, /^Requesting Lightning invoice/, kind)
+
+    m.intents[kind] = intentSlot(kind, id, 'processing')
+    await vm.runInContext('refresh()', h.context)
+    await settleAll(h)
+    assert.match(feedbackOf(h).text, /^Requesting Lightning invoice/, kind)
+
+    // The runner records the failure: the same page shows it at once.
+    m.intents[kind] = intentSlot(kind, id, 'failed', error)
+    await vm.runInContext('refresh()', h.context)
+    await settleAll(h)
+    assert.deepEqual(
+      feedbackOf(h),
+      { hidden: false, text: error, isError: true },
+      kind,
+    )
+
+    // A reload explains it the same way.
+    const reloaded = load(m)
+    await settleAll(reloaded)
+    assert.deepEqual(
+      feedbackOf(reloaded),
+      { hidden: false, text: error, isError: true },
+      kind,
+    )
+  }
+})
+
+test('the accepted note gives way to the outcome of the request it announced', async () => {
+  // Failed before the first dashboard read after the 202.
+  const error = 'Maximum 2 bandwidth resets per month reached'
+  const fast = model()
+  const h = load(fast, 200, acceptedAnswer('reset', 'reset-2'))
+  await settleAll(h)
+  fast.intents.reset = intentSlot('reset', 'reset-2', 'failed', error)
+  await vm.runInContext(`submitIntent('reset')`, h.context)
+  await settleAll(h)
+  assert.deepEqual(feedbackOf(h), { hidden: false, text: error, isError: true })
+
+  // Succeeded without a payable invoice (the reset was already paid): the
+  // note does not claim an invoice is still being prepared.
+  const paid = model()
+  const hPaid = load(paid, 200, acceptedAnswer('reset', 'reset-3'))
+  await settleAll(hPaid)
+  paid.intents.reset = intentSlot('reset', 'reset-3', 'succeeded')
+  await vm.runInContext(`submitIntent('reset')`, hPaid.context)
+  await settleAll(hPaid)
+  assert.equal(feedbackOf(hPaid).hidden, true)
+
+  // The 202 carried no ID: the note still gives way to the outcome of the
+  // request of that kind.
+  const bare = model()
+  const hBare = load(bare)
+  await settleAll(hBare)
+  bare.intents.renew = intentSlot('renew', 'renew-9', 'pending')
+  await vm.runInContext(`submitIntent('renew')`, hBare.context)
+  await settleAll(hBare)
+  bare.intents.renew = intentSlot('renew', 'renew-9', 'failed', 'Refused.')
+  await vm.runInContext('refresh()', hBare.context)
+  await settleAll(hBare)
+  assert.deepEqual(feedbackOf(hBare), {
+    hidden: false,
+    text: 'Refused.',
+    isError: true,
+  })
+})
+
+test('the accepted note stays while the dashboard cannot be read', async () => {
+  const routes: Record<string, { status: number; body: Json }> = {}
+  const h = load(model(), 200, acceptedAnswer('reset', 'reset-4'), routes)
+  await settleAll(h)
+  routes['/api/dashboard'] = { status: 503, body: {} }
+  await vm.runInContext(`submitIntent('reset')`, h.context)
+  await settleAll(h)
+  assert.match(feedbackOf(h).text, /^Request accepted/)
+  assert.equal(feedbackOf(h).isError, false)
+})
+
+test('a dashboard read started before the request was accepted cannot settle it', async () => {
+  const older = intentSlot('reset', 'reset-old', 'failed', 'An older failure.')
+  const m = model({ intents: { buy: null, renew: null, reset: older } })
+  const h = load(m, 200, acceptedAnswer('reset', 'reset-5'))
+  await settleAll(h)
+  // A poll read is in flight when Reset is pressed and answers only after
+  // the 202 and after the read that followed it, with the state from before
+  // the request. That answer is older than the one on screen: it is dropped.
+  const before = JSON.parse(JSON.stringify(m))
+  const fetchNow = h.context.fetch
+  let answerLate = () => {}
+  h.context.fetch = () =>
+    new Promise((resolve) => {
+      answerLate = () =>
+        resolve({ ok: true, status: 200, json: async () => before })
+    })
+  const poll = vm.runInContext('refresh()', h.context)
+  h.context.fetch = fetchNow
+  m.intents.reset = intentSlot('reset', 'reset-5', 'pending')
+  await vm.runInContext(`submitIntent('reset')`, h.context)
+  await settleAll(h)
+  answerLate()
+  await poll
+  await settleAll(h)
+  assert.match(feedbackOf(h).text, /^Requesting Lightning invoice/)
+  assert.equal(h.el('btn-intent-reset').disabled, true)
+})
+
+test('a pre-202 read that answers before the next read leaves the note', async () => {
+  const older = intentSlot('reset', 'reset-old', 'failed', 'An older failure.')
+  const m = model({ intents: { buy: null, renew: null, reset: older } })
+  const h = load(m, 200, acceptedAnswer('reset', 'reset-6'))
+  await settleAll(h)
+  // Every dashboard read waits for the test to answer it; the POST does not.
+  const before = JSON.parse(JSON.stringify(m))
+  const fetchNow = h.context.fetch
+  const answers: ((body: Json) => void)[] = []
+  h.context.fetch = (url: string, init?: Json) =>
+    url === '/api/dashboard'
+      ? new Promise((resolve) => {
+          answers.push((body) =>
+            resolve({ ok: true, status: 200, json: async () => body }),
+          )
+        })
+      : fetchNow(url, init)
+  const poll = vm.runInContext('refresh()', h.context)
+  m.intents.reset = intentSlot('reset', 'reset-6', 'pending')
+  const submit = vm.runInContext(`submitIntent('reset')`, h.context)
+  await settleAll(h)
+  assert.equal(answers.length, 2, 'the poll and the read after the 202')
+  // The poll answers first, with the state from before the request: it is
+  // the newest answer so far, but it cannot settle the request it predates.
+  answers[0](before)
+  await poll
+  await settleAll(h)
+  assert.match(feedbackOf(h).text, /^Request accepted/)
+  assert.equal(feedbackOf(h).isError, false)
+  answers[1](m)
+  await submit
+  await settleAll(h)
+  assert.match(feedbackOf(h).text, /^Requesting Lightning invoice/)
+  h.context.fetch = fetchNow
+})
+
+test('a dashboard read that fails after a newer one answered changes nothing', async () => {
+  const h = load(model())
+  await settleAll(h)
+  const fetchNow = h.context.fetch
+  let failLate = () => {}
+  h.context.fetch = () =>
+    new Promise((_resolve, reject) => {
+      failLate = () => reject(new Error('timed out'))
+    })
+  const slow = vm.runInContext('refresh()', h.context)
+  h.context.fetch = fetchNow
+  await vm.runInContext('refresh()', h.context)
+  await settleAll(h)
+  failLate()
+  await slow
+  await settleAll(h)
+  assert.equal(h.el('load-error').hidden, true)
+})
+
 // ─── W3: visuals and discovery ───────────────────────────────────────────────
 
 const settleAll = async (h: Harness, rounds = 5) => {
@@ -1181,7 +1420,7 @@ test('monthPace projects usage to the end of the UTC month', () => {
   )
 })
 
-test('resetEligibility and resetsText follow the confirmed quota, as hints only', () => {
+test('resetEligibility says what a reset gives back, from the confirmed numbers', () => {
   const h = load(model())
   const state = (bandwidth: Json, extra: Json = {}) =>
     h.run(`resetEligibility(${JSON.stringify(model({ bandwidth, ...extra }))})`)
@@ -1194,16 +1433,30 @@ test('resetEligibility and resetsText follow the confirmed quota, as hints only'
     limitGb: 100,
     resetsThisMonth,
     maxResetsPerMonth,
-    resetThresholdPct: 70,
   })
-  assert.equal(state(bw(40, 0, 2)).state, 'below-threshold')
-  assert.match(state(bw(40, 0, 2)).text, /TunnelSats decides/)
-  assert.equal(state(bw(80, 1, 2)).state, 'eligible')
-  assert.match(state(bw(80, 1, 2)).text, /1 of 2 resets left/)
-  assert.equal(state(bw(80, 2, 2)).state, 'quota-used')
+  // At any usage: the counter goes back to 0, so a reset gives back what
+  // was used this month.
+  assert.deepEqual(state(bw(40, 0, 2)), {
+    state: 'available',
+    text: '40.00 GB used this month. A reset gives back 40.00 GB and counts as 1 of 2 resets this month. Usage also resets for free on the 1st.',
+  })
+  assert.equal(state(bw(80, 1, 2)).state, 'available')
+  assert.equal(state(bw(1.5, null, 2)).state, 'available')
+  // Without a confirmed monthly limit, the hint does not name one.
+  assert.deepEqual(state(bw(12.5, null, null)), {
+    state: 'available',
+    text: '12.50 GB used this month. A reset gives back 12.50 GB. Usage also resets for free on the 1st.',
+  })
+  assert.deepEqual(state(bw(80, 2, 2)), {
+    state: 'quota-used',
+    text: 'All 2 resets for this month are used. Usage resets for free on the 1st.',
+  })
   assert.match(state(bw(80, 0, 0)).text, /not offered/)
-  assert.equal(state(bw(80, null, null)).state, 'likely')
-  assert.equal(state(bw(null, 0, 2)).state, 'unknown')
+  assert.match(state(bw(80, null, 0)).text, /not offered/)
+  assert.deepEqual(state(bw(null, 0, 2)), {
+    state: 'unknown',
+    text: 'Usage for this month is not known yet, so a reset now may give back little.',
+  })
   assert.equal(
     state(bw(80, 0, 2), {
       pending: { order: null, renewal: null, reset: { targetNode: 'lnd' } },
@@ -1217,14 +1470,225 @@ test('resetEligibility and resetsText follow the confirmed quota, as hints only'
     'unavailable',
   )
   assert.equal(state(bw(80, 0, 2), { configured: false }).state, 'unavailable')
-  for (const s of [state(bw(80, 1, 2)), state(bw(80, null, null))]) {
-    assert.match(s.text, /TunnelSats confirms/)
-  }
   const resets = (b: Json) =>
     h.run(`resetsText(${JSON.stringify({ bandwidth: b })})`)
   assert.equal(resets(bw(1, 1, 2)), '1 of 2')
   assert.equal(resets(bw(1, null, 2)), '? of 2')
   assert.equal(resets(bw(1, 1, null)), 'Unknown')
+})
+
+test('the reset hint never states a usage threshold', () => {
+  const h = load(model())
+  for (const usedGb of [0, 0.05, 35, 69.9, 70, 95, 100, null]) {
+    for (const [resetsThisMonth, maxResetsPerMonth] of [
+      [0, 2],
+      [1, 2],
+      [2, 2],
+      [null, null],
+    ]) {
+      // bridge.py used to send resetThresholdPct, and the hint fell back to
+      // 70 without it; neither brings a threshold back.
+      const bandwidth = {
+        usedGb,
+        limitGb: 100,
+        resetsThisMonth,
+        maxResetsPerMonth,
+        resetThresholdPct: 70,
+      }
+      const hint = h.run(
+        `resetEligibility(${JSON.stringify(model({ bandwidth }))})`,
+      )
+      assert.doesNotMatch(
+        hint.text,
+        /%|threshold|available from/i,
+        `${usedGb} GB: ${hint.text}`,
+      )
+      assert.notEqual(hint.state, 'below-threshold')
+    }
+  }
+})
+
+test('the reset copy says a reset sets usage to 0 and names no time zone', () => {
+  const html = readFileSync(join(__dirname, '..', 'web', 'index.html'), 'utf8')
+  assert.match(html, />\s*Reset usage to 0 · \$1\.00\s*</)
+  assert.doesNotMatch(html, /\+100 GB/)
+  assert.match(html, /Usage resets for free on the 1st of each month\./)
+  // The day the monthly counter resets is known; its time zone is not.
+  const h = load(model())
+  for (const bandwidth of [
+    { usedGb: 60, limitGb: 100 },
+    { usedGb: 5, limitGb: 100 },
+    { usedGb: 40, limitGb: 100, resetsThisMonth: 1 },
+  ]) {
+    for (const now of [SEPT_16, Date.UTC(2026, 8, 1, 12)]) {
+      const text = h.run(
+        `paceText(monthPace(${JSON.stringify({ bandwidth })}, ${now}))`,
+      )
+      assert.match(text, /The counter resets for free on /)
+      assert.doesNotMatch(text, /UTC/)
+    }
+  }
+})
+
+test('index.html sends the reset button to a confirmation dialog', () => {
+  const html = readFileSync(join(__dirname, '..', 'web', 'index.html'), 'utf8')
+  const cta = /<button[^>]*\sid="btn-intent-reset"[^>]*>/.exec(html)?.[0] ?? ''
+  assert.match(cta, /\sdata-open-dialog="reset-confirm-modal"/)
+  assert.doesNotMatch(cta, /data-submit-intent/, 'the button never requests')
+  const dialog =
+    /<dialog[^>]*\sid="reset-confirm-modal"[^>]*>[\s\S]*?<\/dialog>/.exec(
+      html,
+    )?.[0] ?? ''
+  assert.match(dialog, /<ul[^>]*\sid="reset-confirm-facts"/)
+  const confirm =
+    /<button[^>]*\sid="btn-confirm-reset"[^>]*>([\s\S]*?)<\/button>/.exec(
+      dialog,
+    )
+  assert.match(confirm?.[0] ?? '', /\sdata-submit-intent="reset"/)
+  assert.equal(confirm?.[1].trim(), 'Reset for $1.00')
+  const cancel =
+    /<button[^>]*\sid="btn-cancel-reset"[^>]*>([\s\S]*?)<\/button>/.exec(dialog)
+  assert.match(cancel?.[0] ?? '', /\sdata-close-dialog/)
+  assert.equal(cancel?.[1].trim(), 'Cancel')
+})
+
+/** The reset confirmation wired as index.html declares it (test above). */
+function resetConfirmation(h: Harness) {
+  const cta = h.el('btn-intent-reset')
+  cta.setAttribute('data-open-dialog', 'reset-confirm-modal')
+  const dialog = h.el('reset-confirm-modal')
+  dialog.tagName = 'DIALOG'
+  const cancel = h.el('btn-cancel-reset')
+  cancel.setAttribute('data-close-dialog', '')
+  const confirm = h.el('btn-confirm-reset')
+  confirm.setAttribute('data-submit-intent', 'reset')
+  dialog.append(h.el('reset-confirm-facts'), cancel, confirm)
+  const facts = () =>
+    h.el('reset-confirm-facts').children.map((li) => li.textContent)
+  const posts = () => h.requests.filter((r) => r.url === '/api/intents')
+  return { cta, dialog, cancel, confirm, facts, posts }
+}
+
+test('a dashboard reset shows its facts and asks before it is requested', async () => {
+  const h = load(
+    model({
+      bandwidth: {
+        usedGb: 35,
+        limitGb: 100,
+        resetsThisMonth: 0,
+        maxResetsPerMonth: 2,
+      },
+    }),
+  )
+  await settleAll(h)
+  const ui = resetConfirmation(h)
+
+  h.dispatch('click', ui.cta)
+  assert.equal(ui.dialog.open, true)
+  assert.equal(ui.posts().length, 0, 'opening it requests nothing')
+  assert.deepEqual(ui.facts(), [
+    '35.00 GB used this month. A reset sets the counter to 0 and gives back 35.00 GB.',
+    'This is reset 1 of 2 this month.',
+    'Usage also resets for free on the 1st.',
+  ])
+
+  h.dispatch('click', ui.cancel)
+  assert.equal(ui.dialog.open, false)
+  assert.equal(ui.posts().length, 0, 'Cancel requests nothing')
+
+  h.dispatch('click', ui.cta)
+  h.dispatch('click', ui.confirm)
+  await settleAll(h)
+  assert.equal(ui.dialog.open, false)
+  assert.equal(ui.posts().length, 1)
+  assert.deepEqual(JSON.parse(ui.posts()[0].init?.body), { kind: 'reset' })
+})
+
+test('the reset confirmation states the facts, never a usage threshold', () => {
+  const h = load(model())
+  const facts = (bandwidth: Json): string[] =>
+    h.run(`resetConfirmFacts(${JSON.stringify(model({ bandwidth }))})`)
+  const bw = (
+    usedGb: number | null,
+    resetsThisMonth: number | null,
+    maxResetsPerMonth: number | null,
+  ) => ({ usedGb, limitGb: 100, resetsThisMonth, maxResetsPerMonth })
+  assert.deepEqual(facts(bw(null, 1, 2)), [
+    'Usage for this month is not known yet, so a reset now may give back little.',
+    'This is reset 2 of 2 this month.',
+    'Usage also resets for free on the 1st.',
+  ])
+  assert.equal(
+    facts(bw(0.5, null, 2))[1],
+    'It counts as 1 of 2 resets this month.',
+  )
+  assert.equal(
+    facts(bw(99, 2, 2))[1],
+    'All 2 resets for this month are used, so TunnelSats may refuse this one.',
+  )
+  assert.equal(
+    facts(bw(99, 0, 0))[1],
+    'Paid resets are not offered for this subscription.',
+  )
+  assert.deepEqual(facts(bw(10, null, null)), [
+    '10.00 GB used this month. A reset sets the counter to 0 and gives back 10.00 GB.',
+    'Usage also resets for free on the 1st.',
+  ])
+  // A reset already in progress is shown again or settled, never repeated.
+  const pending = h.run(
+    `resetConfirmFacts(${JSON.stringify(
+      model({
+        bandwidth: bw(80, 1, 2),
+        pending: { order: null, renewal: null, reset: { targetNode: 'lnd' } },
+      }),
+    )})`,
+  )
+  assert.equal(
+    pending[1],
+    'A bandwidth reset is already in progress, so this does not request another one.',
+  )
+  for (const usedGb of [0, 0.05, 35, 69.9, 70, 95, 100, null]) {
+    for (const text of facts({ ...bw(usedGb, 0, 2), resetThresholdPct: 70 })) {
+      assert.doesNotMatch(text, /%|threshold|available from/i, text)
+    }
+  }
+})
+
+test('the reset confirmation sends nothing while another request is in flight', async () => {
+  const m = model({
+    bandwidth: {
+      usedGb: 35,
+      limitGb: 100,
+      resetsThisMonth: 0,
+      maxResetsPerMonth: 2,
+    },
+  })
+  const h = load(m)
+  await settleAll(h)
+  const ui = resetConfirmation(h)
+  h.dispatch('click', ui.cta)
+  assert.equal(ui.dialog.open, true)
+  const at = new Date().toISOString()
+  m.intents.renew = {
+    id: 'renew-1',
+    kind: 'renew',
+    status: 'pending',
+    createdAt: at,
+    updatedAt: at,
+    error: null,
+  }
+  h.run('render()')
+  assert.equal(ui.confirm.disabled, true)
+  h.dispatch('click', ui.confirm)
+  await settleAll(h)
+  assert.equal(ui.posts().length, 0)
+  assert.equal(ui.dialog.open, true, 'Cancel is still there')
+  h.dispatch('click', ui.cancel)
+  assert.equal(ui.dialog.open, false)
+  // The disabled button does not open it again.
+  assert.equal(ui.cta.disabled, true)
+  h.dispatch('click', ui.cta)
+  assert.equal(ui.dialog.open, false)
 })
 
 test('subscriptionTimeline places the 7-day and 3-day reminders before the expiry', () => {
@@ -1405,6 +1869,8 @@ test('renderFlows marks the current step for assistive technology', async () => 
   await settleAll(h)
   assert.equal(h.el('flow').hidden, false)
   const [flow] = h.el('flow-list').children
+  assert.equal(flow.children[0].tagName, 'H2')
+  assert.equal(flow.children[0].className, 'flow-title')
   const steps = flow.children[1]
   assert.equal(steps.tagName, 'OL')
   const currentSteps = steps.children.filter(
@@ -1706,7 +2172,6 @@ test('the overview renders native gauges, the timeline and the quota', async () 
         limitGb: 150,
         resetsThisMonth: 1,
         maxResetsPerMonth: 2,
-        resetThresholdPct: 70,
       },
     }),
   )
@@ -1724,7 +2189,7 @@ test('the overview renders native gauges, the timeline and the quota', async () 
   assert.equal(h.el('val-resets').textContent, '1 of 2')
   assert.equal(
     h.el('val-reset-eligibility').attributes['data-state'],
-    'eligible',
+    'available',
   )
   assert.match(h.el('pace-text').textContent, /GB/)
   assert.equal(h.el('timeline-phase').textContent, 'On track')
@@ -1784,6 +2249,12 @@ test('every meter and progress bar in index.html has an accessible name', () => 
 })
 
 test('command deck segmented navigation switches between Overview, Actions & Plans, and Verify & CLI while preserving context emphasis', async () => {
+  const html = readFileSync(join(__dirname, '..', 'web', 'index.html'), 'utf8')
+  assert.match(
+    html,
+    /<button[^>]*\bid="tab-btn-overview"[^>]*\baria-current="page"/,
+  )
+
   // Unconfigured customer: Overview tab emphasizes Setup (Server Region + Buy)
   const hNew = load(
     model({
@@ -1799,8 +2270,11 @@ test('command deck segmented navigation switches between Overview, Actions & Pla
   assert.equal(hNew.el('manage').hidden, true)
   assert.equal(hNew.el('verify-section').hidden, true)
   assert.equal(hNew.el('tab-btn-overview').getAttribute('aria-pressed'), 'true')
+  assert.equal(hNew.el('tab-btn-overview').getAttribute('aria-current'), 'page')
   assert.equal(hNew.el('tab-btn-actions').getAttribute('aria-pressed'), 'false')
+  assert.equal(hNew.el('tab-btn-actions').getAttribute('aria-current'), null)
   assert.equal(hNew.el('tab-btn-verify').getAttribute('aria-pressed'), 'false')
+  assert.equal(hNew.el('tab-btn-verify').getAttribute('aria-current'), null)
 
   // Configured customer: Overview tab emphasizes Overview (Topology + Renew)
   const hExisting = load(model({ configured: true }))
@@ -1815,13 +2289,22 @@ test('command deck segmented navigation switches between Overview, Actions & Pla
   assert.equal(hExisting.el('view-overview').hidden, true)
   assert.equal(hExisting.el('manage').hidden, false)
   assert.equal(hExisting.el('verify-section').hidden, true)
+  assert.equal(hExisting.location.hash, '#actions')
   assert.equal(
     hExisting.el('tab-btn-actions').getAttribute('aria-pressed'),
     'true',
   )
   assert.equal(
+    hExisting.el('tab-btn-actions').getAttribute('aria-current'),
+    'page',
+  )
+  assert.equal(
     hExisting.el('tab-btn-overview').getAttribute('aria-pressed'),
     'false',
+  )
+  assert.equal(
+    hExisting.el('tab-btn-overview').getAttribute('aria-current'),
+    null,
   )
 
   // Switch to Verify & CLI tab
@@ -1829,9 +2312,18 @@ test('command deck segmented navigation switches between Overview, Actions & Pla
   assert.equal(hExisting.el('view-overview').hidden, true)
   assert.equal(hExisting.el('manage').hidden, true)
   assert.equal(hExisting.el('verify-section').hidden, false)
+  assert.equal(hExisting.location.hash, '#verify')
   assert.equal(
     hExisting.el('tab-btn-verify').getAttribute('aria-pressed'),
     'true',
+  )
+  assert.equal(
+    hExisting.el('tab-btn-verify').getAttribute('aria-current'),
+    'page',
+  )
+  assert.equal(
+    hExisting.el('tab-btn-actions').getAttribute('aria-current'),
+    null,
   )
 
   // Unknown tab names are ignored
@@ -1839,6 +2331,54 @@ test('command deck segmented navigation switches between Overview, Actions & Pla
   assert.equal(
     hExisting.el('tab-btn-verify').getAttribute('aria-pressed'),
     'true',
+  )
+  assert.equal(hExisting.location.hash, '#verify')
+
+  // Browser hashchange switches tabs and updates aria-current
+  hExisting.location.hash = '#overview'
+  hExisting.dispatchWindow('hashchange')
+  assert.equal(hExisting.run('activeTab'), 'overview')
+  assert.equal(hExisting.el('view-overview').hidden, false)
+  assert.equal(
+    hExisting.el('tab-btn-overview').getAttribute('aria-current'),
+    'page',
+  )
+  assert.equal(
+    hExisting.el('tab-btn-verify').getAttribute('aria-current'),
+    null,
+  )
+
+  // Initial URL hash (#verify, #actions, or #manage alias) opens that tab directly
+  const hVerify = load(
+    model({ configured: true }),
+    200,
+    undefined,
+    {},
+    {},
+    '#verify',
+  )
+  await settleAll(hVerify)
+  assert.equal(hVerify.run('activeTab'), 'verify')
+  assert.equal(hVerify.el('verify-section').hidden, false)
+  assert.equal(
+    hVerify.el('tab-btn-verify').getAttribute('aria-current'),
+    'page',
+  )
+
+  const hManage = load(
+    model({ configured: true }),
+    200,
+    undefined,
+    {},
+    {},
+    '#manage',
+  )
+  await settleAll(hManage)
+  assert.equal(hManage.run('activeTab'), 'actions')
+  assert.equal(hManage.el('manage').hidden, false)
+  assert.equal(
+    hManage.el('tab-btn-actions').getAttribute('aria-current'),
+    'page',
   )
 })
 
@@ -2087,7 +2627,6 @@ test('command deck renders SVG ring/arc gauges and visual reset pips without inl
         limitGb: 150,
         resetsThisMonth: 1,
         maxResetsPerMonth: 2,
-        resetThresholdPct: 70,
       },
     }),
   )
@@ -2165,6 +2704,11 @@ test('shipped SVG, PNG and font files carry no active content or metadata', () =
       [/\bstyle\s*=/i, 'an inline style attribute (CSP)'],
       [/<style[\s>]/i, 'a style element (CSP)'],
       [/url\((?!\s*['"]?#)/i, 'an external url() reference'],
+      [/<\?xml/i, 'an XML declaration'],
+      [/<!--/, 'an XML comment'],
+      [/\b(?:inkscape|sodipodi)\b/i, 'Inkscape or Sodipodi editor metadata'],
+      [/\bxmlns:(?:rdf|cc|dc|svg|xlink)\b/i, 'unused namespace declarations'],
+      [/\bxml:space\s*=/i, 'an xml:space attribute'],
     ] as const) {
       assert.doesNotMatch(svg, pattern, `${file} must not contain ${what}`)
     }
@@ -2379,4 +2923,20 @@ test('times are shown to the minute and estimates to the day', () => {
   assert.equal(h.run(`formatDate(null)`), null)
   assert.equal(h.run('monthsLabel(1)'), '1 month')
   assert.equal(h.run('monthsLabel(12)'), '12 months')
+})
+
+test('heading levels never skip from h1 to h3 and style.css defines a single code rule', () => {
+  const html = readFileSync(join(WEB_DIR, 'index.html'), 'utf8')
+  const headings = [...html.matchAll(/<h([1-6])\b/gi)].map((m) => Number(m[1]))
+  assert.equal(headings[0], 1)
+  for (let i = 1; i < headings.length; i++) {
+    assert.ok(
+      headings[i] <= headings[i - 1] + 1,
+      `heading h${headings[i]} at index ${i} skips a level after h${headings[i - 1]}`,
+    )
+  }
+
+  const css = readFileSync(join(WEB_DIR, 'style.css'), 'utf8')
+  const codeRules = [...css.matchAll(/^code\s*\{/gm)]
+  assert.equal(codeRules.length, 1, 'style.css must have a single code {} rule')
 })

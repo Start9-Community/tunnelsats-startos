@@ -306,12 +306,31 @@ class TestOrderSettlement(SettlementTestBase):
         self.assertEqual(pending.get("paymentReceivedFor"), HASH)
 
     def test_failure_backs_off_without_calling_the_api(self):
+        retry_iso = iso(NOW + timedelta(minutes=3))
         self.write_meta({"pendingOrder": self.pending_order(
-            lastError="HTTP 500 from claim", nextAttemptAt=iso(NOW + timedelta(minutes=3)))})
+            lastError="HTTP 500 from claim", nextAttemptAt=retry_iso)})
         outcome = self.only(self.settle())
-        self.assertEqual(outcome["result"], "failed")
+        self.assertEqual(outcome["result"], "waiting")
+        self.assertIn("Upstream check paused", outcome["message"])
         self.assertIn("HTTP 500 from claim", outcome["message"])
         self.assertEqual(self.api.requests, [])
+        pending = self.read_meta()["pendingOrder"]
+        self.assertEqual(pending.get("lastError"), "HTTP 500 from claim")
+        self.assertEqual(pending.get("nextAttemptAt"), retry_iso)
+
+        old_priv, old_pub = new_keypair()
+        old_hash = "c" * 64
+        self.write_meta({"previousPendingOrders": [self.pending_order(
+            paymentHash=old_hash, privateKey=old_priv, publicKey=old_pub,
+            lastError="HTTP 500 from claim", nextAttemptAt=retry_iso)]})
+        prev_outcome = self.only(self.settle())
+        self.assertEqual(prev_outcome["result"], "waiting")
+        self.assertIn("Upstream check paused", prev_outcome["message"])
+        self.assertIn("HTTP 500 from claim", prev_outcome["message"])
+        self.assertEqual(self.api.requests, [])
+        prev_stored = self.read_meta()["previousPendingOrders"][0]
+        self.assertEqual(prev_stored.get("lastError"), "HTTP 500 from claim")
+        self.assertEqual(prev_stored.get("nextAttemptAt"), retry_iso)
 
     def test_retry_after_backoff_clears_the_error_once_it_waits_again(self):
         self.write_meta({"pendingOrder": self.pending_order(
@@ -721,6 +740,47 @@ class TestOrderSettlement(SettlementTestBase):
         self.assertNotIn("previousPendingOrders", self.read_meta())
         self.assertIn(old_task, expired["clearPayTasks"])
 
+    def test_unpaid_order_clears_pay_task_on_invoice_expiry_and_retains_entry_until_24h(self):
+        created_at = NOW - timedelta(hours=2)
+        self.write_meta({
+            "pendingOrder": self.pending_order(
+                createdAt=iso(created_at),
+                expiresAt=iso(NOW - timedelta(hours=1)),
+            ),
+        })
+        self.api.on("GET", f"/subscription/{HASH}", response({"status": "unpaid"}))
+
+        first = self.settle(now=NOW)
+        outcome = self.only(first)
+        self.assertEqual(outcome["result"], "waiting")
+        self.assertEqual(
+            outcome["message"],
+            f"The invoice expired unpaid. Run Buy Subscription again for a new invoice. "
+            f"A payment made before it expired is still picked up until {iso(created_at + timedelta(hours=24))}.",
+        )
+        self.assertEqual(first["clearPayTasks"], [ORDER_TASK])
+        meta = self.read_meta()
+        self.assertIs(meta["pendingOrder"]["payTaskClearedOnExpiry"], True)
+        self.assertEqual(meta["pendingOrder"]["privateKey"], self.priv)
+
+        bridge.ack_pay_tasks([ORDER_TASK])
+        with patch("bridge.atomic_write_json", wraps=bridge.atomic_write_json) as writes:
+            second = self.settle(now=NOW + timedelta(minutes=1))
+        self.assertEqual(self.only(second)["result"], "waiting")
+        self.assertEqual(second["clearPayTasks"], [])
+        self.assertEqual(
+            [c for c in writes.call_args_list if c.args and c.args[0] == bridge.META_FILE_PATH],
+            [],
+            "subsequent ticks after ack_pay_tasks must not re-queue or rewrite metadata",
+        )
+
+        # A payment made right before invoice expiry that settles later (before 24h) is still claimed.
+        self.api.on("GET", f"/subscription/{HASH}", response({"status": "paid"}))
+        self.api.on("POST", "/subscription/claim", response(self.claim_payload()))
+        settled = self.settle(now=NOW + timedelta(hours=3))
+        self.assertEqual(self.only(settled)["result"], "provisioned")
+        self.assertNotIn("pendingOrder", self.read_meta())
+
 
 class TestRenewalSettlement(SettlementTestBase):
     def setUp(self):
@@ -798,7 +858,7 @@ class TestRenewalSettlement(SettlementTestBase):
         self.assertEqual(outcome["result"], "superseded")
         self.assertIn("earlier version", outcome["message"])
         self.assertNotIn("pendingRenewal", self.read_meta())
-        self.assertEqual(result["clearPayTasks"], [])
+        self.assertEqual(result["clearPayTasks"], ["tunnelsats-renewal:lnd:" + RENEW_HASH[:16]])
         self.assertNotIn(("POST", "/subscription/status"), [(m, p) for m, p, _ in self.api.requests])
 
     def test_unpaid_legacy_renewal_still_waits_and_expires(self):
@@ -819,6 +879,99 @@ class TestRenewalSettlement(SettlementTestBase):
     def pending_order_for_other_key(self):
         priv, pub = new_keypair()
         return self.pending_order(privateKey=priv, publicKey=pub)
+
+    def test_unpaid_renewal_clears_pay_task_on_invoice_expiry_and_retains_entry_until_24h(self):
+        created_at = NOW - timedelta(hours=2)
+        self.write_meta({
+            "pendingRenewal": self.pending_renewal(
+                createdAt=iso(created_at),
+                expiresAt=iso(NOW - timedelta(hours=1)),
+            ),
+        })
+        self.api.on("GET", f"/subscription/{RENEW_HASH}", response({"status": "pending"}))
+
+        first = self.settle(now=NOW)
+        outcome = self.only(first)
+        self.assertEqual(outcome["result"], "waiting")
+        self.assertEqual(
+            outcome["message"],
+            f"The invoice expired unpaid. Run Renew Subscription again for a new invoice. "
+            f"A payment made before it expired is still picked up until {iso(created_at + timedelta(hours=24))}.",
+        )
+        self.assertEqual(first["clearPayTasks"], [RENEW_TASK])
+        meta = self.read_meta()
+        self.assertIs(meta["pendingRenewal"]["payTaskClearedOnExpiry"], True)
+
+        bridge.ack_pay_tasks([RENEW_TASK])
+        with patch("bridge.atomic_write_json", wraps=bridge.atomic_write_json) as writes:
+            second = self.settle(now=NOW + timedelta(minutes=1))
+        self.assertEqual(self.only(second)["result"], "waiting")
+        self.assertEqual(second["clearPayTasks"], [])
+        self.assertEqual(
+            [c for c in writes.call_args_list if c.args and c.args[0] == bridge.META_FILE_PATH],
+            [],
+            "subsequent ticks after ack_pay_tasks must not re-queue or rewrite metadata",
+        )
+
+        # A payment made right before invoice expiry that settles later (before 24h) is still confirmed.
+        self.api.on("GET", f"/subscription/{RENEW_HASH}", response({"status": "paid"}))
+        self.api.on("POST", "/subscription/status", response({"expiry": "2026-11-01T00:00:00.000Z"}))
+        settled = self.settle(now=NOW + timedelta(hours=3))
+        self.assertEqual(self.only(settled)["result"], "renewed")
+        self.assertNotIn("pendingRenewal", self.read_meta())
+
+    def test_legacy_renewal_expiry_clears_the_task_on_its_fallback_node(self):
+        self.api.on("GET", f"/subscription/{RENEW_HASH}", response({"status": "unpaid"}))
+        for config, node in (({}, "lnd"), ({"target-node": "eclair"}, "eclair")):
+            with self.subTest(config=config):
+                with open(bridge.APP_CONFIG_PATH, "w") as f:
+                    json.dump(config, f)
+                pending = self.pending_renewal(
+                    createdAt=iso(NOW - timedelta(hours=2)),
+                    expiresAt=iso(NOW - timedelta(hours=1)),
+                )
+                pending.pop("targetNode")
+                self.write_meta({"pendingRenewal": pending})
+                task = f"tunnelsats-renewal:{node}:{RENEW_HASH[:16]}"
+                first = self.settle()
+                self.assertEqual(first["clearPayTasks"], [task])
+                self.assertIs(self.read_meta()["pendingRenewal"]["payTaskClearedOnExpiry"], True)
+                bridge.ack_pay_tasks([task])
+                self.assertEqual(self.settle()["clearPayTasks"], [])
+
+    def test_unpaid_nwc_renewal_expiry_respects_raise_pay_task_flag(self):
+        created_at = NOW - timedelta(hours=2)
+        # 1. raisePayTask: False (NWC-managed renewal that never raised a node Pay Invoice task)
+        self.write_meta({
+            "pendingRenewal": self.pending_renewal(
+                createdAt=iso(created_at),
+                expiresAt=iso(NOW - timedelta(hours=1)),
+                raisePayTask=False,
+            ),
+        })
+        self.api.on("GET", f"/subscription/{RENEW_HASH}", response({"status": "pending"}))
+
+        res_no_task = self.settle(now=NOW)
+        self.assertEqual(self.only(res_no_task)["result"], "waiting")
+        self.assertEqual(res_no_task["clearPayTasks"], [])
+        meta = self.read_meta()
+        self.assertIs(meta["pendingRenewal"]["payTaskClearedOnExpiry"], True)
+        self.assertIs(meta["pendingRenewal"]["raisePayTask"], False)
+
+        # 2. raisePayTask: True (fallback tripped before expiry; expiry clears raisePayTask and queues task clear)
+        self.write_meta({
+            "pendingRenewal": self.pending_renewal(
+                createdAt=iso(created_at),
+                expiresAt=iso(NOW - timedelta(hours=1)),
+                raisePayTask=True,
+            ),
+        })
+        res_fallback = self.settle(now=NOW)
+        self.assertEqual(self.only(res_fallback)["result"], "waiting")
+        self.assertEqual(res_fallback["clearPayTasks"], [RENEW_TASK])
+        meta2 = self.read_meta()
+        self.assertIs(meta2["pendingRenewal"]["payTaskClearedOnExpiry"], True)
+        self.assertIs(meta2["pendingRenewal"]["raisePayTask"], False)
 
 
 class TestPayTaskAcknowledgement(SettlementTestBase):

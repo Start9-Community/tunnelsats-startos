@@ -197,7 +197,6 @@ class TestDashboardReadModel(DashboardStateTestBase):
         self.assertEqual(model["plans"], bridge.PLAN_PRICES_USD)
         self.assertEqual(model["bandwidth"], {
             "usedGb": 42.5, "limitGb": 100, "resetsThisMonth": None, "maxResetsPerMonth": None,
-            "resetThresholdPct": 70,
         })
         self.assertEqual(model["pending"]["order"], {
             "targetNode": "cln", "serverId": "eu-de", "duration": "3m",
@@ -484,8 +483,18 @@ class LoopbackServerTestBase(DashboardStateTestBase):
         finally:
             conn.close()
 
+    def head(self, path, headers=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=5)
+        try:
+            conn.request("HEAD", path, headers=headers or {})
+            res = conn.getresponse()
+            return res.status, dict(res.getheaders()), res.read()
+        finally:
+            conn.close()
+
     def assert_security_headers(self, headers):
         self.assertEqual(headers.get("Content-Security-Policy"), bridge.DASHBOARD_CSP)
+        self.assertIn("frame-ancestors 'none'", headers.get("Content-Security-Policy", ""))
         self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff")
         self.assertEqual(headers.get("Referrer-Policy"), "no-referrer")
 
@@ -769,6 +778,58 @@ class TestDashboardEndpoint(LoopbackServerTestBase):
         })
         self.assertEqual(bridge._intents_summary(now=self.now)["reset"]["status"], "processing")
 
+    def test_a_failed_intent_is_reported_for_a_limited_time(self):
+        """A failure answers the click that caused it. The read model reports
+        it for INTENT_FAILURE_SHOWN_FOR after it failed (this box's clock, as
+        for INTENT_TTL) and then shows no request of that kind, so an old
+        failure does not greet every later visit."""
+        error = "Maximum 2 bandwidth resets per month reached"
+
+        def reset_failed_at(failed_at):
+            created = failed_at - timedelta(seconds=5)
+            self.write_json(bridge.INTENTS_FILE_PATH, {
+                "reset": {"id": "reset-1", "kind": "reset", "createdAt": self.iso(created)},
+            })
+            self.write_json(bridge.INTENT_RESULTS_FILE_PATH, {
+                "reset": {
+                    "id": "reset-1", "kind": "reset", "status": "failed",
+                    "createdAt": self.iso(created), "updatedAt": self.iso(failed_at),
+                    "error": error,
+                },
+            })
+            return bridge._intents_summary(now=self.now)["reset"]
+
+        shown_for = bridge.INTENT_FAILURE_SHOWN_FOR
+        recent = reset_failed_at(self.now - shown_for + timedelta(seconds=1))
+        self.assertEqual((recent["status"], recent["error"]), ("failed", error))
+        self.assertIsNone(reset_failed_at(self.now - shown_for))
+
+        # A request the runner never picked up fails at INTENT_TTL; it is
+        # dropped the same time after it was made.
+        os.remove(bridge.INTENT_RESULTS_FILE_PATH)
+        self.write_json(bridge.INTENTS_FILE_PATH, {
+            "buy": {"id": "buy-1", "kind": "buy", "serverId": "eu-de", "duration": "1m",
+                    "createdAt": self.iso(self.now - shown_for)},
+        })
+        self.assertIsNone(bridge._intents_summary(now=self.now)["buy"])
+
+        # Only failures age out: an old success is still reported.
+        long_ago = self.iso(self.now - shown_for - timedelta(hours=1))
+        self.write_json(bridge.INTENTS_FILE_PATH, {
+            "renew": {"id": "renew-1", "kind": "renew", "duration": "1m", "createdAt": long_ago},
+        })
+        self.write_json(bridge.INTENT_RESULTS_FILE_PATH, {
+            "renew": {"id": "renew-1", "kind": "renew", "status": "succeeded",
+                      "createdAt": long_ago, "updatedAt": long_ago},
+        })
+        self.assertEqual(bridge._intents_summary(now=self.now)["renew"]["status"], "succeeded")
+
+        # The next request of that kind is accepted as usual.
+        self.configure("lnd")
+        reset_failed_at(self.now - shown_for)
+        code, _ = bridge.submit_dashboard_intent({"kind": "reset"}, now=self.now)
+        self.assertEqual(code, 202)
+
 
 class TestStaticServingHardening(LoopbackServerTestBase):
     """Static files over the real handler: odd paths always get an answer."""
@@ -836,6 +897,57 @@ class TestStaticServingHardening(LoopbackServerTestBase):
                 self.assertEqual(headers.get("Content-Type"), expected_type)
                 self.assert_security_headers(headers)
                 self.assertGreater(len(body), 0)
+
+    def test_head_requests_and_cache_validators(self):
+        self.configure("lnd")
+        for path in ("/", "/style.css", "/script.js", "/favicon.svg"):
+            with self.subTest(path=path):
+                get_status, get_headers, get_body = self.get(path)
+                self.assertEqual(get_status, 200)
+                self.assertGreater(len(get_body), 0)
+                etag = get_headers.get("ETag")
+                last_mod = get_headers.get("Last-Modified")
+                self.assertTrue(etag and etag.startswith('"') and etag.endswith('"'))
+                self.assertTrue(last_mod)
+                self.assertEqual(get_headers.get("Content-Length"), str(len(get_body)))
+
+                # HEAD returns identical validator and length headers with an empty body
+                head_status, head_headers, head_body = self.head(path)
+                self.assertEqual(head_status, 200)
+                self.assertEqual(head_body, b"")
+                self.assert_security_headers(head_headers)
+                self.assertEqual(head_headers.get("ETag"), etag)
+                self.assertEqual(head_headers.get("Last-Modified"), last_mod)
+                self.assertEqual(head_headers.get("Content-Length"), str(len(get_body)))
+
+                # If-None-Match matching (exact, weak W/, and comma-separated list) -> 304
+                for inm in (etag, f"W/{etag}", f'"other", {etag}'):
+                    status_304, headers_304, body_304 = self.get(path, {"If-None-Match": inm})
+                    self.assertEqual(status_304, 304)
+                    self.assertEqual(body_304, b"")
+                    self.assert_security_headers(headers_304)
+                    self.assertEqual(headers_304.get("ETag"), etag)
+
+                # Non-matching If-None-Match -> 200 (even if If-Modified-Since matches)
+                status_200, _, body_200 = self.get(
+                    path,
+                    {"If-None-Match": '"stale"', "If-Modified-Since": last_mod},
+                )
+                self.assertEqual(status_200, 200)
+                self.assertEqual(len(body_200), len(get_body))
+
+                # If-Modified-Since matching (when If-None-Match is absent) -> 304
+                status_ims, headers_ims, body_ims = self.get(path, {"If-Modified-Since": last_mod})
+                self.assertEqual(status_ims, 304)
+                self.assertEqual(body_ims, b"")
+                self.assertEqual(headers_ims.get("Last-Modified"), last_mod)
+
+        # HEAD on /api/dashboard returns 200 with no-store and empty body
+        dash_status, dash_headers, dash_body = self.head("/api/dashboard")
+        self.assertEqual(dash_status, 200)
+        self.assertEqual(dash_body, b"")
+        self.assertEqual(dash_headers.get("Cache-Control"), "no-store")
+        self.assert_security_headers(dash_headers)
 
 
 if __name__ == "__main__":

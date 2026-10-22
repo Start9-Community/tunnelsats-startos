@@ -159,9 +159,7 @@ class TestDashboardQuota(DashboardStateTestBase):
         self.state()
         self.assertEqual(bridge.get_dashboard()["bandwidth"], {
             "usedGb": 71.5, "limitGb": 150, "resetsThisMonth": 1, "maxResetsPerMonth": 3,
-            "resetThresholdPct": bridge.RESET_THRESHOLD_DEFAULT_PCT,
         })
-        self.assertEqual(bridge.RESET_THRESHOLD_DEFAULT_PCT, 70)
 
     def test_previous_key_quota_is_not_shown(self):
         self.state()
@@ -171,7 +169,7 @@ class TestDashboardQuota(DashboardStateTestBase):
         self.write_json(bridge.META_FILE_PATH, meta)
         self.assertEqual(bridge.get_dashboard()["bandwidth"], {
             "usedGb": None, "limitGb": bridge.BANDWIDTH_LIMIT_GB, "resetsThisMonth": None,
-            "maxResetsPerMonth": None, "resetThresholdPct": 70,
+            "maxResetsPerMonth": None,
         })
 
     def test_usage_and_resets_from_a_previous_month_are_not_shown(self):

@@ -443,5 +443,56 @@ class TestHTTPHandler(unittest.TestCase):
         handler_ok.send_response.assert_called_once_with(202)
         mock_submit.assert_called_once_with({"kind": "buy", "serverId": "eu-de", "duration": "3m"})
 
+    @patch('bridge.get_dashboard', return_value={"status": "running"})
+    @patch('bridge.get_default_gateway', return_value="172.18.0.1")
+    def test_client_disconnect_errors_are_suppressed_without_stderr_tracebacks(self, _mock_gw, _mock_dash):
+        from contextlib import redirect_stderr
+        import io
+
+        for exc_cls in (BrokenPipeError, ConnectionResetError):
+            with self.subTest(exc=exc_cls.__name__):
+                stderr_buf = io.StringIO()
+                with redirect_stderr(stderr_buf):
+                    # 1. _send_json suppresses disconnect on wfile.write and marks close_connection
+                    handler_json = bridge.DashboardHTTPRequestHandler.__new__(bridge.DashboardHTTPRequestHandler)
+                    handler_json.close_connection = False
+                    handler_json.send_response = MagicMock()
+                    handler_json.send_header = MagicMock()
+                    handler_json.end_headers = MagicMock()
+                    handler_json.wfile = MagicMock()
+                    handler_json.wfile.write.side_effect = exc_cls("client disconnected")
+                    bridge.DashboardHTTPRequestHandler._send_json(handler_json, 200, {"ok": True})
+                    self.assertTrue(handler_json.close_connection)
+
+                    # 2. handle_one_request suppresses disconnect when do_GET writes to broken wfile
+                    handler_req = bridge.DashboardHTTPRequestHandler.__new__(bridge.DashboardHTTPRequestHandler)
+                    handler_req.client_address = ("127.0.0.1", 12345)
+                    handler_req.request_version = "HTTP/1.1"
+                    handler_req.close_connection = False
+                    handler_req.rfile = BytesIO(b"GET /api/dashboard HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    handler_req.wfile = MagicMock()
+                    handler_req.wfile.write.side_effect = exc_cls("client disconnected during GET")
+                    bridge.DashboardHTTPRequestHandler.handle_one_request(handler_req)
+                    self.assertTrue(handler_req.close_connection)
+
+                    # 3. DashboardHTTPServer.handle_error suppresses disconnect tracebacks
+                    server = bridge.DashboardHTTPServer.__new__(bridge.DashboardHTTPServer)
+                    try:
+                        raise exc_cls("socket reset")
+                    except exc_cls:
+                        bridge.DashboardHTTPServer.handle_error(server, MagicMock(), ("127.0.0.1", 12345))
+
+                self.assertEqual(stderr_buf.getvalue(), "")
+
+        # Non-disconnect exceptions still delegate to super().handle_error
+        stderr_other = io.StringIO()
+        server = bridge.DashboardHTTPServer.__new__(bridge.DashboardHTTPServer)
+        with redirect_stderr(stderr_other):
+            try:
+                raise RuntimeError("unexpected server error")
+            except RuntimeError:
+                bridge.DashboardHTTPServer.handle_error(server, MagicMock(), ("127.0.0.1", 12345))
+        self.assertIn("RuntimeError: unexpected server error", stderr_other.getvalue())
+
 if __name__ == '__main__':
     unittest.main()

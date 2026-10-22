@@ -49,6 +49,7 @@
             class="nav-pill is-active"
             data-tab-target="overview"
             aria-pressed="true"
+            aria-current="page"
           >
             <svg
               class="nav-pill-icon"
@@ -800,9 +801,9 @@
                 type="button"
                 id="btn-intent-reset"
                 class="btn-intent btn-intent-secondary"
-                data-submit-intent="reset"
+                data-open-dialog="reset-confirm-modal"
               >
-                Reset bandwidth · $1.00 for +100 GB
+                Reset usage to 0 · $1.00
               </button>
             </div>
           </section>
@@ -823,8 +824,8 @@
           <span class="badge-pill">Services → TunnelSats → Actions</span>
         </div>
         <p class="muted">
-          Switch VPN server regions by purchasing a new subscription, or run
-          advanced configuration and backup actions in StartOS.
+          Buy a subscription in another region, or run configuration and backup
+          actions in StartOS.
         </p>
 
         <!-- Secondary Server Switch / New Subscription Composer -->
@@ -1347,7 +1348,7 @@
           <ul class="bandwidth-facts">
             <li>
               <strong>Monthly allowance:</strong> 100 GB (combined upload +
-              download), reset on the 1st of each calendar month (UTC).
+              download). Usage resets for free on the 1st of each month.
             </li>
             <li>
               <strong>Paid reset:</strong> Run
@@ -1381,6 +1382,72 @@
               <path d="M7 17 17 7M8 7h9v9" />
             </svg>
           </a>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- ── Bandwidth Reset Confirmation ── -->
+    <dialog
+      id="reset-confirm-modal"
+      class="app-modal"
+      closedby="any"
+      aria-labelledby="reset-confirm-title"
+      aria-describedby="reset-confirm-facts"
+    >
+      <div class="modal-dialog-inner confirm-dialog-inner">
+        <div class="modal-header">
+          <h2 id="reset-confirm-title">Reset bandwidth usage to 0?</h2>
+          <button
+            type="button"
+            class="modal-close-btn"
+            data-close-dialog
+            aria-label="Close"
+          >
+            <svg
+              class="modal-close-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <ul id="reset-confirm-facts" class="bandwidth-facts">
+            <li>
+              Usage for this month is not known yet, so a reset now may give
+              back little.
+            </li>
+          </ul>
+          <p class="muted">
+            TunnelSats creates the invoice, and a Pay Invoice task is raised on
+            your Lightning node.
+          </p>
+          <div class="modal-actions">
+            <button
+              type="button"
+              id="btn-cancel-reset"
+              class="btn-intent btn-intent-secondary"
+              data-close-dialog
+              autofocus
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              id="btn-confirm-reset"
+              class="btn-intent"
+              data-submit-intent="reset"
+            >
+              Reset for $1.00
+            </button>
+          </div>
         </div>
       </div>
     </dialog>
@@ -1478,11 +1545,10 @@
                 SOCKS5 routing).
               </p>
               <p class="faq-note">
-                If your wallet budget or balance is insufficient or NWC fails 3
-                times, TunnelSats automatically falls back to raising a
-                <strong>Pay Invoice</strong> task on your Lightning node and a
-                <strong>Connect Wallet</strong> action task so you can still
-                renew manually. Without NWC, TunnelSats posts reminders at
+                If the wallet balance or budget is too low, or NWC fails 3
+                times, TunnelSats raises a <strong>Pay Invoice</strong> task on
+                your node and a <strong>Connect Wallet</strong> task so you can
+                renew manually. Without NWC, reminders are posted at
                 <strong>7 days</strong> and <strong>3 days</strong> before
                 expiry.
               </p>
@@ -1500,10 +1566,9 @@
                   >Services → TunnelSats → Actions → Configure
                   TunnelSats</strong
                 >
-                and select the new target node. TunnelSats asks the previous
-                node to turn off its tunnel first and only raises the task on
-                the new node once the previous one is off, so two nodes never
-                share one WireGuard peer.
+                and select the new target node. TunnelSats waits for the
+                previous node to turn off its tunnel before raising the task on
+                the new node, so two nodes never share one WireGuard peer.
               </p>
             </div>
           </details>

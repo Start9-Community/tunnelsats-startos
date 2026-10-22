@@ -18,6 +18,8 @@ import {
   type ResetOps,
 } from '../startos/bandwidthReset'
 import { NothingToResumeError, payTaskReplayId } from '../startos/settlement'
+import defaultDict from '../startos/i18n/dictionaries/default'
+import translations from '../startos/i18n/dictionaries/translations'
 
 const HASH = 'b'.repeat(64)
 const INVOICE =
@@ -290,6 +292,39 @@ test('resetAvailability offers the action when a key is configured', () => {
   assert.deepEqual(resetAvailability(KEY), {
     available: true,
   })
+})
+
+/** Every locale's text for a default.ts key: English first. */
+function localized(key: string): string[] {
+  const index = (defaultDict as Record<string, number>)[key]
+  assert.equal(typeof index, 'number', `${key} is a dictionary key`)
+  return [
+    key,
+    ...Object.values(translations).map(
+      (texts) => (texts as Record<number, string>)[index],
+    ),
+  ]
+}
+
+test('no bandwidth reset string states a usage threshold, in any locale', () => {
+  const resetKeys = Object.keys(defaultDict).filter((key) => /reset/i.test(key))
+  assert.ok(resetKeys.length >= 10)
+  for (const key of resetKeys) {
+    for (const text of localized(key)) {
+      assert.doesNotMatch(text, /\d\s?%/, text)
+    }
+  }
+})
+
+test('the Reset Bandwidth description says the counter goes back to 0', () => {
+  const texts = localized(
+    "Resets this month's bandwidth usage counter to 0 for a small fee (up to 2 resets per month). The invoice is paid from your Lightning node.",
+  )
+  assert.equal(texts.length, 5)
+  for (const text of texts) {
+    assert.match(text, /(?:^|\s)0(?:\s|$)/, text)
+    assert.match(text, /\s2\s/, text)
+  }
 })
 
 // --- runBandwidthReset ------------------------------------------------------

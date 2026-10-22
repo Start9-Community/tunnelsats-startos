@@ -81,10 +81,13 @@ export function bridgeEnv(
  * invoice is valid. A wallet that never answers costs about 50 s per relay
  * (get_budget, get_balance and lookup_invoice 10 s each, pay_invoice 20 s), up
  * to twice that while a relay or the Tor circuit is slow to open, plus the
- * TunnelSats API calls around it. That covers about six relays, or three slow
- * ones: bridge.py tries the relays of the URI one after another and does not
- * cap them, so a silent wallet behind more relays is still killed midway on
- * every run.
+ * TunnelSats API calls around it. `bridge.py` caps each NIP-47 command to
+ * `NWC_MAX_RELAYS = 3` relays and enforces a monotonic renewal deadline of
+ * `NWC_AUTO_RENEW_DEADLINE_SECONDS = 180` inside `maybe_nwc_auto_renew()`, so
+ * `_record_nwc_failure` always records the attempt and schedules backoff or
+ * raises the Pay Invoice fallback before this 300 s SIGKILL. If
+ * `HEALTH_SUBSCRIPTION_TIMEOUT_MS` changes, `NWC_AUTO_RENEW_DEADLINE_SECONDS`
+ * in `bridge.py` must be updated to stay below it.
  */
 export const HEALTH_SUBSCRIPTION_TIMEOUT_MS = 300_000
 

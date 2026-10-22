@@ -14,6 +14,12 @@ export const pendingOrderShape = z.looseObject({
   amountSats: z.number().optional().catch(undefined),
   expiresAt: z.string().optional().catch(undefined),
   paymentReceivedFor: z.string().optional().catch(undefined),
+  /**
+   * Set by bridge.py once an unpaid invoice expires and its Pay Invoice task
+   * has been queued in payTasksToClear, while the pending entry itself stays
+   * until 24h after creation to catch any pre-expiry payment.
+   */
+  payTaskClearedOnExpiry: z.boolean().optional().catch(undefined),
   /** Set by the settlement tick (bridge.py) after a failed attempt. */
   lastError: z.string().optional().catch(undefined),
   nextAttemptAt: z.string().optional().catch(undefined),
@@ -90,6 +96,7 @@ export const metaShape = z.looseObject({
       amountSats: z.number().optional().catch(undefined),
       expiresAt: z.string().optional().catch(undefined),
       paymentReceivedFor: z.string().optional().catch(undefined),
+      payTaskClearedOnExpiry: z.boolean().optional().catch(undefined),
       /** The key the renewal was paid for; absent on older renewals. */
       publicKey: z.string().optional().catch(undefined),
       /** The node its pay task was raised on; absent on older renewals. */

@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FileHelper } from '@start9labs/start-sdk'
-import { bolt11AmountSats } from '../startos/apiClient'
+import { ApiHttpError, bolt11AmountSats } from '../startos/apiClient'
 import {
   INVOICE_TTL_MS,
   PendingPaymentConflictError,
@@ -442,7 +442,7 @@ test('a dashboard renewal never replaces the previous key renewal while payable 
   assert.equal(state.pending?.publicKey, pub)
 })
 
-test('startBandwidthReset delegates to runBandwidthReset and maps 429 errors', async () => {
+test('startBandwidthReset delegates to runBandwidthReset and raises the pay task', async () => {
   const kp = generateWireguardKeypair()
   const conf = `[Interface]\nPrivateKey = ${kp.privateKey}\nAddress = 10.9.0.2/32\n# Server: de2.tunnelsats.com\n# Port Forwarding: 24556\n\n[Peer]\nPublicKey = ${kp.publicKey}\nEndpoint = de2.tunnelsats.com:51820\nAllowedIPs = 0.0.0.0/0\n`
   const raised: unknown[] = []
@@ -473,6 +473,63 @@ test('startBandwidthReset delegates to runBandwidthReset and maps 429 errors', a
   assert.equal(res.targetNode, 'eclair')
   assert.equal(res.outcome.kind, 'requested')
   assert.equal(raised.length, 1)
+})
+
+test('startBandwidthReset explains 400 and 429 answers and raises no task', async () => {
+  const kp = generateWireguardKeypair()
+  const conf = `[Interface]\nPrivateKey = ${kp.privateKey}\nAddress = 10.9.0.2/32\n# Server: de2.tunnelsats.com\n# Port Forwarding: 24556\n\n[Peer]\nPublicKey = ${kp.publicKey}\nEndpoint = de2.tunnelsats.com:51820\nAllowedIPs = 0.0.0.0/0\n`
+  const url =
+    'https://tunnelsats.com/api/public/v1/subscription/bandwidth-reset'
+  const declined = 'TunnelSats declined the bandwidth reset request for now: '
+  // What TunnelSats answers; every 429 carries ERR_RATE_LIMIT_EXCEEDED, so
+  // only the message tells the monthly limit apart.
+  const answers: [number, string, string][] = [
+    [
+      400,
+      'Subscription has expired or has an invalid expiry date. Please renew instead.',
+      'Subscription has expired or has an invalid expiry date. Please renew instead.',
+    ],
+    [
+      429,
+      'Maximum 2 bandwidth resets per month reached',
+      'The monthly bandwidth reset limit is reached (Maximum 2 bandwidth resets per month reached). An unpaid reset invoice keeps its reset reserved until it expires.',
+    ],
+    [429, 'Rate limit exceeded', `${declined}Rate limit exceeded`],
+    [
+      429,
+      'Bandwidth reset invoices are unavailable near the end of the month. Please retry next month.',
+      `${declined}Bandwidth reset invoices are unavailable near the end of the month. Please retry next month.`,
+    ],
+  ]
+  for (const [status, apiMessage, expected] of answers) {
+    const raised: unknown[] = []
+    const recorded: unknown[] = []
+    await assert.rejects(
+      startBandwidthReset({} as never, {
+        now: () => NOW,
+        readConfig: async () => ({
+          enabled: true,
+          'target-node': 'lnd',
+          'tunnelsats-conf': conf,
+        }),
+        readServerMeta: async () => null,
+        readCurrent: async () => null,
+        fetchStatus: async () => 'unpaid',
+        requestReset: async () => {
+          throw new ApiHttpError(status, url, apiMessage)
+        },
+        record: async (order) => {
+          recorded.push(order)
+        },
+        raiseTask: async (task) => {
+          raised.push(task)
+        },
+      }),
+      (e: unknown) => e instanceof Error && e.message === expected,
+      `${status} ${apiMessage}`,
+    )
+    assert.deepEqual([raised.length, recorded.length], [0, 0], apiMessage)
+  }
 })
 
 test('runDashboardIntents processes renew, reset, then buy in order and is idempotent', async () => {

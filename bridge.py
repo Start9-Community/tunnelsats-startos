@@ -358,8 +358,7 @@ def get_wg_pubkey():
             config_content = f.read()
         private_key_match = re.search(r'^\s*(?!#|;)\s*PrivateKey\s*=\s*(.+)', config_content, re.IGNORECASE | re.MULTILINE)
         if private_key_match:
-            proc = subprocess.run(["wg", "pubkey"], input=private_key_match.group(1).strip().encode(), capture_output=True)
-            pubkey = proc.stdout.decode().strip() if proc.returncode == 0 else ""
+            pubkey = derive_wg_pubkey(private_key_match.group(1).strip())
             if pubkey:
                 # Read after the stat: a save in between only makes the next
                 # call re-derive, never caches an old key under a new stamp.
@@ -988,23 +987,70 @@ def _payment_state(payment_hash):
     raise SettlementError(f"TunnelSats API returned an unknown payment status: {str(state)[:40]!r}")
 
 
+def _x25519_base_point(scalar_bytes):
+    """RFC 7748 Section 5 X25519(k, 9) in pure Python (32-byte little-endian)."""
+    p = (1 << 255) - 19
+    k_list = bytearray(scalar_bytes)
+    k_list[0] &= 248
+    k_list[31] &= 127
+    k_list[31] |= 64
+    k = int.from_bytes(k_list, "little")
+    x_1 = 9
+    x_2, z_2 = 1, 0
+    x_3, z_3 = x_1, 1
+    swap = 0
+    for t in range(254, -1, -1):
+        k_t = (k >> t) & 1
+        swap ^= k_t
+        if swap:
+            x_2, x_3 = x_3, x_2
+            z_2, z_3 = z_3, z_2
+        swap = k_t
+        a = (x_2 + z_2) % p
+        aa = (a * a) % p
+        b = (x_2 - z_2) % p
+        bb = (b * b) % p
+        e = (aa - bb) % p
+        c = (x_3 + z_3) % p
+        d = (x_3 - z_3) % p
+        da = (d * a) % p
+        cb = (c * b) % p
+        x_3 = pow(da + cb, 2, p)
+        z_3 = (x_1 * pow(da - cb, 2, p)) % p
+        x_2 = (aa * bb) % p
+        z_2 = (e * (aa + 121665 * e)) % p
+    if swap:
+        x_2, x_3 = x_3, x_2
+        z_2, z_3 = z_3, z_2
+    res = (x_2 * pow(z_2, p - 2, p)) % p
+    return res.to_bytes(32, "little")
+
+
 def derive_wg_pubkey(private_key):
     """Public key for a WireGuard private key, or None."""
+    if not isinstance(private_key, str):
+        return None
     try:
         proc = subprocess.run(["wg", "pubkey"], input=private_key.encode(), capture_output=True)
         pub = proc.stdout.decode().strip() if proc.returncode == 0 else ""
-        if pub:
-            return pub
+        return pub or None
     except Exception:
         pass
     try:
         import base64
-        from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
-        from cryptography.hazmat.primitives import serialization
-        key = X25519PrivateKey.from_private_bytes(base64.b64decode(private_key, validate=True))
-        raw = key.public_key().public_bytes(encoding=serialization.Encoding.Raw,
-                                            format=serialization.PublicFormat.Raw)
-        return base64.b64encode(raw).decode()
+        stripped = private_key.strip()
+        raw_priv = base64.b64decode(stripped, validate=True)
+        if len(raw_priv) != 32 or base64.b64encode(raw_priv).decode() != stripped:
+            return None
+        try:
+            from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+            from cryptography.hazmat.primitives import serialization
+            key = X25519PrivateKey.from_private_bytes(raw_priv)
+            raw_pub = key.public_key().public_bytes(encoding=serialization.Encoding.Raw,
+                                                    format=serialization.PublicFormat.Raw)
+        except Exception:
+            raw_pub = _x25519_base_point(raw_priv)
+        return base64.b64encode(raw_pub).decode()
     except Exception:
         return None
 
@@ -1093,21 +1139,25 @@ def assemble_claimed_config(claim, pending):
     return "\n".join(lines) + "\n"
 
 
+def _queue_pay_task_clear(meta, kind, pending):
+    node = pending.get("targetNode") or (get_target_node() if kind == "renewal" else None)
+    if node not in TARGET_NODES:
+        return
+    tasks = [t for t in meta.get("payTasksToClear") or [] if isinstance(t, str)]
+    replay_id = pay_task_replay_id(kind, node, pending["paymentHash"])
+    if replay_id not in tasks:
+        tasks.append(replay_id)
+    meta["payTasksToClear"] = tasks
+
+
 def _clear_pending(meta, key, payment_hash, confirmed_expiry=None):
     """Drops meta[key] if it still belongs to payment_hash and queues its pay
     task for clearing. Caller holds meta_lock and writes meta afterwards."""
     pending = meta.get(key)
     if not isinstance(pending, dict) or pending.get("paymentHash") != payment_hash:
         return False
-    kind = KIND_BY_KEY[key]
-    node = pending.get("targetNode")
+    _queue_pay_task_clear(meta, KIND_BY_KEY[key], pending)
     meta.pop(key, None)
-    if node in TARGET_NODES:
-        tasks = [t for t in meta.get("payTasksToClear") or [] if isinstance(t, str)]
-        replay_id = pay_task_replay_id(kind, node, payment_hash)
-        if replay_id not in tasks:
-            tasks.append(replay_id)
-        meta["payTasksToClear"] = tasks
     if key == "pendingRenewal" and confirmed_expiry is not None:
         nwc_state = dict(meta.get("nwcAutoRenewState")) if isinstance(meta.get("nwcAutoRenewState"), dict) else {}
         if pending.get("paidViaNwc") is True or nwc_state.get("lastPaidHash") == payment_hash:
@@ -1172,14 +1222,45 @@ def _outcome(kind, result, message, payment_hash):
 
 
 def _unpaid(kind, key, pending, state, now):
+    payment_hash = pending["paymentHash"]
     created = _parse_iso(pending.get("createdAt"))
     if created is not None and now - created >= PENDING_TTL:
-        _finish_pending(key, pending["paymentHash"])
+        _finish_pending(key, payment_hash)
         return _outcome(kind, "expired", "The invoice was not paid within 24 hours; the pending payment was cleared.",
-                        pending["paymentHash"])
+                        payment_hash)
     if state == "unknown":
         raise SettlementError("The TunnelSats API has no record of this payment")
-    return _outcome(kind, "waiting", "Waiting for the invoice to be paid.", pending["paymentHash"])
+    expires = _parse_iso(pending.get("expiresAt")) or (created + INVOICE_DEFAULT_TTL if created is not None else None)
+    if expires is not None and now >= expires:
+        if pending.get("payTaskClearedOnExpiry") is not True:
+            with meta_lock():
+                meta = read_meta()
+                current = meta.get(key)
+                if (
+                    isinstance(current, dict)
+                    and current.get("paymentHash") == payment_hash
+                    and current.get("paymentReceivedFor") != payment_hash
+                    and current.get("payTaskClearedOnExpiry") is not True
+                ):
+                    had_pay_task = current.get("raisePayTask") is not False
+                    current["payTaskClearedOnExpiry"] = True
+                    pending["payTaskClearedOnExpiry"] = True
+                    if "raisePayTask" in current:
+                        current["raisePayTask"] = False
+                        pending["raisePayTask"] = False
+                    if had_pay_task:
+                        _queue_pay_task_clear(meta, kind, current)
+                    atomic_write_json(META_FILE_PATH, meta)
+        action_name = "Buy Subscription" if kind == "order" else "Renew Subscription"
+        retention_until = _iso(created + PENDING_TTL) if created is not None else "24 hours after creation"
+        return _outcome(
+            kind,
+            "waiting",
+            f"The invoice expired unpaid. Run {action_name} again for a new invoice. "
+            f"A payment made before it expired is still picked up until {retention_until}.",
+            payment_hash,
+        )
+    return _outcome(kind, "waiting", "Waiting for the invoice to be paid.", payment_hash)
 
 
 PLAN_KEYS = ("pendingOrder", "pendingRenewal")
@@ -1374,7 +1455,14 @@ def _settle_one(kind, key, pending, now):
     payment_hash = pending["paymentHash"]
     retry_at = _parse_iso(pending.get("nextAttemptAt"))
     if retry_at is not None and retry_at > now:
-        return _outcome(kind, "failed", str(pending.get("lastError") or "Retrying shortly."), payment_hash)
+        last_err = str(pending.get("lastError") or "").strip()
+        detail = f" ({last_err})" if last_err else ""
+        return _outcome(
+            kind,
+            "waiting",
+            f"Upstream check paused after a temporary error{detail}; retrying shortly.",
+            payment_hash,
+        )
     try:
         outcome = _SETTLERS[kind](pending, now)
     except Exception as e:
@@ -1542,7 +1630,14 @@ def _settle_previous_orders(now, newer_order_provisioned=False):
         p_hash = prev["paymentHash"]
         retry_at = _parse_iso(prev.get("nextAttemptAt"))
         if retry_at is not None and retry_at > now:
-            outcomes.append(_outcome("order", "failed", str(prev.get("lastError") or "Retrying shortly."), p_hash))
+            last_err = str(prev.get("lastError") or "").strip()
+            detail = f" ({last_err})" if last_err else ""
+            outcomes.append(_outcome(
+                "order",
+                "waiting",
+                f"Upstream check paused after a temporary error{detail}; retrying shortly.",
+                p_hash,
+            ))
             continue
         try:
             state = _payment_state(p_hash)
@@ -1732,7 +1827,8 @@ DASHBOARD_CSP = (
     "font-src 'self'; "
     "object-src 'none'; "
     "base-uri 'none'; "
-    "form-action 'none'"
+    "form-action 'none'; "
+    "frame-ancestors 'none'"
 )
 
 # Content types of the files under web/; anything else is served as
@@ -1752,6 +1848,10 @@ STATIC_CONTENT_TYPES = {
 # os.path.realpath raise instead of answering.
 STATIC_PATH_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 DASHBOARD_MAX_CONCURRENT_REQUESTS = 32
+_CSRF_STARTED_AT = int(time.time())
+
+import email.utils
+import hashlib
 
 
 class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
@@ -1854,6 +1954,41 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self):
+        self._handle_get_or_head(send_body=True)
+
+    def do_HEAD(self):
+        self._handle_get_or_head(send_body=False)
+
+    def _send_json_head(self, status_code, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+
+    def _is_not_modified(self, etag, mtime_sec):
+        inm = self.headers.get("If-None-Match")
+        if inm is not None:
+            tokens = [t.strip() for t in inm.split(",") if t.strip()]
+            return "*" in tokens or any(
+                (t[2:].strip() if t.startswith("W/") else t) == etag
+                for t in tokens
+            )
+        if mtime_sec is None:
+            return False
+        ims = self.headers.get("If-Modified-Since")
+        if not ims:
+            return False
+        try:
+            ims_dt = email.utils.parsedate_to_datetime(ims)
+            if ims_dt.tzinfo is None:
+                ims_dt = ims_dt.replace(tzinfo=timezone.utc)
+            return int(mtime_sec) <= int(ims_dt.timestamp())
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    def _handle_get_or_head(self, send_body=True):
         if not self.is_trusted_request():
             return
 
@@ -1867,13 +2002,22 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             try:
                 result = get_servers()
             except DiscoveryUnavailable as e:
-                self._send_json(503, {"error": str(e)})
+                if send_body:
+                    self._send_json(503, {"error": str(e)})
+                else:
+                    self._send_json_head(503, {"error": str(e)})
                 return
             except Exception as e:
                 print(f"Server discovery failed: {e}", file=sys.stderr)
-                self._send_json(500, {"error": "Server list unavailable"})
+                if send_body:
+                    self._send_json(500, {"error": "Server list unavailable"})
+                else:
+                    self._send_json_head(500, {"error": "Server list unavailable"})
                 return
-            self._send_json(200, result)
+            if send_body:
+                self._send_json(200, result)
+            else:
+                self._send_json_head(200, result)
             return
 
         if path_only == "/api/dashboard":
@@ -1887,8 +2031,10 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            if send_body:
+                self.wfile.write(body)
             return
 
         web_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "web"))
@@ -1907,41 +2053,58 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             return
 
         if os.path.exists(safe_path) and os.path.isfile(safe_path):
-            if safe_path.endswith(".html"):
-                try:
+            try:
+                st = os.stat(safe_path)
+                if safe_path.endswith(".html"):
                     with open(safe_path, "r", encoding="utf-8") as f:
                         html_content = f.read()
                     csrf_tag = f'<meta name="csrf-token" content="{get_csrf_token()}">\n</head>'
                     html_content = html_content.replace("</head>", csrf_tag, 1)
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/html; charset=utf-8")
-                    self.end_headers()
-                    self.wfile.write(html_content.encode("utf-8"))
-                    return
-                except Exception:
-                    pass
-
-            try:
-                with open(safe_path, "rb") as f:
-                    content = f.read()
+                    content = html_content.encode("utf-8")
+                    content_type = "text/html; charset=utf-8"
+                    mtime_sec = max(int(st.st_mtime), _CSRF_STARTED_AT)
+                else:
+                    with open(safe_path, "rb") as f:
+                        content = f.read()
+                    extension = os.path.splitext(safe_path)[1].lower()
+                    content_type = STATIC_CONTENT_TYPES.get(extension, "application/octet-stream")
+                    mtime_sec = int(st.st_mtime)
             except OSError:
                 self.send_error(404, "File not found")
                 return
-            extension = os.path.splitext(safe_path)[1].lower()
+
+            etag = f'"{hashlib.sha256(content).hexdigest()[:32]}"'
+            last_modified = email.utils.formatdate(mtime_sec, usegmt=True)
+            if self._is_not_modified(etag, mtime_sec):
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.send_header("Last-Modified", last_modified)
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                return
+
             self.send_response(200)
-            self.send_header("Content-Type", STATIC_CONTENT_TYPES.get(extension, "application/octet-stream"))
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("ETag", etag)
+            self.send_header("Last-Modified", last_modified)
             self.end_headers()
-            self.wfile.write(content)
+            if send_body:
+                self.wfile.write(content)
         else:
             self.send_error(404, "File not found")
 
     def _send_json(self, status_code, payload):
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def _read_json_body(self, max_bytes):
         """The request's JSON body, or None after sending a 400."""
@@ -1990,6 +2153,12 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             return
         self.send_error(404, "Not found")
 
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+
 
 class DashboardHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
@@ -2013,6 +2182,11 @@ class DashboardHTTPServer(ThreadingHTTPServer):
             super().process_request_thread(request, client_address)
         finally:
             self._conn_sem.release()
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
 
 
 def web_server_thread():
@@ -2316,9 +2490,6 @@ def get_status():
 DASHBOARD_TEXT_LIMIT = 300
 # Shown until the API confirmed the limit for the current key.
 BANDWIDTH_LIMIT_GB = 100
-# The server's default usage threshold for a paid bandwidth reset. The server
-# may configure another one and decides; the dashboard only uses it as a hint.
-RESET_THRESHOLD_DEFAULT_PCT = 70
 BASE_PRICE_USD = 3.0
 PLAN_DISCOUNTS_PCT = ((1, 0), (3, 5), (6, 10), (12, 20))
 PLAN_PRICES_USD = [
@@ -2335,6 +2506,14 @@ INVOICE_DEFAULT_TTL = timedelta(hours=1)
 INTENT_KINDS = ("buy", "renew", "reset")
 INTENT_DURATIONS = ("1m", "3m", "6m", "12m")
 INTENT_TTL = timedelta(seconds=120)
+# How long the read model reports a failed request, counted from the
+# updatedAt the runner recorded with the failure, or from createdAt for a
+# request the runner never picked up (that one reads as failed from
+# INTENT_TTL on, so it is shown for INTENT_FAILURE_SHOWN_FOR - INTENT_TTL).
+# A failure answers a click made seconds before; 15 minutes leaves time to
+# come back to the page or reload it, and later visits start clean instead
+# of showing it forever.
+INTENT_FAILURE_SHOWN_FOR = timedelta(minutes=15)
 INTENT_RATE_LIMIT_WINDOW = timedelta(seconds=30)
 INTENT_HOURLY_WINDOW = timedelta(hours=1)
 INTENT_HOURLY_CAP = 5
@@ -2597,6 +2776,11 @@ def _intent_slot_summary(kind, req_slot, res_slot, now):
     if status == "pending" and now - created_dt >= INTENT_TTL:
         status = "failed"
         error = "The dashboard request timed out before StartOS processed it. Please try again."
+    # A failure answers the click that caused it. Past
+    # INTENT_FAILURE_SHOWN_FOR it is old news: the slot reads as empty, so
+    # the dashboard stops showing it on every visit.
+    if status == "failed" and now - _parse_iso(updated_at) >= INTENT_FAILURE_SHOWN_FOR:
+        return None
 
     summary = {
         "id": intent_id,
@@ -3008,9 +3192,9 @@ def confirmed_bandwidth_limit(meta, public_key):
 
 
 def _bandwidth_summary(meta, public_key, now):
-    """Usage and reset quota for the current key. Usage and the resets used
-    reset on the 1st (UTC), so they are shown only from a sync in the
-    current UTC month; the limit and the allowance are not monthly."""
+    """Usage and reset quota for the current key. Usage resets on the 1st and
+    the resets used count per UTC month, so both are shown only from a sync
+    in the current UTC month; the limit and the allowance are not monthly."""
     same_key = public_key is not None and meta.get("publicKey") == public_key
     synced = _parse_iso(meta.get("lastSync")) if same_key else None
     synced = synced.astimezone(timezone.utc) if synced is not None else None
@@ -3020,7 +3204,6 @@ def _bandwidth_summary(meta, public_key, now):
         "limitGb": confirmed_bandwidth_limit(meta, public_key),
         "resetsThisMonth": valid_reset_count(meta.get("bandwidth_resets_this_month")) if this_month else None,
         "maxResetsPerMonth": valid_reset_count(meta.get("max_resets_per_month")) if same_key else None,
-        "resetThresholdPct": RESET_THRESHOLD_DEFAULT_PCT,
     }
 
 
@@ -3115,6 +3298,11 @@ def _nwc_summary(meta):
 NWC_MAX_RENEWAL_SATS = 500_000
 NWC_MAX_SATS_BY_DURATION = {1: 50_000, 3: 135_000, 6: 250_000, 12: 450_000}
 NWC_MAX_ATTEMPTS = 3
+NWC_MAX_RELAYS = 3
+# Overall monotonic time budget for maybe_nwc_auto_renew(), kept below
+# HEALTH_SUBSCRIPTION_TIMEOUT_MS (300_000 ms in startos/bridgeEnv.ts) so
+# _record_nwc_failure always runs before SubContainer.exec sends SIGKILL.
+NWC_AUTO_RENEW_DEADLINE_SECONDS = 180
 NWC_RETRY_DELAY = timedelta(hours=1)
 NWC_TRIGGER_WINDOW = timedelta(days=7)
 NWC_GRACE_WINDOW = timedelta(days=7)
@@ -3709,6 +3897,7 @@ def _connect_socks5h(target_host, target_port, timeout=15):
     if not (1 <= len(host_bytes) <= 255):
         raise NwcError("Invalid relay hostname for SOCKS5h proxy")
     deadline = time.monotonic() + timeout
+    sock = None
     try:
         sock = socket.create_connection((proxy_host, proxy_port), timeout=timeout)
         sock.settimeout(timeout)
@@ -3744,6 +3933,11 @@ def _connect_socks5h(target_host, target_port, timeout=15):
     except NwcError:
         raise
     except Exception as e:
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
         raise NwcError(f"Tor SOCKS5 proxy ({proxy_host}:{proxy_port}) connection failed: {e}")
 
 
@@ -3895,10 +4089,10 @@ def _ws_open(relay_url, route_via_tor=False, timeout=15):
         raise
 
 
-def nwc_execute_command(parsed_uri, method, params, route_via_tor=False, timeout=20):
+def nwc_execute_command(parsed_uri, method, params, route_via_tor=False, timeout=20, deadline=None):
     """Executes a single NIP-47 command (e.g. get_budget, get_balance,
-    lookup_invoice, pay_invoice) against the wallet's relays. Returns the
-    NIP-47 `result` dict or raises NwcError."""
+    lookup_invoice, pay_invoice) against up to NWC_MAX_RELAYS of the wallet's
+    relays. Returns the NIP-47 `result` dict or raises NwcError."""
     import secrets
     req_event, shared_key = _build_nip47_request_event(
         parsed_uri["secret"],
@@ -3907,16 +4101,24 @@ def nwc_execute_command(parsed_uri, method, params, route_via_tor=False, timeout
         params,
     )
     sub_id = f"ts-{secrets.token_hex(6)}"
-    relays = parsed_uri.get("relays") or []
+    relays = (parsed_uri.get("relays") or [])[:NWC_MAX_RELAYS]
     last_err = None
 
     for relay_url in relays:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                last_err = NwcError(f"Timed out waiting for NIP-47 {method} response from wallet")
+                break
+            attempt_timeout = min(float(timeout), remaining)
+        else:
+            attempt_timeout = float(timeout)
         sock = None
         try:
             sock = _ws_open(
                 relay_url,
                 route_via_tor=bool(route_via_tor or parsed_uri.get("hasOnionRelay")),
-                timeout=timeout,
+                timeout=attempt_timeout,
             )
             req_filter = {
                 "kinds": [23195],
@@ -3926,9 +4128,11 @@ def nwc_execute_command(parsed_uri, method, params, route_via_tor=False, timeout
             _ws_send_frame(sock, 0x1, json.dumps(["REQ", sub_id, req_filter]).encode("utf-8"))
             _ws_send_frame(sock, 0x1, json.dumps(["EVENT", req_event]).encode("utf-8"))
 
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                opcode, payload = _ws_recv_frame(sock, deadline=deadline)
+            req_deadline = time.monotonic() + attempt_timeout
+            if deadline is not None:
+                req_deadline = min(req_deadline, deadline)
+            while time.monotonic() < req_deadline:
+                opcode, payload = _ws_recv_frame(sock, deadline=req_deadline)
                 if opcode == 0x8:  # Close
                     break
                 if opcode == 0x9:  # Ping -> Pong
@@ -4008,13 +4212,22 @@ def nwc_renew_lock():
         os.close(fd)
 
 
-def _nwc_preflight_budget_check(parsed_uri, required_sats, route_via_tor=False):
+def _nwc_preflight_budget_check(parsed_uri, required_sats, route_via_tor=False, deadline=None):
     """Queries NIP-47 get_budget (and get_balance as a secondary check) before
     paying. Returns (ok: bool, error_code: str|None, message: str|None).
     Wallets that do not implement get_budget/get_balance are allowed to proceed
     to pay_invoice."""
+    if deadline is not None and time.monotonic() >= deadline:
+        return True, None, None
     try:
-        budget_res = nwc_execute_command(parsed_uri, "get_budget", {}, route_via_tor=route_via_tor, timeout=10)
+        budget_res = nwc_execute_command(
+            parsed_uri,
+            "get_budget",
+            {},
+            route_via_tor=route_via_tor,
+            timeout=10,
+            deadline=deadline,
+        )
         rem_msat = budget_res.get("remaining_budget")
         if isinstance(rem_msat, (int, float)) and not isinstance(rem_msat, bool) and rem_msat >= 0:
             rem_sats = int(rem_msat // 1000)
@@ -4027,8 +4240,18 @@ def _nwc_preflight_budget_check(parsed_uri, required_sats, route_via_tor=False):
     except NwcError:
         pass
 
+    if deadline is not None and time.monotonic() >= deadline:
+        return True, None, None
+
     try:
-        bal_res = nwc_execute_command(parsed_uri, "get_balance", {}, route_via_tor=route_via_tor, timeout=10)
+        bal_res = nwc_execute_command(
+            parsed_uri,
+            "get_balance",
+            {},
+            route_via_tor=route_via_tor,
+            timeout=10,
+            deadline=deadline,
+        )
         bal_msat = bal_res.get("balance")
         if isinstance(bal_msat, (int, float)) and not isinstance(bal_msat, bool) and bal_msat >= 0:
             bal_sats = int(bal_msat // 1000)
@@ -4044,7 +4267,7 @@ def _nwc_preflight_budget_check(parsed_uri, required_sats, route_via_tor=False):
     return True, None, None
 
 
-def _nwc_lookup_already_paid(parsed_uri, payment_hash, route_via_tor=False):
+def _nwc_lookup_already_paid(parsed_uri, payment_hash, route_via_tor=False, deadline=None):
     """Asks the wallet via NIP-47 lookup_invoice whether payment_hash was
     already settled. Returns True only on a positive settled answer."""
     try:
@@ -4054,6 +4277,7 @@ def _nwc_lookup_already_paid(parsed_uri, payment_hash, route_via_tor=False):
             {"payment_hash": payment_hash},
             route_via_tor=route_via_tor,
             timeout=10,
+            deadline=deadline,
         )
         if not isinstance(res, dict):
             return False
@@ -4103,7 +4327,7 @@ def _record_nwc_failure(wg_pubkey, payment_hash, err, now, force_fallback=False,
     return trip_fallback
 
 
-def maybe_nwc_auto_renew(wg_pubkey, now=None):
+def maybe_nwc_auto_renew(wg_pubkey, now=None, deadline_seconds=None):
     """Checks if the current subscription is within the NWC auto-renewal window
     (-7 days < remaining <= 7 days) and executes idempotent NIP-47 renewal.
     Serialized across processes via nwc_renew_lock()."""
@@ -4118,6 +4342,9 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
     with nwc_renew_lock() as acquired:
         if not acquired:
             return {"result": "busy", "message": "Another NWC auto-renewal check is already in progress."}
+
+        budget_s = NWC_AUTO_RENEW_DEADLINE_SECONDS if deadline_seconds is None else float(deadline_seconds)
+        renew_deadline = time.monotonic() + budget_s
 
         with meta_lock():
             meta = read_meta()
@@ -4226,7 +4453,7 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
                 return {"result": "already-paid", "paymentHash": payment_hash}
             nwc_was_attempted = bool(pending.get("paidViaNwc") or pending.get("nwcAttempted"))
             if nwc_was_attempted and _nwc_lookup_already_paid(
-                parsed_uri, payment_hash, route_via_tor=route_via_tor
+                parsed_uri, payment_hash, route_via_tor=route_via_tor, deadline=renew_deadline
             ):
                 with meta_lock():
                     fresh_meta = read_meta()
@@ -4403,11 +4630,21 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
             parsed_uri,
             verified_sats,
             route_via_tor=route_via_tor,
+            deadline=renew_deadline,
         )
         if not budget_ok:
             err = NwcError(budget_msg, code=budget_code or "QUOTA_EXCEEDED", permanent=True, budget=True)
             _record_nwc_failure(wg_pubkey, payment_hash, err, now, force_fallback=True, budget_warning=True)
             return {"result": "budget-insufficient", "paymentHash": payment_hash, "message": budget_msg}
+
+        if time.monotonic() >= renew_deadline:
+            err = NwcError("Timed out during NWC auto-renewal preflight before payment could be sent")
+            tripped = _record_nwc_failure(wg_pubkey, payment_hash, err, now)
+            return {
+                "result": "fallback-raised" if tripped else "retry-scheduled",
+                "paymentHash": payment_hash,
+                "message": str(err),
+            }
 
         # Re-verify under meta_lock that the wallet was not disconnected or
         # replaced during invoice creation / budget preflight, and mark
@@ -4451,6 +4688,7 @@ def maybe_nwc_auto_renew(wg_pubkey, now=None):
                 "pay_invoice",
                 {"invoice": invoice},
                 route_via_tor=route_via_tor,
+                deadline=renew_deadline,
             )
         except NwcError as e:
             tripped = _record_nwc_failure(

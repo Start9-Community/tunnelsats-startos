@@ -118,6 +118,7 @@ export interface SubscriptionMeta {
     targetNode?: TargetNode
     publicKey?: string
     raisePayTask?: boolean
+    payTaskClearedOnExpiry?: boolean
   } | null
   lastRecoveredOrder?: {
     paymentHash: string
@@ -512,11 +513,16 @@ const TOR_VERSION_RANGE = '>=0.4.9.11:2' as const
 
 /** The metadata fields that decide which nodes hold a Pay Invoice task. */
 export interface PayTaskMeta {
-  pendingOrder?: { paymentHash?: string; targetNode?: TargetNode } | null
+  pendingOrder?: {
+    paymentHash?: string
+    targetNode?: TargetNode
+    payTaskClearedOnExpiry?: boolean
+  } | null
   pendingRenewal?: {
     paymentHash?: string
     targetNode?: TargetNode
     raisePayTask?: boolean
+    payTaskClearedOnExpiry?: boolean
   } | null
   pendingReset?: { paymentHash?: string; targetNode?: TargetNode } | null
 }
@@ -540,6 +546,10 @@ function renewalPayNode(
  * outstanding.
  *
  * Not counted, because no task of theirs is outstanding:
+ * - an unpaid order or renewal whose BOLT11 invoice has expired and whose
+ *   task bridge.py already queued in `payTasksToClear` (`payTaskClearedOnExpiry`),
+ *   even though the entry stays until 24h after creation to catch any
+ *   payment made before expiry;
  * - an NWC renewal (`raisePayTask` false), which NWC pays without a task.
  *   On fallback the flag turns true, the task is raised and the flag is
  *   removed, so true and absent both count;
@@ -552,11 +562,15 @@ function payTaskNodes(
 ): PackageId[] {
   const nodes: PackageId[] = []
   const order = meta?.pendingOrder
-  if (order?.paymentHash && order.targetNode) {
+  if (order?.paymentHash && order.targetNode && !order.payTaskClearedOnExpiry) {
     nodes.push(resolvePackageId(order.targetNode))
   }
   const renewal = meta?.pendingRenewal
-  if (renewal?.paymentHash && renewal.raisePayTask !== false) {
+  if (
+    renewal?.paymentHash &&
+    renewal.raisePayTask !== false &&
+    !renewal.payTaskClearedOnExpiry
+  ) {
     nodes.push(resolvePackageId(renewalPayNode(renewal, config)))
   }
   const reset = meta?.pendingReset
@@ -744,7 +758,12 @@ export async function raiseFallbackRenewalPayTask(params: {
   clearRaiseFlag: (paymentHash: string) => Promise<unknown>
 }): Promise<boolean> {
   const pending = params.meta?.pendingRenewal
-  if (!pending?.raisePayTask || !pending.invoice || !pending.paymentHash) {
+  if (
+    !pending?.raisePayTask ||
+    pending.payTaskClearedOnExpiry ||
+    !pending.invoice ||
+    !pending.paymentHash
+  ) {
     return false
   }
   const targetNode = renewalPayNode(pending, params.config)

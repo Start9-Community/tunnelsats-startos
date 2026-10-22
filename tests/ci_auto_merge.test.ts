@@ -29,7 +29,6 @@ test('Dependabot Configuration - structured AST validation', () => {
     'startos-packages patterns must be an array',
   )
   for (const pkg of [
-    '@start9labs/start-sdk',
     'bitcoin-core-startos',
     'cln-startos',
     'eclair-startos',
@@ -41,6 +40,18 @@ test('Dependabot Configuration - structured AST validation', () => {
       `startos-packages must include ${pkg}`,
     )
   }
+
+  assert.ok(
+    !startosPatterns.includes('@start9labs/start-sdk'),
+    'SDK majors must not join companion git updates that bypass semver gating',
+  )
+  const semverGroup = npmUpdate.groups['minor-and-patch']
+  assert.deepStrictEqual(semverGroup['update-types'], ['minor', 'patch'])
+  assert.ok(semverGroup.patterns.includes('*'))
+  assert.ok(
+    !semverGroup['exclude-patterns'].includes('@start9labs/start-sdk'),
+    'SDK minor and patch updates belong in the semver-gated group',
+  )
 
   const actionsUpdate = parsed.updates.find(
     (u: any) => u['package-ecosystem'] === 'github-actions',

@@ -59,9 +59,11 @@ class _LoopbackNip47Server:
     def close(self):
         self._closed = True
         try:
-            self._sock.close()
-        except Exception:
+            self._sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
             pass
+        self._sock.close()
+        self._thread.join()
 
     def _AcceptLoop(self):
         while not self._closed:

@@ -12,7 +12,6 @@ updates:
     groups:
       startos-packages:
         patterns:
-          - "@start9labs/start-sdk"
           - "bitcoin-core-startos"
           - "cln-startos"
           - "eclair-startos"
@@ -23,7 +22,6 @@ updates:
         patterns:
           - "*"
         exclude-patterns:
-          - "@start9labs/start-sdk"
           - "bitcoin-core-startos"
           - "cln-startos"
           - "eclair-startos"

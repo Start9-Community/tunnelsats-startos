@@ -89,7 +89,7 @@ tasks:
 
 | Subcontainer | Base Image             | Entrypoint             | Purpose                                                                    |
 | ------------ | ---------------------- | ---------------------- | -------------------------------------------------------------------------- |
-| `main`       | Alpine 3.19 (Python 3) | `docker_entrypoint.sh` | Serves web UI on port 80 and runs the subscription synchronization daemon. |
+| `main`       | Alpine 3.21 (Python 3) | `docker_entrypoint.sh` | Serves web UI on port 80 and runs the subscription synchronization daemon. |
 
 ## File Models
 

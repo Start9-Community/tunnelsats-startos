@@ -1,18 +1,18 @@
 import { IMPOSSIBLE, VersionInfo } from '@start9labs/start-sdk'
 
 export const current = VersionInfo.of({
-  version: '1.0.0:1',
+  version: '1.0.0:2',
   releaseNotes: {
     en_US:
-      'TunnelSats shows as running while a node handoff or a payment is pending. Restarting TunnelSats while it starts up leaves exactly one copy of it running.',
+      'Upgrade the container runtime to Alpine 3.21 and distrust compromised eMudhra (emSign) root CAs.',
     es_ES:
-      'TunnelSats aparece en ejecución mientras hay pendiente un traspaso de nodo o un pago. Reiniciar TunnelSats mientras arranca deja exactamente una copia en ejecución.',
+      'Actualiza el entorno de contenedor a Alpine 3.21 y revoca la confianza en las CA raíz comprometidas de eMudhra (emSign).',
     de_DE:
-      'TunnelSats wird als laufend angezeigt, solange eine Knotenübergabe oder eine Zahlung aussteht. Ein Neustart von TunnelSats während des Startvorgangs lässt genau eine Instanz laufen.',
+      'Aktualisiert die Container-Laufzeitumgebung auf Alpine 3.21 und entzieht kompromittierten eMudhra (emSign) Root-CAs das Vertrauen.',
     pl_PL:
-      'TunnelSats jest pokazywany jako uruchomiony, gdy oczekuje przekazanie węzła lub płatność. Ponowne uruchomienie TunnelSats podczas startu pozostawia dokładnie jedną działającą kopię.',
+      'Aktualizuje środowisko kontenera do Alpine 3.21 i wycofuje zaufanie dla skompromitowanych głównych urzędów certyfikacji eMudhra (emSign).',
     fr_FR:
-      'TunnelSats apparaît comme en cours d’exécution tant qu’un transfert de nœud ou un paiement est en attente. Redémarrer TunnelSats pendant son démarrage laisse exactement une seule copie en cours d’exécution.',
+      'Met à niveau l’environnement d’exécution du conteneur vers Alpine 3.21 et révoque la confiance accordée aux autorités de certification racines eMudhra (emSign) compromises.',
   },
   migrations: {
     up: async ({ effects }) => {},

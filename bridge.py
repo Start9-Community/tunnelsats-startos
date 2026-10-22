@@ -1139,21 +1139,25 @@ def assemble_claimed_config(claim, pending):
     return "\n".join(lines) + "\n"
 
 
+def _queue_pay_task_clear(meta, kind, pending):
+    node = pending.get("targetNode") or (get_target_node() if kind == "renewal" else None)
+    if node not in TARGET_NODES:
+        return
+    tasks = [t for t in meta.get("payTasksToClear") or [] if isinstance(t, str)]
+    replay_id = pay_task_replay_id(kind, node, pending["paymentHash"])
+    if replay_id not in tasks:
+        tasks.append(replay_id)
+    meta["payTasksToClear"] = tasks
+
+
 def _clear_pending(meta, key, payment_hash, confirmed_expiry=None):
     """Drops meta[key] if it still belongs to payment_hash and queues its pay
     task for clearing. Caller holds meta_lock and writes meta afterwards."""
     pending = meta.get(key)
     if not isinstance(pending, dict) or pending.get("paymentHash") != payment_hash:
         return False
-    kind = KIND_BY_KEY[key]
-    node = pending.get("targetNode")
+    _queue_pay_task_clear(meta, KIND_BY_KEY[key], pending)
     meta.pop(key, None)
-    if node in TARGET_NODES:
-        tasks = [t for t in meta.get("payTasksToClear") or [] if isinstance(t, str)]
-        replay_id = pay_task_replay_id(kind, node, payment_hash)
-        if replay_id not in tasks:
-            tasks.append(replay_id)
-        meta["payTasksToClear"] = tasks
     if key == "pendingRenewal" and confirmed_expiry is not None:
         nwc_state = dict(meta.get("nwcAutoRenewState")) if isinstance(meta.get("nwcAutoRenewState"), dict) else {}
         if pending.get("paidViaNwc") is True or nwc_state.get("lastPaidHash") == payment_hash:
@@ -1244,13 +1248,8 @@ def _unpaid(kind, key, pending, state, now):
                     if "raisePayTask" in current:
                         current["raisePayTask"] = False
                         pending["raisePayTask"] = False
-                    node = current.get("targetNode") or pending.get("targetNode")
-                    if had_pay_task and node in TARGET_NODES:
-                        tasks = [t for t in meta.get("payTasksToClear") or [] if isinstance(t, str)]
-                        replay_id = pay_task_replay_id(kind, node, payment_hash)
-                        if replay_id not in tasks:
-                            tasks.append(replay_id)
-                        meta["payTasksToClear"] = tasks
+                    if had_pay_task:
+                        _queue_pay_task_clear(meta, kind, current)
                     atomic_write_json(META_FILE_PATH, meta)
         action_name = "Buy Subscription" if kind == "order" else "Renew Subscription"
         retention_until = _iso(created + PENDING_TTL) if created is not None else "24 hours after creation"

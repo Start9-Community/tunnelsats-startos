@@ -858,7 +858,7 @@ class TestRenewalSettlement(SettlementTestBase):
         self.assertEqual(outcome["result"], "superseded")
         self.assertIn("earlier version", outcome["message"])
         self.assertNotIn("pendingRenewal", self.read_meta())
-        self.assertEqual(result["clearPayTasks"], [])
+        self.assertEqual(result["clearPayTasks"], ["tunnelsats-renewal:lnd:" + RENEW_HASH[:16]])
         self.assertNotIn(("POST", "/subscription/status"), [(m, p) for m, p, _ in self.api.requests])
 
     def test_unpaid_legacy_renewal_still_waits_and_expires(self):
@@ -919,6 +919,25 @@ class TestRenewalSettlement(SettlementTestBase):
         settled = self.settle(now=NOW + timedelta(hours=3))
         self.assertEqual(self.only(settled)["result"], "renewed")
         self.assertNotIn("pendingRenewal", self.read_meta())
+
+    def test_legacy_renewal_expiry_clears_the_task_on_its_fallback_node(self):
+        self.api.on("GET", f"/subscription/{RENEW_HASH}", response({"status": "unpaid"}))
+        for config, node in (({}, "lnd"), ({"target-node": "eclair"}, "eclair")):
+            with self.subTest(config=config):
+                with open(bridge.APP_CONFIG_PATH, "w") as f:
+                    json.dump(config, f)
+                pending = self.pending_renewal(
+                    createdAt=iso(NOW - timedelta(hours=2)),
+                    expiresAt=iso(NOW - timedelta(hours=1)),
+                )
+                pending.pop("targetNode")
+                self.write_meta({"pendingRenewal": pending})
+                task = f"tunnelsats-renewal:{node}:{RENEW_HASH[:16]}"
+                first = self.settle()
+                self.assertEqual(first["clearPayTasks"], [task])
+                self.assertIs(self.read_meta()["pendingRenewal"]["payTaskClearedOnExpiry"], True)
+                bridge.ack_pay_tasks([task])
+                self.assertEqual(self.settle()["clearPayTasks"], [])
 
     def test_unpaid_nwc_renewal_expiry_respects_raise_pay_task_flag(self):
         created_at = NOW - timedelta(hours=2)
